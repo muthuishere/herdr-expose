@@ -785,3 +785,112 @@ button {
     padding: 10px 12px;
   }
 }
+
+/* ---------------------------------------------------------------- pairing */
+
+/* Phone screen first: pairing only ever happens on a phone. */
+.pair {
+  height: var(--app-height);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: calc(var(--safe-top) + 20px) calc(var(--safe-right) + 18px)
+    calc(var(--safe-bottom) + 20px) calc(var(--safe-left) + 18px);
+}
+
+.pair-card {
+  width: 100%;
+  max-width: 420px;
+}
+
+.pair-title {
+  font-size: 22px;
+  font-weight: 700;
+  margin: 0 0 8px;
+  letter-spacing: -0.02em;
+}
+
+.pair-sub {
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--fg-dim);
+  margin: 0 0 22px;
+}
+
+.pair-sub code {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  background: var(--bg-3);
+  padding: 2px 6px;
+  border-radius: 5px;
+  color: var(--fg);
+}
+
+.pair-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pair-input {
+  width: 100%;
+  height: 60px;
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--fg);
+  font-family: var(--mono);
+  /* 16px+ so iOS Safari does not zoom the page on focus. */
+  font-size: 26px;
+  letter-spacing: 0.34em;
+  text-align: center;
+  text-indent: 0.34em;
+  text-transform: uppercase;
+}
+
+.pair-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.pair-input::placeholder {
+  color: var(--fg-faint);
+  letter-spacing: 0.34em;
+}
+
+.pair-submit {
+  height: 50px;
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: #06090d;
+  font-weight: 700;
+  font-size: 15px;
+}
+
+.pair-submit:disabled {
+  background: var(--bg-3);
+  color: var(--fg-faint);
+}
+
+.pair-error {
+  margin: 14px 0 0;
+  font-size: 13px;
+  color: #ff8b8b;
+}
+
+.pair-hint {
+  margin: 14px 0 0;
+  font-size: 12px;
+  color: var(--fg-faint);
+}
+
+.envnote {
+  margin: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  color: var(--fg-dim);
+  font-size: 12px;
+  line-height: 1.5;
+}

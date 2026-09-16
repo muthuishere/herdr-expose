@@ -271,7 +271,16 @@ function fontsReady(timeoutMs = 1500): Promise<void> {
  * from the console or the harness as `__herdrEcho()`.
  */
 function exposeEchoStats(echo: PredictiveEcho) {
-  ;(window as unknown as { __herdrEcho?: () => unknown }).__herdrEcho = () => echo.stats()
+  const w = window as unknown as {
+    __herdrEcho?: () => unknown
+    __herdrEchoOff?: () => void
+    __herdrEchoOn?: () => void
+  }
+  w.__herdrEcho = () => echo.stats()
+  // A/B switch for the latency harness — predictive echo has to be MEASURED
+  // against itself being off, not asserted.
+  w.__herdrEchoOff = () => echo.setEnabled(false)
+  w.__herdrEchoOn = () => echo.setEnabled(true)
 }
 
 /** Focus the hidden textarea deliberately — only from an explicit user action. */

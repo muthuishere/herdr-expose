@@ -29,7 +29,7 @@ import type {
   WelcomeData,
 } from '../protocol/types'
 import { MIN_COLS, MIN_ROWS } from '../protocol/types'
-import { apply, getState, resetSession, setLink } from '../store/store'
+import { apply, getState, resetSession, setAuthRequired, setLink } from '../store/store'
 import { pushBytes } from './byteBus'
 import { streamUrl } from './auth'
 
@@ -78,6 +78,8 @@ export function setTransportFactory(f: TransportFactory) {
 
 export function connect(): void {
   stopped = false
+  attempt = 0
+  setAuthRequired(false)
   openSocket()
 }
 
@@ -139,6 +141,15 @@ function openSocket() {
   sock.onclose = (ev) => {
     clearInterval(pingTimer)
     if (stopped) return
+    // 1008 policy violation / 4401 / 4403 are "your credentials are the
+    // problem". Retrying cannot fix that, and a reconnect loop against an auth
+    // failure is just a log flood. Surface the pairing screen instead.
+    if (ev?.code === 1008 || ev?.code === 4401 || ev?.code === 4403) {
+      stopped = true
+      setAuthRequired(true)
+      setLink('offline', ev.reason || 'This device is not paired.')
+      return
+    }
     const reason = ev?.reason || (ev?.code === 1006 ? 'connection lost' : 'disconnected')
     scheduleReconnect(reason)
   }

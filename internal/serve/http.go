@@ -24,7 +24,16 @@ import (
 // live hashed in state, never in config (SPEC amendment B5).
 type Config interface {
 	Port() int
+	// Bind is the RESOLVED bind address (SPEC E1): internal/expose decides it
+	// from the exposure mode and hands it to the config store. The serve layer
+	// must never pick one itself.
 	Bind() string
+	// Mode is the resolved exposure mode: cloudflare | ngrok | js | lan | local.
+	Mode() string
+	// AllowedOrigins is the mode-correct origin allowlist, which in lan mode
+	// includes the LAN origin. It comes from expose.Manager.AllowedOrigins and
+	// is re-read on every request so a DHCP lease change is picked up without a
+	// restart.
 	AllowedOrigins() []string
 	UI() map[string]any
 }
@@ -69,9 +78,12 @@ func New(o Options) (*Server, error) {
 	if o.Log == nil {
 		o.Log = slog.Default()
 	}
+	// The mode decides the bind address (E1). LAN mode deliberately binds
+	// 0.0.0.0; that is safe only because a device token is then mandatory and
+	// the pairing QR is displayed locally, never served.
 	bind := o.Config.Bind()
-	if !isLoopback(bind) {
-		return nil, fmt.Errorf("serve: refusing to bind %q; loopback only, exposure is always a tunnel", bind)
+	if bind == "" {
+		bind = "127.0.0.1"
 	}
 	s := &Server{
 		Version:  o.Version,
@@ -106,14 +118,6 @@ func New(o Options) (*Server, error) {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	return s, nil
-}
-
-func isLoopback(bind string) bool {
-	if bind == "localhost" {
-		return true
-	}
-	ip := net.ParseIP(bind)
-	return ip != nil && ip.IsLoopback()
 }
 
 // Addr is the listen address.
@@ -209,6 +213,14 @@ func (s *Server) originAllowed(r *http.Request, origin string) bool {
 	if s.local.originPinned(origin) {
 		return true
 	}
+	// The allowlist is owned by internal/expose and re-read every time: in lan
+	// mode it contains the LAN origin, and the LAN IP can move under DHCP.
+	o := strings.ToLower(strings.TrimSpace(origin))
+	for _, want := range s.cfg.AllowedOrigins() {
+		if strings.ToLower(strings.TrimSpace(want)) == o {
+			return true
+		}
+	}
 	return s.auth.OriginAllowed(origin)
 }
 
@@ -238,6 +250,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			"min_cols": core.MinCols, "min_rows": core.MinRows,
 		},
 	}
+	out["mode"] = s.cfg.Mode()
 	if s.exposure != nil {
 		if url, healthy := s.exposure.Status(); url != "" {
 			out["exposure"] = map[string]any{"url": url, "healthy": healthy}
@@ -387,6 +400,9 @@ func (s *Server) Serve(ctx context.Context) error {
 	if s.local.enabled {
 		s.log.Info("local mode: loopback listener, device token not required",
 			"origin_pinning", true, "host_pinning", true)
+	} else {
+		s.log.Warn("non-loopback listener: a device token is REQUIRED on every route",
+			"bind", s.addr, "mode", s.cfg.Mode())
 	}
 	go func() {
 		<-ctx.Done()

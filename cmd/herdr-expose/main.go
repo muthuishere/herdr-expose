@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -41,7 +42,9 @@ func main() {
 	case "daemon":
 		err = cmdDaemon()
 	case "status":
-		err = cmdStatus()
+		err = cmdStatus(os.Args[2:])
+	case "open":
+		err = cmdOpen()
 	case "stop":
 		err = cmdStop()
 	case "pair":
@@ -75,9 +78,11 @@ func usage() {
 
   serve                 run the server in the foreground (flock; quiet exit if held)
   daemon                fork-exec serve detached and exit 0 immediately
-  status                show server, upstream, devices and exposure state
+  status [--watch]      show server, upstream, devices and exposure state
+  open                  open the local (or exposed) URL in a browser
   stop                  stop a running server
-  pair [--name NAME]    mint a one-time pairing code and show its QR LOCALLY
+  pair [--name NAME] [--pane]
+                        mint a one-time pairing code and show its QR LOCALLY
   install-service       install and load the launchd / systemd --user unit
   uninstall-service     remove it
   devices [--revoke ID] list or revoke paired devices
@@ -96,26 +101,48 @@ func newLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl}))
 }
 
-// cfgAdapter adapts internal/config (workstream C) onto the narrow interface
-// internal/serve consumes, so neither package depends on the other.
-type cfgAdapter struct{ c *config.Config }
-
-func (a cfgAdapter) Port() int    { return a.c.Port() }
-func (a cfgAdapter) Bind() string { return a.c.Bind() }
-func (a cfgAdapter) AllowedOrigins() []string {
-	return a.c.Server.AllowedOrigins
+// cfgAdapter adapts the config store (workstream C) plus the exposure manager
+// onto the narrow interface internal/serve consumes, so neither package depends
+// on the other.
+//
+// Bind and Mode come from the store AFTER expose.Resolution has written them in
+// with SetBinding: the resolved mode decides the bind address, never this layer.
+// AllowedOrigins is read live from the manager so a DHCP lease change updates
+// the LAN origin without a restart.
+type cfgAdapter struct {
+	store *config.Store
+	mgr   *expose.Manager
 }
+
+func (a cfgAdapter) Port() int    { return a.store.Port() }
+func (a cfgAdapter) Bind() string { return a.store.Bind() }
+func (a cfgAdapter) Mode() string { return a.store.Mode() }
+
+func (a cfgAdapter) AllowedOrigins() []string {
+	return a.mgr.AllowedOrigins(a.store.Current().Server.AllowedOrigins)
+}
+
 func (a cfgAdapter) UI() map[string]any {
-	return map[string]any{"theme": a.c.UI.Theme, "default_view": a.c.UI.DefaultView}
+	c := a.store.Current()
+	return map[string]any{"theme": c.UI.Theme, "default_view": c.UI.DefaultView}
+}
+
+// exposeAdapter surfaces the tunnel URL in /v1/config.
+type exposeAdapter struct{ mgr *expose.Manager }
+
+func (e exposeAdapter) Status() (string, bool) {
+	st := e.mgr.Status()
+	return e.mgr.URL(), st.Healthy
 }
 
 func cmdServe() error {
 	log := newLogger()
 
-	cfg, err := config.Load()
+	store, err := config.Open()
 	if err != nil {
 		return err
 	}
+	cfg := store.Current()
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
@@ -124,8 +151,24 @@ func cmdServe() error {
 		return err
 	}
 
+	// Resolve the exposure mode FIRST: it decides the bind address (SPEC E1).
+	// cloudflare + domain but no cloudflared binary falls back to lan loudly
+	// rather than failing.
+	mgr := exposeManagerFor(cfg, state)
+	defer mgr.Close()
+	res := mgr.Resolution()
+	if res.FellBack != "" {
+		log.Warn("exposure fell back", "reason", res.FellBack, "mode", res.Mode)
+	}
+	if err := store.SetBinding(res.Mode, res.Bind); err != nil {
+		return err
+	}
+	log.Info("exposure resolved", "mode", res.Mode, "bind", res.Bind,
+		"url", res.URL, "secure_context", res.SecureContext)
+
+	addr := fmt.Sprintf("%s:%d", store.Bind(), store.Port())
+
 	// Layer 3: never fight a manager for the port.
-	addr := fmt.Sprintf("%s:%d", cfg.Bind(), cfg.Port())
 	if managed, who := managerInCharge(); managed && os.Getenv("HERDR_EXPOSE_SUPERVISED") == "" {
 		log.Info("a service manager supervises herdr-expose; not starting a second copy", "manager", who)
 		return nil
@@ -156,7 +199,8 @@ func cmdServe() error {
 		return errors.New("HERDR_SOCKET_PATH is not set; run inside a Herdr session or export it")
 	}
 
-	auth, err := serve.NewAuth(state, log, cfg.Server.AllowedOrigins)
+	adapter := cfgAdapter{store: store, mgr: mgr}
+	auth, err := serve.NewAuth(state, log, adapter.AllowedOrigins())
 	if err != nil {
 		return err
 	}
@@ -165,26 +209,46 @@ func cmdServe() error {
 	} else if created {
 		// Shown exactly once: only the SHA-256 is stored.
 		fmt.Fprintf(os.Stderr, "\n  herdr-expose server token (shown once):\n\n    %s\n\n", tok)
-		fmt.Fprintf(os.Stderr, "  open: http://%s/?token=%s\n\n", addr, tok)
+		fmt.Fprintf(os.Stderr, "  open: %s/?token=%s\n\n", res.URL, tok)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(),
 		syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// SIGHUP re-reads config, re-resolves the mode and the LAN IP.
+	go store.WatchSignals(ctx)
+	store.OnChange(func(c *config.Config) {
+		r := mgr.SetExpose(c.Expose, c.Port())
+		if err := store.SetBinding(r.Mode, r.Bind); err != nil {
+			log.Warn("rebinding after reload failed", "err", err)
+		}
+		log.Info("config reloaded", "mode", r.Mode, "url", r.URL)
+	})
+
 	client := upstream.NewClient("")
-	store := core.NewStore(client, log)
-	go store.Run(ctx)
-	hub := core.NewHub(store, log)
+	st := core.NewStore(client, log)
+	go st.Run(ctx)
+	hub := core.NewHub(st, log)
 	go hub.Run(ctx)
 
+	// In lan/local there is nothing to start — the listener IS the exposure.
+	if cfg.Expose.ShouldAutostart() || res.Remote {
+		go func() {
+			if _, err := mgr.Start(ctx); err != nil {
+				log.Warn("exposure did not start", "err", err)
+			}
+		}()
+	}
+
 	srv, err := serve.New(serve.Options{
-		Version: version,
-		Config:  cfgAdapter{cfg},
-		Hub:     hub,
-		Auth:    auth,
-		Log:     log,
-		Static:  webFS(), // nil unless workstream D wired an embedded bundle
+		Version:  version,
+		Config:   adapter,
+		Hub:      hub,
+		Auth:     auth,
+		Log:      log,
+		Static:   webFS(), // nil unless workstream D wired an embedded bundle
+		Exposure: exposeAdapter{mgr},
 	})
 	if err != nil {
 		return err
@@ -249,7 +313,48 @@ func cmdStop() error {
 	return nil
 }
 
-func cmdStatus() error {
+// cmdOpen opens the resolved URL. The Herdr plugin manifest invokes it as
+// `hex:open`, and the `hex:expose-url` link handler routes clicked pane URLs
+// here.
+func cmdOpen() error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	url := exposeManager(cfg).Resolution().URL
+	fmt.Println(url)
+	switch runtime.GOOS {
+	case "darwin":
+		return exec.Command("open", url).Start()
+	case "linux":
+		return exec.Command("xdg-open", url).Start()
+	}
+	return nil
+}
+
+// cmdStatus renders status once, or repaints it on a timer with --watch (the
+// manifest's `hex:status` overlay pane runs it that way).
+func cmdStatus(args []string) error {
+	watch := false
+	for _, a := range args {
+		if a == "--watch" {
+			watch = true
+		}
+	}
+	if !watch {
+		return statusOnce()
+	}
+	for {
+		// Repaint in place: clear screen, home cursor.
+		fmt.Print("\x1b[2J\x1b[H")
+		if err := statusOnce(); err != nil {
+			fmt.Fprintln(os.Stderr, "status:", err)
+		}
+		time.Sleep(2 * time.Second)
+	}
+}
+
+func statusOnce() error {
 	state, err := StateDir()
 	if err != nil {
 		return err
@@ -258,9 +363,21 @@ func cmdStatus() error {
 	if err != nil {
 		return err
 	}
-	addr := fmt.Sprintf("%s:%d", cfg.Bind(), cfg.Port())
-	fmt.Printf("version   %s\nconfig    %s\nstate     %s\nlisten    http://%s\n",
-		version, cfg.Path(), state, addr)
+	mgr := exposeManager(cfg)
+	defer mgr.Close()
+	res := mgr.Resolution()
+	addr := fmt.Sprintf("%s:%d", res.Bind, res.Port)
+	fmt.Printf("version   %s\nconfig    %s\nstate     %s\nmode      %s\nlisten    http://%s\nurl       %s\n",
+		version, cfg.Path(), state, res.Mode, addr, res.URL)
+	if res.FellBack != "" {
+		fmt.Println("fallback ", res.FellBack)
+	}
+	if !res.SecureContext {
+		fmt.Println("note      not a secure context: no PWA install / service worker on this URL")
+	}
+	if u := mgr.URL(); u != "" && u != res.URL {
+		fmt.Println("tunnel   ", u)
+	}
 	if managed, who := managerInCharge(); managed {
 		fmt.Println("manager  ", who)
 	} else {
@@ -310,9 +427,13 @@ func cmdStatus() error {
 // POST /v1/pair only REDEEMS a code that was displayed locally.
 func cmdPair(args []string) error {
 	name := "device"
-	for i := 0; i < len(args)-1; i++ {
-		if args[i] == "--name" {
+	pane := false
+	for i, a := range args {
+		if a == "--name" && i+1 < len(args) {
 			name = args[i+1]
+		}
+		if a == "--pane" {
+			pane = true
 		}
 	}
 	state, err := StateDir()
@@ -332,22 +453,39 @@ func cmdPair(args []string) error {
 		return err
 	}
 
-	// Point the phone at the tunnel origin when there is one, so the scan lands
-	// straight on the PWA. Fall back to loopback for same-machine pairing.
-	origin := fmt.Sprintf("http://%s:%d", cfg.Bind(), cfg.Port())
-	if cfg.Expose.Domain != "" {
-		origin = "https://" + cfg.Expose.Domain
-	} else if mgr := exposeManager(cfg); mgr != nil {
-		if u := mgr.URL(); u != "" {
-			origin = strings.TrimRight(u, "/")
+	// Point the phone at whatever origin it can actually reach: the tunnel
+	// domain when exposed, the LAN IP on wifi, loopback otherwise.
+	mgr := exposeManager(cfg)
+	defer mgr.Close()
+	res := mgr.Resolution()
+	origin := strings.TrimRight(res.URL, "/")
+	if u := mgr.URL(); u != "" {
+		origin = strings.TrimRight(u, "/")
+	}
+	if origin == "" {
+		if ip := expose.PrimaryLANIP(); ip != "" {
+			origin = fmt.Sprintf("http://%s:%d", ip, cfg.Port())
+		} else {
+			origin = fmt.Sprintf("http://127.0.0.1:%d", cfg.Port())
 		}
 	}
 	url := fmt.Sprintf("%s/?pair=%s", origin, code)
 
-	fmt.Printf("\n  scan this on the phone — it is shown ONLY here, never over the tunnel\n\n")
+	if pane {
+		// Rendered inside the Herdr overlay pane (`hex:pair-qr`): centre the
+		// essentials, no log noise.
+		fmt.Print("\x1b[2J\x1b[H")
+	}
+	fmt.Printf("\n  scan this on the phone — shown ONLY here, never sent over the tunnel\n\n")
 	printQR(url)
 	fmt.Printf("\n  pairing code: %s   (for %q)\n  valid until:  %s\n  url:          %s\n\n",
 		code, name, exp.Format(time.Kitchen), url)
+	if pane {
+		// The overlay pane closes when the command exits; hold it open so the
+		// QR stays scannable for the life of the code.
+		fmt.Println("  (this pane stays open until the code expires)")
+		time.Sleep(time.Until(exp))
+	}
 	return nil
 }
 
@@ -414,17 +552,21 @@ func cmdService(args []string) error {
 	return fmt.Errorf("unknown service subcommand %q", args[0])
 }
 
-// exposeManager builds a tunnel manager from config.
-func exposeManager(cfg *config.Config) *expose.Manager {
-	state, _ := StateDir()
+// exposeManagerFor builds a tunnel manager from config.
+func exposeManagerFor(cfg *config.Config, state string) *expose.Manager {
 	root := os.Getenv("HERDR_PLUGIN_ROOT")
 	if root == "" {
 		root, _ = os.Getwd()
 	}
 	return expose.New(expose.Options{
 		Port: cfg.Port(), Expose: cfg.Expose, Root: root, StateDir: state,
-		Logf: func(f string, a ...any) { fmt.Printf(f+"\n", a...) },
+		Logf: func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) },
 	})
+}
+
+func exposeManager(cfg *config.Config) *expose.Manager {
+	state, _ := StateDir()
+	return exposeManagerFor(cfg, state)
 }
 
 func cmdExpose(args []string) error {

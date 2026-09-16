@@ -46,6 +46,11 @@ export interface AppState {
   lastError: string | null
   /** Consecutive failed connection attempts. */
   attempt: number
+  /**
+   * The server refused us for auth reasons. We stop retrying and show the
+   * pairing screen — hammering a closed door is not a reconnect strategy.
+   */
+  authRequired: boolean
 
   tree: TreeData
   /** Flat index built from the tree ONLY for O(1) lookup — not structure. */
@@ -75,6 +80,7 @@ const initial: AppState = {
   welcome: null,
   lastError: null,
   attempt: 0,
+  authRequired: false,
   tree: EMPTY_TREE,
   panesById: {},
   runtime: {},
@@ -308,6 +314,10 @@ export function setLink(link: LinkState, err?: string | null, attempt?: number) 
     attempt: attempt ?? state.attempt,
     rttMs: link === 'offline' || link === 'reconnecting' ? null : state.rttMs,
   })
+}
+
+export function setAuthRequired(v: boolean) {
+  set({ authRequired: v })
 }
 
 export function setFocused(id: PaneId | null) {

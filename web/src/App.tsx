@@ -7,7 +7,7 @@
  * (SPEC B8).
  */
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { PaneId } from './protocol/types'
 import { useStore, setFocused } from './store/store'
 import { useIsMobile } from './hooks/useViewport'
@@ -15,6 +15,10 @@ import { PaneList } from './components/PaneList'
 import { PaneView } from './components/PaneView'
 import { ConnectionBadge } from './components/AgentBadge'
 import { DesktopGrid } from './components/DesktopGrid'
+import { PairScreen } from './components/PairScreen'
+import { takePairCodeFromUrl } from './net/pair'
+import { envStatus } from './net/env'
+import { connect } from './net/connection'
 
 export function App() {
   const isMobile = useIsMobile()
@@ -25,7 +29,12 @@ export function App() {
   const focused = useStore((s) => s.focused)
   const panesById = useStore((s) => s.panesById)
 
+  const authRequired = useStore((s) => s.authRequired)
   const [open, setOpen] = useState<PaneId | null>(null)
+  // Consumed once, synchronously, before the first paint: the QR deep link
+  // `/?pair=<code>` must not survive into history or a screenshot.
+  const [pairCode, setPairCode] = useState<string | null>(() => takePairCodeFromUrl())
+  const env = useMemo(() => envStatus(), [])
 
   const openPane = useCallback((id: PaneId) => {
     setOpen(id)
@@ -53,6 +62,19 @@ export function App() {
 
   const disconnected = link === 'offline' || link === 'reconnecting'
 
+  // Pairing takes over the whole screen: nothing else is usable without it.
+  if (authRequired || pairCode) {
+    return (
+      <PairScreen
+        initialCode={pairCode}
+        onPaired={() => {
+          setPairCode(null)
+          connect()
+        }}
+      />
+    )
+  }
+
   if (isMobile) {
     return (
       <div className="app app-mobile">
@@ -66,6 +88,7 @@ export function App() {
             </header>
             <main className="scroll">
               {disconnected ? <Disconnected link={link} error={lastError} /> : null}
+              {env.note ? <EnvNote note={env.note} /> : null}
               <PaneList onOpen={openPane} selected={focused} />
             </main>
           </>
@@ -87,12 +110,25 @@ export function App() {
       </aside>
       <main className="main">
         {disconnected ? <Disconnected link={link} error={lastError} /> : null}
+        {env.note ? <EnvNote note={env.note} /> : null}
         {open ? (
           <PaneView target={open} onBack={closePane} />
         ) : (
           <DesktopGrid onOpen={openPane} />
         )}
       </main>
+    </div>
+  )
+}
+
+/**
+ * States a real limitation plainly instead of silently not offering install.
+ * See net/env.ts — a LAN IP over plain HTTP is not a secure context.
+ */
+function EnvNote({ note }: { note: string }) {
+  return (
+    <div className="envnote" role="note">
+      {note}
     </div>
   )
 }

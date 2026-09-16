@@ -491,6 +491,37 @@ function readRttParam(): number {
   }
 }
 
+/**
+ * Mock `POST /v1/pair` so the QR deep-link flow can be exercised end to end
+ * without the Go server. Any 6-char code is accepted EXCEPT "EXPIRE", which
+ * fails, so the error path is reachable in dev too.
+ */
+export function installMockHttp(): void {
+  const real = window.fetch.bind(window)
+  window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+    if (!url.includes('/v1/pair')) return real(input as RequestInfo, init)
+
+    let code = ''
+    try {
+      code = (JSON.parse(String(init?.body ?? '{}')) as { code?: string }).code ?? ''
+    } catch {
+      code = ''
+    }
+    await new Promise((r) => setTimeout(r, 220))
+    if (code.toUpperCase() === 'EXPIRE' || code.length !== 6) {
+      return new Response(JSON.stringify({ error: 'That code has expired.' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    return new Response(
+      JSON.stringify({ token: `mock-device-${code.toLowerCase()}`, expires_in: 2592000 }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    )
+  }
+}
+
 export const mockTransportFactory: TransportFactory = () => new MockSocket()
 
 export function isMockEnabled(): boolean {

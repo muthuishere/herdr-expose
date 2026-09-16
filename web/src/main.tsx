@@ -15,8 +15,9 @@ installViewportDriver()
 // VITE_MOCK=1 swaps the transport only. Zero component changes when the real
 // Go server lands.
 if (import.meta.env.VITE_MOCK === '1' || import.meta.env.VITE_MOCK === 'true') {
-  const { mockTransportFactory } = await import('./mock/mockServer')
+  const { mockTransportFactory, installMockHttp } = await import('./mock/mockServer')
   setTransportFactory(mockTransportFactory)
+  installMockHttp()
 }
 
 connect()
