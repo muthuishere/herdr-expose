@@ -14,9 +14,15 @@ import { normalizeCode, redeemPairCode } from '../net/pair'
 
 export function PairScreen({
   initialCode,
+  notice,
   onPaired,
 }: {
   initialCode?: string | null
+  /**
+   * Why we are here. "never paired" and "your device was revoked" are
+   * different events and the second one must not look like the first.
+   */
+  notice?: string | null
   onPaired: () => void
 }) {
   const [code, setCode] = useState(initialCode ?? '')
@@ -54,6 +60,11 @@ export function PairScreen({
     <div className="pair">
       <div className="pair-card">
         <h1 className="pair-title">Pair this device</h1>
+        {notice ? (
+          <p className="pair-notice" role="status">
+            {notice}
+          </p>
+        ) : null}
         <p className="pair-sub">
           Run <code>herdr-expose pair</code> on your machine and scan the QR, or type the
           six-character code here.

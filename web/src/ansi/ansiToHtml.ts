@@ -274,13 +274,37 @@ export function stripNonSgr(input: string): string {
   return s
 }
 
-/** Plain-text, single-line digest of a terminal buffer — for list rows. */
-export function ansiSummaryLine(input: string, maxChars = 120): string {
-  const lines = stripNonSgr(input)
+/** Plain text lines of a terminal buffer, blank-stripped. Shared by the digests. */
+function plainLines(input: string): string[] {
+  return stripNonSgr(input)
     .replace(/\x1b\[[0-9;]*m/g, '')
     .split('\n')
     .map((l) => l.replace(/\s+$/, ''))
     .filter((l) => l.trim().length > 0)
+}
+
+/**
+ * The QUESTION line of a blocked agent's detection text.
+ *
+ * Unlike a terminal digest this takes the FIRST prose line, not the last: the
+ * last line of a prompt is usually the option list or the cursor, and the thing
+ * the human needs to read is the question at the top. Box-drawing frames and
+ * pure option/bullet rows are skipped rather than shown.
+ */
+export function ansiQuestionLine(input: string, maxChars = 160): string {
+  for (const line of plainLines(input)) {
+    const t = line.replace(/^[\s│┃|>❯*•\-]+/, '').replace(/[\s│┃|]+$/, '').trim()
+    if (!t) continue
+    // A rule/frame row carries no words.
+    if (!/[A-Za-z0-9]/.test(t)) continue
+    return t.length > maxChars ? t.slice(0, maxChars - 1) + '…' : t
+  }
+  return ''
+}
+
+/** Plain-text, single-line digest of a terminal buffer — for list rows. */
+export function ansiSummaryLine(input: string, maxChars = 120): string {
+  const lines = plainLines(input)
   const last = lines[lines.length - 1] ?? ''
   const trimmed = last.trim()
   return trimmed.length > maxChars ? trimmed.slice(0, maxChars - 1) + '…' : trimmed

@@ -93,6 +93,14 @@ func usage() {
 `)
 }
 
+// originOrNone names the session this process was launched from, for logging.
+func originOrNone() string {
+	if name, _ := upstream.OriginSession(); name != "" {
+		return name
+	}
+	return "(none)"
+}
+
 func newLogger() *slog.Logger {
 	lvl := slog.LevelInfo
 	if os.Getenv("HERDR_EXPOSE_DEBUG") != "" {
@@ -195,8 +203,19 @@ func cmdServe() error {
 		return err
 	}
 	log.Info("resolved herdr binary", "path", bin)
-	if upstream.SocketPath() == "" {
-		return errors.New("HERDR_SOCKET_PATH is not set; run inside a Herdr session or export it")
+	sessions, err := upstream.ListSessions(context.Background())
+	if err != nil {
+		return fmt.Errorf("cannot list herdr sessions: %w", err)
+	}
+	running := upstream.RunningSessions(sessions)
+	names := make([]string, 0, len(running))
+	for _, se := range running {
+		names = append(names, se.Name)
+	}
+	log.Info("herdr sessions discovered", "known", len(sessions),
+		"running", strings.Join(names, ","), "origin", originOrNone())
+	if len(running) == 0 {
+		log.Warn("no running herdr session right now; the server will pick them up as they appear")
 	}
 
 	adapter := cfgAdapter{store: store, mgr: mgr}
@@ -226,8 +245,10 @@ func cmdServe() error {
 		log.Info("config reloaded", "mode", r.Mode, "url", r.URL)
 	})
 
-	client := upstream.NewClient("")
-	st := core.NewStore(client, log)
+	// Multi-session: the store discovers every RUNNING Herdr session and keeps
+	// one client per session. $HERDR_SOCKET_PATH is just the session we were
+	// launched from, and gets no special treatment beyond an `origin` label.
+	st := core.NewStore(log)
 	go st.Run(ctx)
 	hub := core.NewHub(st, log)
 	go hub.Run(ctx)
@@ -392,6 +413,20 @@ func statusOnce() error {
 		fmt.Println("herdr    ", bin)
 	} else {
 		fmt.Println("herdr     NOT FOUND -", err)
+	}
+	// Multi-session: every RUNNING session is exposed, not just the one we were
+	// launched from.
+	if all, err := upstream.ListSessions(context.Background()); err == nil {
+		running := upstream.RunningSessions(all)
+		fmt.Printf("sessions  %d running of %d known\n", len(running), len(all))
+		origin, _ := upstream.OriginSession()
+		for _, se := range running {
+			mark := ""
+			if se.Name == origin {
+				mark = "  (origin)"
+			}
+			fmt.Printf("          %-20s %s%s\n", se.Name, se.SocketPath, mark)
+		}
 	}
 
 	resp, err := http.Get("http://" + addr + "/healthz")

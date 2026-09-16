@@ -35,8 +35,11 @@ const (
 	pingPeriod = 25 * time.Second
 )
 
-// APIVersion is the wire protocol version reported in `welcome`.
-const APIVersion = "1"
+// APIVersion is the wire protocol version reported in `welcome` and
+// /v1/config. Bumped to "2" for MULTI-SESSION: the tree gained a `sessions[]`
+// top level and every `target` on the wire is now `<session>/<pane_id>`. Both
+// are breaking changes for a v1 client, so the number moves with them.
+const APIVersion = "2"
 
 // outMsg is one queued outbound WebSocket message.
 // Exactly one of buf / text is set.
@@ -283,6 +286,14 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 			"min_cols": core.MinCols, "min_rows": core.MinRows,
 			"max_write_bytes": core.MaxWriteBytes,
 		},
+		// Targets are session-qualified on this wire. Spelled out here so a
+		// hand-written client does not have to infer it from the tree.
+		"targets": map[string]any{
+			"format":          "<session>/<pane_id>",
+			"separator":       core.TargetSep,
+			"multi_session":   true,
+			"default_session": s.hub.Store().DefaultSession(),
+		},
 	})
 	s.sendTree(ctx, conn)
 
@@ -436,32 +447,89 @@ func (s *Server) handleControl(ctx context.Context, conn *wsConn, data []byte) {
 
 	case "command":
 		var d struct {
-			ID     string          `json:"id"`
-			Method string          `json:"method"`
-			Params json.RawMessage `json:"params"`
+			ID      string          `json:"id"`
+			Session string          `json:"session"`
+			Method  string          `json:"method"`
+			Params  json.RawMessage `json:"params"`
 		}
 		if err := json.Unmarshal(m.Data, &d); err != nil {
 			return
 		}
-		go s.runCommand(ctx, conn, d.ID, d.Method, d.Params)
+		go s.runCommand(ctx, conn, d.ID, d.Session, d.Method, d.Params)
 	}
 }
 
-// runCommand passes a method straight through to the Herdr socket. Method names
-// are deliberately not enumerated: whatever Herdr exposes, clients can call.
-func (s *Server) runCommand(ctx context.Context, conn *wsConn, id, method string, params json.RawMessage) {
+// runCommand passes a method straight through to ONE session's Herdr socket.
+// Method names are deliberately not enumerated: whatever Herdr exposes, clients
+// can call.
+//
+// Session selection, in order: the frame's explicit `session`; the session
+// prefix on a target-ish param; then the session of the target this connection
+// is currently rendering live; then the store's default. Herdr itself knows
+// nothing about our namespacing, so any `<session>/` prefix is stripped off the
+// params before they go upstream.
+func (s *Server) runCommand(ctx context.Context, conn *wsConn, id, session, method string, params json.RawMessage) {
 	cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	var p any = map[string]any{}
+
+	p := map[string]any{}
 	if len(params) > 0 {
-		_ = json.Unmarshal(params, &p)
+		if err := json.Unmarshal(params, &p); err != nil {
+			// Not an object (Herdr takes objects, but never assume): pass it
+			// through untouched against the resolved session.
+			var raw any
+			_ = json.Unmarshal(params, &raw)
+			s.dispatch(cctx, conn, id, s.resolveCommandSession(conn, session, nil), method, raw)
+			return
+		}
 	}
-	res, err := s.hub.Store().Client().Call(cctx, method, p)
+	sessionName := s.resolveCommandSession(conn, session, p)
+	for _, k := range targetParamKeys {
+		if v, ok := p[k].(string); ok {
+			p[k] = core.StripSession(sessionName, v)
+		}
+	}
+	s.dispatch(cctx, conn, id, sessionName, method, p)
+}
+
+// targetParamKeys are the params that carry a Herdr id and therefore may arrive
+// session-qualified from a client that only ever sees qualified ids.
+var targetParamKeys = []string{"target", "pane_id", "tab_id", "workspace_id",
+	"from", "to", "source_pane_id", "target_pane_id"}
+
+func (s *Server) resolveCommandSession(conn *wsConn, explicit string, params map[string]any) string {
+	if explicit != "" {
+		return explicit
+	}
+	known := map[string]bool{}
+	for _, n := range s.hub.Store().Sessions() {
+		known[n] = true
+	}
+	for _, k := range targetParamKeys {
+		if v, ok := params[k].(string); ok {
+			if name := core.SessionOf(v); name != "" && known[name] {
+				return name
+			}
+		}
+	}
+	// The session of whatever this connection is looking at.
+	return conn.sess.FocusedSession()
+}
+
+func (s *Server) dispatch(ctx context.Context, conn *wsConn, id, session, method string, params any) {
+	c := s.hub.Store().Client(session)
+	if c == nil {
+		conn.SendJSON("result", map[string]any{
+			"id": id, "session": session, "ok": false,
+			"error": "unknown or disconnected herdr session: " + session})
+		return
+	}
+	res, err := c.Call(ctx, method, params)
 	if err != nil {
 		conn.SendJSON("result", map[string]any{
-			"id": id, "ok": false, "error": err.Error()})
+			"id": id, "session": session, "ok": false, "error": err.Error()})
 		return
 	}
 	conn.SendJSON("result", map[string]any{
-		"id": id, "ok": true, "result": json.RawMessage(res)})
+		"id": id, "session": session, "ok": true, "result": json.RawMessage(res)})
 }

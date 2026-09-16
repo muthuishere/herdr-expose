@@ -98,25 +98,61 @@ export interface TreeAgent {
   state: AgentState
   /** One-line human summary the SERVER produced. Not parsed. */
   summary?: string
-  /** Unix ms of the last state transition. */
-  changed_at?: number
+  /**
+   * Last state transition. The server sends RFC3339 (`2026-09-16T09:35:18+05:30`);
+   * older builds and the mock send unix ms. Both are accepted — subtracting a
+   * string from Date.now() yields NaN, which is how "working · NaNh NaNm"
+   * reached the screen.
+   */
+  changed_at?: number | string
 }
 
 export interface TreeTab {
   id: string
-  title: string
+  /** Human label. Tabs are NEVER rendered as their own row — see PaneList. */
+  label?: string
+  title?: string
+  number?: number
   panes: TreePane[]
 }
 
 export interface TreeWorkspace {
   id: string
-  title: string
+  label?: string
+  title?: string
+  number?: number
   tabs: TreeTab[]
 }
 
-export interface TreeData {
+/**
+ * One Herdr session — the top level since multi-session landed. `id` is the
+ * session NAME (stable across restarts, unlike pane ids), and every pane id
+ * below it is already session-qualified as `<session>/<herdr id>`.
+ */
+export interface TreeSession {
+  id: string
+  name?: string
+  running?: boolean
+  connected?: boolean
+  focused?: boolean
+  origin?: boolean
+  default?: boolean
+  error?: string
+  focused_pane?: PaneId
   workspaces: TreeWorkspace[]
-  /** Pane the SERVER considers focused, if any. */
+}
+
+export interface TreeData {
+  /** The current shape. */
+  sessions?: TreeSession[]
+  /** The pre-multi-session shape; still accepted so the client never blanks. */
+  workspaces?: TreeWorkspace[]
+  rev?: number
+  connected?: boolean
+  focused_session?: string
+  /** Session-qualified, like every other target on this wire. */
+  focused_pane?: PaneId
+  /** Pane the SERVER considers focused, if any (legacy name). */
   focused?: PaneId | null
   /** Bumped by the server on every tree emission; display/debug only. */
   revision?: number

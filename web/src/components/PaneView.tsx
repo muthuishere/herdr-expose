@@ -33,7 +33,12 @@ export function PaneView({
   showBack?: boolean
 }) {
   const pane = useStore((s) => s.panesById[target])
-  const runtime = useStore((s) => s.runtime[target])
+  // Select SCALARS, never the runtime object: that object is replaced on every
+  // output frame, so subscribing to it re-renders this whole screen (and the
+  // key bar, and the QA panel) at the pane's output rate.
+  const droppedBytes = useStore((s) => s.runtime[target]?.droppedBytes ?? 0)
+  const closedReason = useStore((s) => s.runtime[target]?.closed?.reason)
+  const isClosed = useStore((s) => s.runtime[target]?.closed !== undefined)
   const mode = useStore((s) => s.serverModes[target])
   const [renderer, setRenderer] = useState<RendererKind | null>(null)
   // Local display size only. It never reaches the PTY (SPEC B8).
@@ -73,14 +78,14 @@ export function PaneView({
         </div>
       </header>
 
-      {runtime?.droppedBytes ? (
+      {droppedBytes ? (
         <div className="notice notice-gap">
-          {formatBytes(runtime.droppedBytes)} of output was dropped under load, then repainted.
+          {formatBytes(droppedBytes)} of output was dropped under load, then repainted.
         </div>
       ) : null}
-      {runtime?.closed ? (
+      {isClosed ? (
         <div className="notice notice-dead">
-          This pane has closed{runtime.closed.reason ? `: ${runtime.closed.reason}` : '.'}
+          This pane has closed{closedReason ? `: ${closedReason}` : '.'}
         </div>
       ) : null}
       {mode && mode !== 'live' ? (

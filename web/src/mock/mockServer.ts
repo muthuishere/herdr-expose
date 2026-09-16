@@ -472,7 +472,7 @@ class MockSocket implements Transport {
 
   private treeWithModes(): TreeData {
     const t = buildTree(this.rev++)
-    for (const ws of t.workspaces)
+    for (const ws of t.workspaces ?? [])
       for (const tab of ws.tabs)
         for (const p of tab.panes) p.mode = this.modes[p.id] ?? 'none'
     return t
@@ -500,6 +500,24 @@ export function installMockHttp(): void {
   const real = window.fetch.bind(window)
   window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+    // The client probes /v1/config before it opens the socket; in mock mode
+    // there is no Go server to answer, so answer as an unauthenticated-free
+    // local listener would.
+    if (url.includes('/v1/config')) {
+      return new Response(
+        JSON.stringify({
+          api: '1',
+          mode: 'local',
+          stream: '/v1/stream',
+          version: 'mock',
+          auth_required: false,
+          authenticated: true,
+          limits: { min_cols: 20, min_rows: 6 },
+          ui: { theme: 'auto', default_view: 'grid' },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      )
+    }
     if (!url.includes('/v1/pair')) return real(input as RequestInfo, init)
 
     let code = ''

@@ -10,6 +10,7 @@
  */
 
 import { useSyncExternalStore } from 'react'
+import { collectPanes, patchPane } from '../protocol/tree'
 import type {
   AgentData,
   ClosedData,
@@ -51,6 +52,16 @@ export interface AppState {
    * pairing screen — hammering a closed door is not a reconnect strategy.
    */
   authRequired: boolean
+  /**
+   * Why pairing is being asked for. "never paired" and "this device was
+   * revoked" are different facts and the user needs to be told which.
+   */
+  authReason: string | null
+  /**
+   * We gave up retrying a REACHABILITY failure (SPEC §8 backoff, capped). An
+   * infinite spinner with a climbing counter is not a state, it is a shrug.
+   */
+  unreachable: boolean
 
   tree: TreeData
   /** Flat index built from the tree ONLY for O(1) lookup — not structure. */
@@ -81,6 +92,8 @@ const initial: AppState = {
   lastError: null,
   attempt: 0,
   authRequired: false,
+  authReason: null,
+  unreachable: false,
   tree: EMPTY_TREE,
   panesById: {},
   runtime: {},
@@ -140,10 +153,15 @@ export function useStore<T>(selector: (s: AppState) => T): T {
 /* Frame application                                                   */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Flat id -> pane index for O(1) lookup. Walked generically: the tree grew a
+ * `sessions[]` level and a hardcoded workspaces->tabs->panes walk silently
+ * produced an EMPTY index, which is what made the pane header fall back to the
+ * raw `chromium/w1:p1` target and the agent patch a no-op.
+ */
 function indexTree(tree: TreeData): Record<PaneId, TreePane> {
   const out: Record<PaneId, TreePane> = {}
-  for (const ws of tree.workspaces ?? [])
-    for (const tab of ws.tabs ?? []) for (const p of tab.panes ?? []) out[p.id] = p
+  for (const p of collectPanes(tree)) out[p.id] = p
   return out
 }
 
@@ -291,16 +309,7 @@ function omit<T>(obj: Record<string, T>, key: string): Record<string, T> {
 
 /** Replace one pane inside the tree without changing any structure. */
 function patchTree(tree: TreeData, pane: TreePane): TreeData {
-  return {
-    ...tree,
-    workspaces: (tree.workspaces ?? []).map((ws) => ({
-      ...ws,
-      tabs: (ws.tabs ?? []).map((tab) => ({
-        ...tab,
-        panes: (tab.panes ?? []).map((p) => (p.id === pane.id ? pane : p)),
-      })),
-    })),
-  }
+  return patchPane(tree, pane)
 }
 
 /* ------------------------------------------------------------------ */
@@ -316,8 +325,18 @@ export function setLink(link: LinkState, err?: string | null, attempt?: number) 
   })
 }
 
-export function setAuthRequired(v: boolean) {
-  set({ authRequired: v })
+export function setAuthRequired(v: boolean, reason?: string | null) {
+  set({
+    authRequired: v,
+    authReason: v ? (reason ?? state.authReason) : null,
+    // Pairing is an ANSWER, not an outage: stop claiming we cannot reach it.
+    unreachable: v ? false : state.unreachable,
+  })
+}
+
+/** Set when the retry cap is hit: the server is simply not answering. */
+export function setUnreachable(v: boolean) {
+  set({ unreachable: v })
 }
 
 export function setFocused(id: PaneId | null) {

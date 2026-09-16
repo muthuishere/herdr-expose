@@ -98,6 +98,7 @@ func BinPath() string {
 // Only events.subscribe keeps a connection open, and that lives in events.go.
 type Client struct {
 	sock    string
+	session string
 	timeout time.Duration
 	ids     atomic.Uint64
 }
@@ -107,11 +108,19 @@ func NewClient(sock string) *Client {
 	if sock == "" {
 		sock = SocketPath()
 	}
-	return &Client{sock: sock, timeout: 10 * time.Second}
+	return &Client{sock: sock, session: SessionNameForSocket(sock), timeout: 10 * time.Second}
+}
+
+// NewSessionClient builds a client bound to one discovered session.
+func NewSessionClient(s Session) *Client {
+	return &Client{sock: s.SocketPath, session: s.Name, timeout: 10 * time.Second}
 }
 
 // Socket returns the socket path in use.
 func (c *Client) Socket() string { return c.sock }
+
+// Session returns the name of the Herdr session this client talks to.
+func (c *Client) Session() string { return c.session }
 
 func (c *Client) nextID() string {
 	return fmt.Sprintf("x%d", c.ids.Add(1))

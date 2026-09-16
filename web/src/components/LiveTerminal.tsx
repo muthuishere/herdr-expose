@@ -26,12 +26,13 @@
  *     swap, and the 1.30 cell-height estimate is seeded from the wrong face.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import type { Terminal as XTerm } from '@xterm/xterm'
 import '@xterm/xterm/css/xterm.css'
 
 import type { PaneId } from '../protocol/types'
 import { onBytes } from '../net/byteBus'
+import { countEvent } from '../net/debugStats'
 import {
   onReconnected,
   sendInput,
@@ -63,13 +64,30 @@ export interface LiveTerminalProps {
   onRenderer?: (kind: RendererKind) => void
 }
 
-export function LiveTerminal({ target, fontSize, onRenderer }: LiveTerminalProps) {
+/**
+ * FLICKER (measured on an idle pane): Herdr emits periodic `full: true` repaints
+ * and the server maps every one of them to a type-2 snapshot — roughly 3 per 10
+ * seconds on a pane where nothing is happening. `term.reset()` on each of those
+ * blanks the screen and redraws it, several times a second on a busy pane. That
+ * IS the flicker, and a reset+full repaint is also the single most expensive
+ * thing this renderer can be asked to do.
+ *
+ * A `full` repaint already carries its own clear/home sequences, so writing it
+ * into the live buffer is seamless. We therefore reset ONLY when the buffer
+ * genuinely cannot be trusted, tracked by `needsReset`:
+ *   - the first snapshot after attach / target change / reconnect, and
+ *   - the first snapshot after a `gap`, where bytes were really dropped.
+ * Every other snapshot is just bytes.
+ */
+function LiveTerminalImpl({ target, fontSize, onRenderer }: LiveTerminalProps) {
   const hostRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<XTerm | null>(null)
   const geomRef = useRef<Geometry | null>(null)
   const boxRef = useRef<{ width: number; height: number }>({ width: 0, height: 0 })
   const verifyRef = useRef<(() => void) | null>(null)
   const echoRef = useRef<PredictiveEcho | null>(null)
+  /** True while the buffer is untrustworthy; consumed by the next snapshot. */
+  const needsResetRef = useRef(true)
   const [ready, setReady] = useState(false)
 
   const localFont = fontSize ?? DEFAULT_FONT_SIZE
@@ -77,6 +95,8 @@ export function LiveTerminal({ target, fontSize, onRenderer }: LiveTerminalProps
   /* --- create ------------------------------------------------------- */
   useEffect(() => {
     let disposed = false
+    // A fresh terminal holds nothing: the first snapshot must land on a reset.
+    needsResetRef.current = true
     let cleanupTouch: (() => void) | undefined
     let cleanupRenderer: (() => void) | undefined
     let term: XTerm | null = null
@@ -112,6 +132,7 @@ export function LiveTerminal({ target, fontSize, onRenderer }: LiveTerminalProps
 
       term.open(hostRef.current)
       termRef.current = term
+      countEvent('termCreate', target)
       setReady(true)
 
       const attached = await attachRenderer(term)
@@ -157,6 +178,7 @@ export function LiveTerminal({ target, fontSize, onRenderer }: LiveTerminalProps
       cleanupRenderer?.()
       echoRef.current?.dispose()
       echoRef.current = null
+      if (termRef.current) countEvent('termDispose', target)
       termRef.current?.dispose()
       termRef.current = null
       setReady(false)
@@ -220,7 +242,10 @@ export function LiveTerminal({ target, fontSize, onRenderer }: LiveTerminalProps
     start()
     // B4: no resume. Re-subscribe, take the fresh snapshot, reset, repaint.
     const off = onReconnected(() => {
-      termRef.current?.reset()
+      // Do NOT blank the screen here: that leaves an empty terminal on display
+      // until the new snapshot arrives. Mark it untrusted and let the first
+      // snapshot do the reset, so the repaint is a single frame.
+      needsResetRef.current = true
       // The screen we were predicting against is gone.
       echoRef.current?.wipe('reconnect')
       resendViewport()
@@ -239,9 +264,21 @@ export function LiveTerminal({ target, fontSize, onRenderer }: LiveTerminalProps
     return onBytes(target, (bytes, kind) => {
       const t = termRef.current
       if (!t) return
-      // A snapshot is a full repaint, not a delta — nothing pending survives it.
+      if (kind === 'gap') {
+        // Bytes were genuinely lost: what is on screen no longer matches the
+        // host. The next snapshot repaints from a clean buffer.
+        needsResetRef.current = true
+        echoRef.current?.wipe('gap')
+        return
+      }
       if (kind === 'snapshot') {
-        t.reset()
+        // Only the untrusted-buffer case resets. A routine `full` repaint is
+        // written straight in — it clears and homes itself.
+        if (needsResetRef.current) {
+          needsResetRef.current = false
+          countEvent('reset', target)
+          t.reset()
+        }
         echoRef.current?.wipe('snapshot')
       }
       // Raw Uint8Array: faster, and avoids decoding UTF-8 twice.
@@ -252,6 +289,14 @@ export function LiveTerminal({ target, fontSize, onRenderer }: LiveTerminalProps
 
   return <div className="term-host" ref={hostRef} />
 }
+
+/**
+ * Memoised on the props that actually matter. A re-render of the parent must
+ * never be able to dispose and recreate the xterm instance — a remount looks
+ * exactly like flicker and throws away the scrollback with it.
+ */
+export const LiveTerminal = memo(LiveTerminalImpl)
+LiveTerminal.displayName = 'LiveTerminal'
 
 /**
  * Wait for the terminal font, but never block the terminal forever on it — a

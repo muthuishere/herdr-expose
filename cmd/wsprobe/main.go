@@ -19,19 +19,33 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
 
-// treeFrame mirrors the `tree` control frame: workspaces -> tabs -> panes.
+// treeFrame mirrors the `tree` control frame (api 2):
+// sessions -> workspaces -> tabs -> panes, with every id session-qualified.
 type treeFrame struct {
-	Rev          uint64 `json:"rev"`
-	Connected    bool   `json:"connected"`
-	HerdrVersion string `json:"herdr_version"`
-	FocusedPane  string `json:"focused_pane"`
-	Workspaces   []struct {
+	Rev            uint64         `json:"rev"`
+	Connected      bool           `json:"connected"`
+	HerdrVersion   string         `json:"herdr_version"`
+	FocusedSession string         `json:"focused_session"`
+	FocusedPane    string         `json:"focused_pane"`
+	Sessions       []sessionFrame `json:"sessions"`
+}
+
+type sessionFrame struct {
+	ID          string `json:"id"`
+	Running     bool   `json:"running"`
+	Connected   bool   `json:"connected"`
+	Focused     bool   `json:"focused"`
+	Origin      bool   `json:"origin"`
+	Error       string `json:"error"`
+	FocusedPane string `json:"focused_pane"`
+	Workspaces  []struct {
 		ID    string `json:"id"`
 		Label string `json:"label"`
 		Tabs  []struct {
@@ -51,12 +65,20 @@ type paneFrame struct {
 	} `json:"agent"`
 }
 
-func (t treeFrame) allPanes() []paneFrame {
+func (sf sessionFrame) panes() []paneFrame {
 	var out []paneFrame
-	for _, ws := range t.Workspaces {
+	for _, ws := range sf.Workspaces {
 		for _, tab := range ws.Tabs {
 			out = append(out, tab.Panes...)
 		}
+	}
+	return out
+}
+
+func (t treeFrame) allPanes() []paneFrame {
+	var out []paneFrame
+	for _, sf := range t.Sessions {
+		out = append(out, sf.panes()...)
 	}
 	return out
 }
@@ -70,7 +92,8 @@ type envelope struct {
 func main() {
 	addr := flag.String("addr", "127.0.0.1:21118", "server address")
 	token := flag.String("token", os.Getenv("HERDR_EXPOSE_TOKEN"), "bearer token")
-	target := flag.String("target", "", "pane id (default: the focused pane from the tree)")
+	target := flag.String("target", "", "session-qualified pane id, e.g. herdr-plugins/w2:p1 "+
+		"(default: one pane per connected session)")
 	secs := flag.Int("secs", 8, "how long to stream")
 	cols := flag.Int("cols", 100, "terminal columns")
 	echo := flag.Int("echo", 0, "measure keystroke->echo latency with N probe keystrokes "+
@@ -78,6 +101,10 @@ func main() {
 	echoKey := flag.String("echo-key", "\x1b", "bytes to send as the probe keystroke; "+
 		"ESC is the default because it is inert in most TUIs")
 	rows := flag.Int("rows", 30, "terminal rows")
+	cmdMethod := flag.String("cmd", "", "also run one passthrough `command` (READ-ONLY methods only)")
+	cmdParams := flag.String("cmd-params", "{}", "JSON params for -cmd")
+	cmdSession := flag.String("cmd-session", "", "session for -cmd (default: inferred from the params, "+
+		"else the session of the pane being rendered live)")
 	flag.Parse()
 
 	// An empty token is valid: in local mode (loopback listener, pinned Host and
@@ -136,6 +163,8 @@ func main() {
 	var (
 		gotWelcome bool
 		gotTree    bool
+		targets    []string
+		perTarget  = map[string]int{}
 		pane       = *target
 		frames     int
 		snapshots  int
@@ -196,31 +225,79 @@ func main() {
 					var t treeFrame
 					_ = json.Unmarshal(e.Data, &t)
 					all := t.allPanes()
-					fmt.Printf("PASS tree upstream_connected=%v workspaces=%d panes=%d\n",
-						t.Connected, len(t.Workspaces), len(all))
-					for _, p := range all {
-						state, kind := "-", "-"
-						if p.Agent != nil {
-							state, kind = p.Agent.State, p.Agent.Kind
+					fmt.Printf("PASS tree upstream_connected=%v sessions=%d panes=%d focused_session=%s\n",
+						t.Connected, len(t.Sessions), len(all), t.FocusedSession)
+					for _, sf := range t.Sessions {
+						flags := ""
+						if sf.Origin {
+							flags += " origin"
 						}
-						fmt.Printf("     pane %-10s agent=%-8s state=%-8s %s\n",
-							p.ID, kind, state, p.Title)
-					}
-					if pane == "" {
-						pane = t.FocusedPane
-						if pane == "" && len(all) > 0 {
-							pane = all[0].ID
+						if sf.Focused {
+							flags += " focused"
+						}
+						fmt.Printf("  session %-16s running=%-5v connected=%-5v workspaces=%d%s %s\n",
+							sf.ID, sf.Running, sf.Connected, len(sf.Workspaces), flags, sf.Error)
+						for _, p := range sf.panes() {
+							state, kind := "-", "-"
+							if p.Agent != nil {
+								state, kind = p.Agent.State, p.Agent.Kind
+							}
+							fmt.Printf("     pane %-28s agent=%-8s state=%-8s %s\n",
+								p.ID, kind, state, p.Title)
 						}
 					}
-					if pane == "" {
+					// Namespacing check: every pane id must be <session>/<id>.
+					for _, sf := range t.Sessions {
+						for _, p := range sf.panes() {
+							if !strings.HasPrefix(p.ID, sf.ID+"/") {
+								fail("pane %q is not namespaced by session %q", p.ID, sf.ID)
+							}
+						}
+					}
+					fmt.Println("PASS every target is namespaced <session>/<pane_id>")
+
+					if *target != "" {
+						targets = []string{*target}
+					} else {
+						// One pane per CONNECTED session: the point of api 2 is
+						// that many sessions stream at once.
+						for _, sf := range t.Sessions {
+							if !sf.Connected {
+								continue
+							}
+							pick := sf.FocusedPane
+							if pick == "" {
+								if ps := sf.panes(); len(ps) > 0 {
+									pick = ps[0].ID
+								}
+							}
+							if pick != "" {
+								targets = append(targets, pick)
+							}
+						}
+					}
+					if len(targets) == 0 {
 						fail("no pane to stream")
 					}
-					fmt.Printf("     streaming %s at %dx%d\n", pane, *cols, *rows)
-					// Geometry BEFORE the first frame is requested (B2).
-					send("resize", map[string]any{"target": pane, "cols": *cols, "rows": *rows})
-					send("viewport", map[string]any{"targets": map[string]string{pane: "live"}})
+					pane = targets[0]
+					view := map[string]string{}
+					for _, tg := range targets {
+						fmt.Printf("     streaming %s at %dx%d\n", tg, *cols, *rows)
+						// Geometry BEFORE the first frame is requested (B2).
+						send("resize", map[string]any{"target": tg, "cols": *cols, "rows": *rows})
+						view[tg] = "live"
+					}
+					send("viewport", map[string]any{"targets": view})
 					pingSent = time.Now()
 					send("ping", map[string]any{"t": pingSent.UnixMilli()})
+					if *cmdMethod != "" {
+						var params any
+						if err := json.Unmarshal([]byte(*cmdParams), &params); err != nil {
+							fail("-cmd-params is not JSON: %v", err)
+						}
+						send("command", map[string]any{"id": "probe-cmd",
+							"session": *cmdSession, "method": *cmdMethod, "params": params})
+					}
 					if *echo > 0 {
 						fmt.Printf("     NOTE: -echo takes CONTROL of %s and types %q into it\n",
 							pane, *echoKey)
@@ -235,6 +312,8 @@ func main() {
 					rtt = time.Since(pingSent)
 					fmt.Printf("PASS pong control-plane RTT %.2fms\n", float64(rtt.Microseconds())/1000)
 				}
+			case "result":
+				fmt.Printf("PASS result %s\n", compact(e.Data))
 			case "agent":
 				fmt.Printf("PASS agent %s\n", compact(e.Data))
 			case "closed":
@@ -256,6 +335,7 @@ func main() {
 			switch typ {
 			case 1:
 				frames++
+				perTarget[tgt]++
 				dataBytes += len(payload)
 				// keystroke -> echo: the first frame after a probe keystroke.
 				echoMu.Lock()
@@ -280,6 +360,7 @@ func main() {
 				}
 			case 2:
 				snapshots++
+				perTarget[tgt]++
 				dataBytes += len(payload)
 				if snapshots == 1 {
 					fmt.Printf("PASS snapshot seq=%d target=%s bytes=%d\n", seq, tgt, len(payload))
@@ -316,13 +397,25 @@ func main() {
 			len(echoSamples), ms(q(0.5)), ms(q(0.95)), ms(echoSamples[len(echoSamples)-1]))
 	}
 
-	fmt.Printf("\nSUMMARY welcome=%v tree=%v snapshots=%d frames=%d gaps=%d payload_bytes=%d\n",
-		gotWelcome, gotTree, snapshots, frames, gaps, dataBytes)
+	fmt.Printf("\nPER-TARGET data frames:\n")
+	silent := 0
+	for _, tg := range targets {
+		fmt.Printf("     %-28s frames+snapshots=%d\n", tg, perTarget[tg])
+		if perTarget[tg] == 0 {
+			silent++
+		}
+	}
+	fmt.Printf("\nSUMMARY welcome=%v tree=%v targets=%d snapshots=%d frames=%d gaps=%d payload_bytes=%d\n",
+		gotWelcome, gotTree, len(targets), snapshots, frames, gaps, dataBytes)
+	if silent > 0 {
+		fmt.Printf("WARN %d of %d targets produced no data (an idle pane can be legitimately silent)\n",
+			silent, len(targets))
+	}
 	if !gotWelcome || !gotTree {
 		fail("did not receive welcome + tree")
 	}
 	if snapshots+frames == 0 {
-		fail("no terminal data arrived for %s", pane)
+		fail("no terminal data arrived for %v", targets)
 	}
 	fmt.Println("RESULT ok")
 }

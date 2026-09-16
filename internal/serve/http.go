@@ -226,15 +226,23 @@ func (s *Server) originAllowed(r *http.Request, origin string) bool {
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	t := s.hub.Store().Tree()
+	connected := 0
+	for _, se := range t.Sessions {
+		if se.Connected {
+			connected++
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":             true,
-		"version":        s.Version,
-		"api":            APIVersion,
-		"upstream":       t.Connected,
-		"herdr_version":  t.Version,
-		"herdr_protocol": t.Protocol,
-		"tree_rev":       t.Rev,
-		"web_ui":         s.static != nil,
+		"sessions":           len(t.Sessions),
+		"sessions_connected": connected,
+		"ok":                 true,
+		"version":            s.Version,
+		"api":                APIVersion,
+		"upstream":           t.Connected,
+		"herdr_version":      t.Version,
+		"herdr_protocol":     t.Protocol,
+		"tree_rev":           t.Rev,
+		"web_ui":             s.static != nil,
 	})
 }
 
@@ -249,8 +257,33 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		"limits": map[string]any{
 			"min_cols": core.MinCols, "min_rows": core.MinRows,
 		},
+		// api 2: the tree has a sessions[] top level and every target is
+		// `<session>/<pane_id>`. Announced here so a client knows before it
+		// opens the socket.
+		"multi_session": true,
+		"targets": map[string]any{
+			"format":          "<session>/<pane_id>",
+			"separator":       core.TargetSep,
+			"default_session": s.hub.Store().DefaultSession(),
+		},
 	}
 	out["mode"] = s.cfg.Mode()
+
+	// Auth discovery. A browser CANNOT read the status of a failed WebSocket
+	// handshake — the WebSocket API surfaces no close code when the upgrade is
+	// rejected with 401 — so a client that just retries the socket can never
+	// learn it needs to pair, and loops "reconnecting" forever. These two
+	// fields are the only way a client can tell "pair me" from "network down".
+	authRequired := !s.local.bypassAuth(r)
+	out["auth_required"] = authRequired
+	authed := !authRequired
+	if authRequired {
+		if _, err := s.auth.Authenticate(BearerFrom(r), RemoteIP(r), r.UserAgent()); err == nil {
+			authed = true
+		}
+	}
+	out["authenticated"] = authed
+
 	if s.exposure != nil {
 		if url, healthy := s.exposure.Status(); url != "" {
 			out["exposure"] = map[string]any{"url": url, "healthy": healthy}

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
 	"strconv"
 	"sync"
@@ -53,7 +54,13 @@ type TerminalHandler interface {
 // There is NO terminal.* method on the socket API in 0.9.0; this subprocess is
 // the only streaming primitive. Control accepts NDJSON on stdin.
 type TerminalStream struct {
-	Target   string
+	Target string
+	// Socket is the Herdr session socket this stream belongs to. The `herdr`
+	// CLI picks its server from $HERDR_SOCKET_PATH, so a multi-session server
+	// MUST set it per subprocess: without it every stream would attach to
+	// whichever session launched the plugin, and pane ids (which all start at
+	// w1:p1) would silently resolve against the wrong tree.
+	Socket   string
 	Mode     TerminalMode
 	Cols     int
 	Rows     int
@@ -101,6 +108,9 @@ func (t *TerminalStream) Start(ctx context.Context) error {
 		return err
 	}
 	cmd := exec.Command(bin, args...)
+	if t.Socket != "" {
+		cmd.Env = append(os.Environ(), "HERDR_SOCKET_PATH="+t.Socket)
+	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err

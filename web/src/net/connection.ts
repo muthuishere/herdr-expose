@@ -29,9 +29,18 @@ import type {
   WelcomeData,
 } from '../protocol/types'
 import { MIN_COLS, MIN_ROWS } from '../protocol/types'
-import { apply, getState, resetSession, setAuthRequired, setLink } from '../store/store'
-import { pushBytes } from './byteBus'
+import {
+  apply,
+  getState,
+  resetSession,
+  setAuthRequired,
+  setLink,
+  setUnreachable,
+} from '../store/store'
+import { pushBytes, pushGap } from './byteBus'
 import { streamUrl } from './auth'
+import { probeConfig } from './config'
+import { countBinary, countEvent, recordViewport } from './debugStats'
 
 export interface Transport {
   send(data: string | ArrayBuffer): void
@@ -51,6 +60,18 @@ const PING_INTERVAL_MS = 4000
 const PONG_TIMEOUT_MS = 12_000
 const BACKOFF_BASE_MS = 500
 const BACKOFF_MAX_MS = 15_000
+/**
+ * Blind retries are capped. Past this we still cannot reach the server and a
+ * counter climbing to 40 tells the user nothing they can act on — show them an
+ * actionable state with a Retry instead.
+ */
+const MAX_BLIND_ATTEMPTS = 8
+
+const NOT_PAIRED_MSG = 'This device is not paired with herdr-expose.'
+const LOST_PAIRING_MSG =
+  'This device is no longer paired — its token was revoked, expired, or the ' +
+  'server was restarted with new keys. Pair it again.'
+const UNREACHABLE_MSG = "Can't reach herdr-expose — is it still running?"
 
 let ws: Transport | null = null
 let factory: TransportFactory = (url) => new WebSocket(url) as unknown as Transport
@@ -76,11 +97,55 @@ export function setTransportFactory(f: TransportFactory) {
   factory = f
 }
 
+/**
+ * Generation counter. Every async probe captures it and drops its result if a
+ * newer connect()/classification has started — otherwise a slow probe from an
+ * abandoned attempt can resurrect a socket or a pairing screen after the fact.
+ */
+let generation = 0
+
+/**
+ * Boot order matters: ASK /v1/config BEFORE opening the socket.
+ *
+ * The server 401s an unauthenticated upgrade before it upgrades, and the
+ * browser cannot see that status — so a socket is the wrong instrument for
+ * "am I allowed in?". Ask over HTTP, where the answer is readable.
+ */
 export function connect(): void {
   stopped = false
   attempt = 0
+  setUnreachable(false)
   setAuthRequired(false)
+  setLink('connecting', null, 0)
+  void openAfterProbe()
+}
+
+async function openAfterProbe(): Promise<void> {
+  const mine = ++generation
+  const probe = await probeConfig()
+  if (stopped || mine !== generation) return
+  if (probe.ok && probe.needsPairing) {
+    // Do not open the socket at all: it would 401 and we would learn nothing.
+    requirePairing(NOT_PAIRED_MSG)
+    return
+  }
+  // A failed probe is a NETWORK fact, never an auth one. Try the socket — in
+  // mock/dev there may be no /v1/config at all, and the close path classifies.
   openSocket()
+}
+
+function requirePairing(message: string): void {
+  stopped = true
+  clearTimeout(reconnectTimer)
+  clearInterval(pingTimer)
+  attempt = 0
+  setAuthRequired(true, message)
+  setLink('offline', message)
+}
+
+/** User-driven "try again" from the unreachable state. */
+export function retryNow(): void {
+  connect()
 }
 
 export function disconnect(): void {
@@ -145,18 +210,42 @@ function openSocket() {
     // problem". Retrying cannot fix that, and a reconnect loop against an auth
     // failure is just a log flood. Surface the pairing screen instead.
     if (ev?.code === 1008 || ev?.code === 4401 || ev?.code === 4403) {
-      stopped = true
-      setAuthRequired(true)
-      setLink('offline', ev.reason || 'This device is not paired.')
+      requirePairing(ev.reason || LOST_PAIRING_MSG)
       return
     }
     const reason = ev?.reason || (ev?.code === 1006 ? 'connection lost' : 'disconnected')
-    scheduleReconnect(reason)
+    // 1006 tells us nothing: it is what a pre-upgrade 401 looks like AND what a
+    // dropped wifi looks like. Ask /v1/config which of the two it is.
+    void classifyThenReconnect(reason)
   }
+}
+
+/**
+ * Classify the failure instead of blindly retrying it. A revoked device, an
+ * expired token or a server token reset all look exactly like a network blip
+ * from inside the WebSocket API — /v1/config is what tells them apart.
+ */
+async function classifyThenReconnect(reason: string): Promise<void> {
+  const mine = ++generation
+  setLink(attempt === 0 ? 'connecting' : 'reconnecting', reason, attempt)
+  const probe = await probeConfig()
+  if (stopped || mine !== generation) return
+  if (probe.ok && probe.needsPairing) {
+    requirePairing(LOST_PAIRING_MSG)
+    return
+  }
+  scheduleReconnect(reason)
 }
 
 function scheduleReconnect(reason: string) {
   attempt += 1
+  if (attempt > MAX_BLIND_ATTEMPTS) {
+    // Stop the spinner. The server is reachable-by-DNS but not answering.
+    stopped = true
+    setUnreachable(true)
+    setLink('offline', UNREACHABLE_MSG)
+    return
+  }
   // Exponential backoff with jitter, capped. SPEC §8.
   const delay = Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** Math.min(attempt - 1, 6))
   const jittered = delay * (0.7 + Math.random() * 0.6)
@@ -212,6 +301,7 @@ function handleControl(raw: string) {
     case 'gap': {
       const d = msg.data as GapData
       apply.gap(seq, d.target, d.bytes_dropped)
+      pushGap(d.target)
       break
     }
     case 'result':
@@ -233,10 +323,13 @@ function handleBinary(buf: ArrayBuffer) {
   const m = decodeBinary(buf)
   if (!m) return
   if (m.type === BIN_GAP) {
+    countBinary(m.target, 'gap', 0)
     apply.gap(m.seq, m.target, m.bytesDropped)
+    pushGap(m.target)
     return
   }
   const isSnapshot = m.type === BIN_SNAPSHOT
+  countBinary(m.target, isSnapshot ? 'snapshot' : 'frame', m.payload.length)
   // Raw bytes to the live terminal, untouched. No decode on the hot path.
   pushBytes(m.target, m.payload, isSnapshot ? 'snapshot' : 'frame')
   // Decoded text only for tiles/digests.
@@ -256,11 +349,13 @@ function sendControl(frame: ClientFrame) {
 
 export function sendSubscribe(targets: PaneId[]) {
   if (targets.length === 0) return
+  for (const t of targets) countEvent('subscribe', t)
   sendControl({ seq: 0, type: 'subscribe', data: { targets } })
 }
 
 export function sendUnsubscribe(targets: PaneId[]) {
   if (targets.length === 0) return
+  for (const t of targets) countEvent('unsubscribe', t)
   sendControl({ seq: 0, type: 'unsubscribe', data: { targets } })
 }
 
@@ -269,6 +364,8 @@ export function sendUnsubscribe(targets: PaneId[]) {
  * we never ask for `live` as a privilege.
  */
 export function sendViewport(targets: Record<PaneId, ViewportMode>) {
+  countEvent('viewportSent')
+  recordViewport(targets)
   const data: ViewportData = { targets }
   sendControl({ seq: 0, type: 'viewport', data })
 }

@@ -18,7 +18,7 @@ import { DesktopGrid } from './components/DesktopGrid'
 import { PairScreen } from './components/PairScreen'
 import { clearPairCode, takePairCodeFromUrl } from './net/pair'
 import { envStatus } from './net/env'
-import { connect } from './net/connection'
+import { connect, retryNow } from './net/connection'
 
 export function App() {
   const isMobile = useIsMobile()
@@ -30,6 +30,8 @@ export function App() {
   const panesById = useStore((s) => s.panesById)
 
   const authRequired = useStore((s) => s.authRequired)
+  const authReason = useStore((s) => s.authReason)
+  const unreachable = useStore((s) => s.unreachable)
   const [open, setOpen] = useState<PaneId | null>(null)
   // Consumed once, synchronously, before the first paint: the QR deep link
   // `/?pair=<code>` must not survive into history or a screenshot.
@@ -67,6 +69,7 @@ export function App() {
     return (
       <PairScreen
         initialCode={pairCode}
+        notice={authRequired ? authReason : null}
         onPaired={() => {
           clearPairCode()
           setPairCode(null)
@@ -88,7 +91,9 @@ export function App() {
               <ConnectionBadge link={link} rttMs={rttMs} attempt={attempt} />
             </header>
             <main className="scroll">
-              {disconnected ? <Disconnected link={link} error={lastError} /> : null}
+              {disconnected ? (
+                <Disconnected link={link} error={lastError} unreachable={unreachable} />
+              ) : null}
               {env.note ? <EnvNote note={env.note} /> : null}
               <PaneList onOpen={openPane} selected={focused} />
             </main>
@@ -110,7 +115,9 @@ export function App() {
         </div>
       </aside>
       <main className="main">
-        {disconnected ? <Disconnected link={link} error={lastError} /> : null}
+        {disconnected ? (
+          <Disconnected link={link} error={lastError} unreachable={unreachable} />
+        ) : null}
         {env.note ? <EnvNote note={env.note} /> : null}
         {open ? (
           <PaneView target={open} onBack={closePane} />
@@ -138,7 +145,34 @@ function EnvNote({ note }: { note: string }) {
  * The only "offline" surface we ship. A terminal is inherently online — we say
  * so plainly rather than faking offline capability (SPEC §8).
  */
-function Disconnected({ link, error }: { link: string; error: string | null }) {
+function Disconnected({
+  link,
+  error,
+  unreachable,
+}: {
+  link: string
+  error: string | null
+  unreachable: boolean
+}) {
+  // Past the retry cap there is nothing left to wait for, so we stop spinning
+  // and offer the only two things that can actually help: a fact and a button.
+  if (unreachable) {
+    return (
+      <div className="disconnected is-stuck" role="alert">
+        <span className="disconnected-dot" aria-hidden="true" />
+        <div>
+          <b>Can't reach herdr-expose</b>
+          <span className="disconnected-sub">
+            {error ?? 'It stopped answering.'} Check that <code>herdr-expose serve</code> is
+            still running, then try again.
+          </span>
+        </div>
+        <button className="disconnected-retry" type="button" onClick={() => retryNow()}>
+          Try again
+        </button>
+      </div>
+    )
+  }
   return (
     <div className="disconnected" role="status">
       <span className="disconnected-dot" aria-hidden="true" />

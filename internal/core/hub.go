@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/muthuishere/herdr-expose/internal/upstream"
@@ -16,6 +17,11 @@ import (
 // geometry, because a shared stream would let a phone at 40 columns resize the
 // laptop watching the same pane. Only SUMMARY reads are deduplicated, since
 // pane.read is geometry-free.
+//
+// Every target it handles is SESSION-QUALIFIED (`<session>/<pane_id>`) and is
+// routed to that session's socket. Per-connection streams and session-qualified
+// targets compose: the stream key is the full target, so the same pane id in two
+// sessions is two independent streams.
 type Hub struct {
 	store   *Store
 	log     *slog.Logger
@@ -29,7 +35,7 @@ func NewHub(store *Store, log *slog.Logger) *Hub {
 		log = slog.Default()
 	}
 	return &Hub{store: store, log: log,
-		summary: newSummaryPoller(store.Client(), log), metrics: NewMetrics()}
+		summary: newSummaryPoller(store, log), metrics: NewMetrics()}
 }
 
 // Metrics exposes the latency instrument.
@@ -56,7 +62,10 @@ type Session struct {
 	geom    map[string]Geometry
 	modes   map[string]Mode
 	streams map[string]*liveStream
-	closed  bool
+	// lastLive is the most recent target this connection asked to render live.
+	// It is what a `command` frame with no explicit session defaults to.
+	lastLive string
+	closed   bool
 }
 
 type liveStream struct {
@@ -64,6 +73,14 @@ type liveStream struct {
 	mode   upstream.TerminalMode
 	hdrLen int
 	target string
+	// needSnap means THIS connection's buffer cannot be trusted, so the next
+	// full repaint must go out as a type-2 snapshot. Set on attach, after a
+	// gap, and after a stream restart — never merely because Herdr sent one of
+	// its periodic `full` frames. A full repaint carries its own clear/home
+	// sequences, so writing it into a live buffer is seamless; marking every one
+	// of them a snapshot told the client to reset several times a second, which
+	// is what the flicker was.
+	needSnap atomic.Bool
 }
 
 // NewSession creates a per-connection session.
@@ -113,6 +130,18 @@ func (s *Session) Geometry(target string) Geometry {
 	return s.geom[target]
 }
 
+// FocusedSession is the Herdr session this connection is currently working in:
+// the session of the last target it rendered live, else the store's default.
+func (s *Session) FocusedSession() string {
+	s.mu.Lock()
+	last := s.lastLive
+	s.mu.Unlock()
+	if name := SessionOf(last); name != "" {
+		return name
+	}
+	return s.hub.store.DefaultSession()
+}
+
 // SetViewport applies a client's declared render modes. The server decides what
 // it actually sends; clients never request LIVE directly, they declare that they
 // are rendering a full terminal and the server grants it.
@@ -145,6 +174,9 @@ func (s *Session) SetViewport(decl map[string]string) {
 				})
 				continue
 			}
+			s.mu.Lock()
+			s.lastLive = target
+			s.mu.Unlock()
 			s.hub.summary.unsubscribe(target, s)
 			s.startStream(target, upstream.ModeObserve)
 		case ModeSummary:
@@ -205,14 +237,30 @@ func (s *Session) Scroll(target string, delta int) error {
 		return nil
 	}
 	if ls.mode != upstream.ModeControl {
-		_, err := s.hub.store.Client().Call(s.ctx, "pane.scroll",
-			map[string]any{"pane_id": target, "delta": delta})
+		_, c, id, err := s.hub.store.Resolve(target)
+		if err != nil {
+			return err
+		}
+		_, err = c.Call(s.ctx, "pane.scroll", map[string]any{"pane_id": id, "delta": delta})
 		return err
 	}
 	return ls.stream.Scroll(delta)
 }
 
 func (s *Session) startStream(target string, mode upstream.TerminalMode) (*liveStream, error) {
+	// Route by session BEFORE spawning: the herdr CLI selects its server from
+	// $HERDR_SOCKET_PATH, and a bare pane id would otherwise resolve against
+	// whichever session launched us.
+	_, _, paneID, err := s.hub.store.Resolve(target)
+	if err != nil {
+		s.sink.SendJSON("closed", map[string]any{"target": target, "reason": err.Error()})
+		return nil, err
+	}
+	socket := s.hub.store.Socket(SessionOf(target))
+	if socket == "" {
+		socket = s.hub.store.Socket(s.hub.store.DefaultSession())
+	}
+
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -225,11 +273,15 @@ func (s *Session) startStream(target string, mode upstream.TerminalMode) (*liveS
 	g := s.geom[target].Clamp()
 	hdr := HeaderLenFor(target)
 	ls := &liveStream{mode: mode, hdrLen: hdr, target: target}
+	// Fresh attachment (or a restart after a takeover): this connection has no
+	// trustworthy buffer for the target, so the next full repaint is a snapshot.
+	ls.needSnap.Store(true)
 	s.streams[target] = ls
 	s.mu.Unlock()
 
-	h := &streamHandler{sess: s, target: target, hdrLen: hdr}
-	ts := upstream.NewTerminalStream(target, mode, g.Cols, g.Rows, h, s.log)
+	h := &streamHandler{sess: s, target: target, hdrLen: hdr, ls: ls}
+	ts := upstream.NewTerminalStream(paneID, mode, g.Cols, g.Rows, h, s.log)
+	ts.Socket = socket
 	ts.Reserve = hdr
 	ts.Takeover = mode == upstream.ModeControl
 	ls.stream = ts
@@ -257,10 +309,22 @@ func (s *Session) stopStream(target string) {
 // requestRepaint fetches a fresh full repaint after a gap. Resume/replay was
 // deleted on purpose: repainting is cheaper and cannot be subtly wrong.
 func (s *Session) requestRepaint(target string) {
+	// Bytes were actually dropped, so this connection's buffer is now
+	// untrustworthy: the next full repaint must also be flagged as a snapshot.
+	s.mu.Lock()
+	ls := s.streams[target]
+	s.mu.Unlock()
+	if ls != nil {
+		ls.needSnap.Store(true)
+	}
 	go func() {
 		ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
 		defer cancel()
-		text, err := s.hub.store.Client().PaneRead(ctx, target, "visible", "ansi", 0)
+		_, c, id, err := s.hub.store.Resolve(target)
+		if err != nil {
+			return
+		}
+		text, err := c.PaneRead(ctx, id, "visible", "ansi", 0)
 		if err != nil {
 			s.log.Debug("repaint read failed", "target", target, "err", err)
 			return
@@ -295,6 +359,7 @@ type streamHandler struct {
 	sess   *Session
 	target string
 	hdrLen int
+	ls     *liveStream
 }
 
 func (h *streamHandler) OnFrame(f upstream.TerminalFrame) {
@@ -306,13 +371,19 @@ func (h *streamHandler) OnFrame(f upstream.TerminalFrame) {
 		h.sess.sink.SendBinary(encodeFrame(TypeFrame, h.sess.seq.next(), h.target, f.Data.B[f.Off:]))
 		return
 	}
-	if f.Full {
+	// type 2 means "you cannot trust your buffer, reset and repaint". That is
+	// true only when this CONNECTION just attached, lost bytes to a gap, or had
+	// its stream restarted — NOT on Herdr's periodic `full` repaints, which are
+	// self-contained and paint cleanly into a live buffer.
+	if f.Full && h.ls != nil && h.ls.needSnap.CompareAndSwap(true, false) {
 		stampHeader(f.Data.B, TypeSnapshot, h.sess.seq.next(), h.target)
 		h.sess.sink.SendBinary(f.Data)
 		h.sess.hub.metrics.Output.Since(t0)
 		return
 	}
-	h.sess.co.push(h.target, f.Data, h.hdrLen, false, t0)
+	// A full repaint still SUPERSEDES anything buffered for this target: there
+	// is no point writing deltas the repaint is about to overwrite.
+	h.sess.co.push(h.target, f.Data, h.hdrLen, f.Full, t0)
 }
 
 func (h *streamHandler) OnClosed(reason string) {
@@ -327,10 +398,11 @@ func (h *streamHandler) OnClosed(reason string) {
 }
 
 // summaryPoller deduplicates SUMMARY reads across connections. pane.read has no
-// geometry, so one poll serves every connection watching that tile.
+// geometry, so one poll serves every connection watching that tile. Targets are
+// session-qualified and each poll is routed to its own session's socket.
 type summaryPoller struct {
-	client *upstream.Client
-	log    *slog.Logger
+	store *Store
+	log   *slog.Logger
 
 	mu   sync.Mutex
 	subs map[string]map[*Session]struct{}
@@ -340,8 +412,8 @@ type summaryPoller struct {
 // SummaryInterval is the SUMMARY tile refresh period (1-2Hz).
 const SummaryInterval = 700 * time.Millisecond
 
-func newSummaryPoller(c *upstream.Client, log *slog.Logger) *summaryPoller {
-	return &summaryPoller{client: c, log: log,
+func newSummaryPoller(store *Store, log *slog.Logger) *summaryPoller {
+	return &summaryPoller{store: store, log: log,
 		subs: map[string]map[*Session]struct{}{}, wake: make(chan struct{}, 1)}
 }
 
@@ -400,8 +472,12 @@ func (p *summaryPoller) run(ctx context.Context) {
 		p.mu.Unlock()
 
 		for _, target := range targets {
+			_, c, id, err := p.store.Resolve(target)
+			if err != nil {
+				continue
+			}
 			rctx, cancel := context.WithTimeout(ctx, 3*time.Second)
-			text, err := p.client.PaneRead(rctx, target, "visible", "ansi", 0)
+			text, err := c.PaneRead(rctx, id, "visible", "ansi", 0)
 			cancel()
 			if err != nil {
 				continue

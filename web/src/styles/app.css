@@ -114,6 +114,11 @@ button {
 
 .scroll {
   flex: 1 1 auto;
+  /* `auto` makes the scrollbar appear and vanish as content height changes,
+     which changes the content width and reflows every row's text. Reserving
+     the gutter permanently is the difference between a calm list and one that
+     twitches horizontally whenever a pane is added or a section collapses. */
+  scrollbar-gutter: stable;
   overflow-y: auto;
   overflow-x: hidden;
   -webkit-overflow-scrolling: touch;
@@ -162,8 +167,14 @@ button {
   border: 1px solid var(--line);
   border-left: 3px solid var(--line);
   border-radius: var(--radius);
-  /* Comfortable thumb target at 375px. */
-  min-height: 68px;
+  /* FIXED height, not min-height: a row that grows or shrinks as its content
+     changes makes the whole list jump under the thumb. Triage needs a still
+     list far more than it needs a second line of text. */
+  /* Two lines and nothing else: title row + one sub line. The old third chip
+     row overflowed this box, which clipped the sub line vertically. */
+  height: 62px;
+  overflow: hidden;
+  justify-content: center;
 }
 
 .row:active {
@@ -176,6 +187,7 @@ button {
 
 .row-blocked {
   border-left-color: var(--blocked);
+  background: rgba(255, 139, 61, 0.06);
 }
 .row-done {
   border-left-color: var(--done);
@@ -202,10 +214,17 @@ button {
 }
 
 .row-sub {
+  /* MUST be a block: text-overflow does nothing on an inline box, which is why
+     the line was clipping mid-word ("bypass permissions on (shift+ta") instead
+     of ellipsising. */
+  display: block;
+  max-width: 100%;
   font-family: var(--mono);
   font-size: 12px;
   line-height: 1.35;
   color: var(--fg-dim);
+  /* Reserve the line whether or not there is text in it. */
+  height: 17px;
   /* One line, clipped — never a source of horizontal scroll. */
   white-space: nowrap;
   overflow: hidden;
@@ -215,7 +234,132 @@ button {
 .row-meta {
   display: flex;
   gap: 6px;
-  flex-wrap: wrap;
+  /* No wrapping: a second chip row would change the row's height. */
+  flex-wrap: nowrap;
+  overflow: hidden;
+  height: 18px;
+  align-items: center;
+}
+
+/* The question is the only preview worth reading, so it gets full contrast. */
+.row-sub-question {
+  font-family: var(--sans);
+  color: var(--fg);
+  font-weight: 500;
+  font-size: 12.5px;
+}
+
+/* A working pane says "working", not what it printed 40ms ago. */
+.row-sub-activity {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--sans);
+  color: var(--fg-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Calm by design: one slow breath, not a spinner. */
+.activity-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--working);
+  flex: 0 0 auto;
+}
+
+.ws-title-urgent {
+  color: var(--blocked);
+}
+
+/* ------------------------------------------------------------ sessions */
+
+.ws-session {
+  margin-top: 14px;
+}
+
+/* The ONLY section header: a session name, a state rollup and a pane count.
+   Workspace and tab ids are routing, and routing does not belong on screen. */
+.session-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 8px 8px 2px;
+  background: transparent;
+  color: var(--fg-dim);
+  text-align: left;
+}
+
+.session-caret {
+  display: inline-block;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--fg-faint);
+  transition: transform 0.12s ease;
+  flex: 0 0 auto;
+}
+
+.session-caret.is-open {
+  transform: rotate(90deg);
+}
+
+.session-name {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.session-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: var(--fg-faint);
+}
+
+.session-dot-blocked {
+  background: var(--blocked);
+}
+.session-dot-done {
+  background: var(--done);
+}
+.session-dot-working {
+  background: var(--working);
+}
+.session-dot-idle {
+  background: var(--fg-faint);
+}
+
+.session-count {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--fg-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.session-empty {
+  margin: 0 0 4px 12px;
+  font-size: 12px;
+  color: var(--fg-faint);
+}
+
+/* Shown only for a workspace with a real human label. Never an id. */
+.area {
+  margin-top: 6px;
+}
+
+.area-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg-faint);
+  margin: 8px 2px 6px;
 }
 
 .chip {
@@ -269,9 +413,8 @@ button {
   color: var(--working);
   background: rgba(98, 176, 255, 0.14);
 }
-.badge-working .badge-dot {
-  animation: pulse 1.4s ease-in-out infinite;
-}
+/* No pulse: the badge already reads "working". Twenty badges pulsing at 1.4s
+   against twenty dots breathing at 2.4s is what read as "flickering". */
 
 @keyframes pulse {
   0%,
@@ -673,6 +816,34 @@ button {
   margin-top: 2px;
 }
 
+/* Past the retry cap: not a transient blip any more, so it reads as an error
+   and stops pulsing. A spinner that never resolves is worse than a fact. */
+.disconnected.is-stuck {
+  background: rgba(255, 90, 90, 0.1);
+  border-color: rgba(255, 90, 90, 0.34);
+}
+
+.disconnected.is-stuck .disconnected-dot {
+  background: #ff5a5a;
+  animation: none;
+}
+
+.disconnected-sub code {
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.disconnected-retry {
+  margin-left: auto;
+  flex: 0 0 auto;
+  padding: 8px 14px;
+  border-radius: var(--radius);
+  background: var(--bg-3);
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 600;
+}
+
 .empty {
   text-align: center;
   padding: 64px 24px;
@@ -718,6 +889,7 @@ button {
   .grid {
     flex: 1 1 auto;
     overflow-y: auto;
+    scrollbar-gutter: stable;
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
     gap: 12px;
@@ -775,14 +947,37 @@ button {
     font-size: 11px;
   }
 
+  .tile-question {
+    flex: 1 1 auto;
+    font-size: 13px;
+    line-height: 1.45;
+    color: var(--fg);
+    /* Three lines at most, clipped — a tile never resizes the grid. */
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .tile-activity {
+    flex: 1 1 auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--fg-faint);
+    font-variant-numeric: tabular-nums;
+  }
+
   /* The key bar is a touch affordance; a desktop has a real keyboard. */
   .app-desktop .keybar {
     display: none;
   }
 
+  /* Denser on the desktop sidebar, still a FIXED height so the list is still. */
   .row {
-    min-height: 0;
-    padding: 10px 12px;
+    height: 58px;
+    padding: 8px 12px;
   }
 }
 
@@ -870,6 +1065,18 @@ button {
 .pair-submit:disabled {
   background: var(--bg-3);
   color: var(--fg-faint);
+}
+
+.pair-notice {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  background: rgba(255, 139, 61, 0.1);
+  border: 1px solid rgba(255, 139, 61, 0.3);
+  color: var(--fg-dim);
+  font-size: 13px;
+  line-height: 1.5;
+  text-align: left;
 }
 
 .pair-error {

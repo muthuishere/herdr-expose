@@ -2,6 +2,7 @@ package core
 
 import (
 	"bytes"
+	"sync"
 	"testing"
 	"time"
 
@@ -92,8 +93,10 @@ func drainForTest(c *coalescer, target string) ([]*upstream.Buf, []time.Time, in
 	return p.spareFrames, p.spareAt, p.hdrLen
 }
 
-// sinkRecorder counts what a connection would have written.
+// sinkRecorder counts what a connection would have written. The coalescer
+// writes from its own goroutine while the test reads, so it is mutex-guarded.
 type sinkRecorder struct {
+	mu     sync.Mutex
 	frames int
 	bytes  int
 	json   int
@@ -101,12 +104,25 @@ type sinkRecorder struct {
 }
 
 func (s *sinkRecorder) SendBinary(b *upstream.Buf) {
+	s.mu.Lock()
 	s.frames++
 	s.bytes += b.Len()
 	s.last = append(s.last[:0], b.B...)
+	s.mu.Unlock()
 	b.Release()
 }
-func (s *sinkRecorder) SendJSON(string, any) { s.json++ }
+
+func (s *sinkRecorder) SendJSON(string, any) {
+	s.mu.Lock()
+	s.json++
+	s.mu.Unlock()
+}
+
+func (s *sinkRecorder) counts() (frames, bytes, jsonN int, last []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.frames, s.bytes, s.json, append([]byte(nil), s.last...)
+}
 
 // TestCoalescerNeverSleeps proves B3: the writer drains what is already queued
 // and writes immediately. A frame must reach the sink without waiting for any
@@ -126,16 +142,20 @@ func TestCoalescerNeverSleeps(t *testing.T) {
 	start := time.Now()
 	c.push(target, buf, hdr, false, start)
 	deadline := time.Now().Add(2 * time.Second)
-	for rec.frames == 0 && time.Now().Before(deadline) {
+	for {
+		if n, _, _, _ := rec.counts(); n > 0 || !time.Now().Before(deadline) {
+			break
+		}
 		time.Sleep(time.Millisecond)
 	}
-	if rec.frames != 1 {
-		t.Fatalf("frame did not arrive: %d", rec.frames)
+	nFrames, _, _, last := rec.counts()
+	if nFrames != 1 {
+		t.Fatalf("frame did not arrive: %d", nFrames)
 	}
 	if el := time.Since(start); el > 10*time.Millisecond {
 		t.Fatalf("coalescer added %v of latency; it must not sleep to accumulate", el)
 	}
-	h, payload, err := DecodeServerFrame(rec.last)
+	h, payload, err := DecodeServerFrame(last)
 	if err != nil || h.Target != target || string(payload) != "abc" {
 		t.Fatalf("bad frame out: %+v %q %v", h, payload, err)
 	}
@@ -159,10 +179,11 @@ func TestCoalescerMergesQueuedRun(t *testing.T) {
 	frames, ats, hdr := drainForTest(c, target)
 	c.writeRun(&seqCounter{}, target, frames, ats, hdr, m)
 
-	if rec.frames != 1 {
-		t.Fatalf("8 queued frames produced %d writes, want 1", rec.frames)
+	nFrames, _, _, last := rec.counts()
+	if nFrames != 1 {
+		t.Fatalf("8 queued frames produced %d writes, want 1", nFrames)
 	}
-	_, payload, _ := DecodeServerFrame(rec.last)
+	_, payload, _ := DecodeServerFrame(last)
 	if string(payload) != "abcdabcdabcdabcdabcdabcdabcdabcd" {
 		t.Fatalf("merged payload wrong: %q", payload)
 	}

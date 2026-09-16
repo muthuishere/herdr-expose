@@ -57,16 +57,37 @@ type WorkspaceView struct {
 	Tabs    []TabView `json:"tabs"`
 }
 
+// SessionView is one Herdr session: the new top level of the tree.
+//
+// `id` is the SESSION NAME, not a pane id: names survive a server restart while
+// pane ids are re-minted, so a client's saved "last pane" only means something
+// when it is qualified by a stable session id.
+type SessionView struct {
+	ID            string          `json:"id"`
+	Name          string          `json:"name"`
+	Running       bool            `json:"running"`
+	Connected     bool            `json:"connected"`
+	Focused       bool            `json:"focused"`
+	Origin        bool            `json:"origin,omitempty"`
+	Default       bool            `json:"default,omitempty"`
+	HerdrVersion  string          `json:"herdr_version,omitempty"`
+	HerdrProtocol int             `json:"herdr_protocol,omitempty"`
+	Error         string          `json:"error,omitempty"`
+	FocusedPane   string          `json:"focused_pane,omitempty"`
+	Workspaces    []WorkspaceView `json:"workspaces"`
+}
+
 // TreeView is the `tree` control frame's data.
 type TreeView struct {
-	Rev              uint64          `json:"rev"`
-	Connected        bool            `json:"connected"`
-	HerdrVersion     string          `json:"herdr_version"`
-	HerdrProtocol    int             `json:"herdr_protocol"`
-	FocusedWorkspace string          `json:"focused_workspace,omitempty"`
-	FocusedTab       string          `json:"focused_tab,omitempty"`
-	FocusedPane      string          `json:"focused_pane,omitempty"`
-	Workspaces       []WorkspaceView `json:"workspaces"`
+	Rev           uint64 `json:"rev"`
+	Connected     bool   `json:"connected"`
+	HerdrVersion  string `json:"herdr_version"`
+	HerdrProtocol int    `json:"herdr_protocol"`
+	// FocusedSession is the session id a client should land on.
+	FocusedSession string `json:"focused_session,omitempty"`
+	// FocusedPane is session-qualified, like every other target on this wire.
+	FocusedPane string        `json:"focused_pane,omitempty"`
+	Sessions    []SessionView `json:"sessions"`
 }
 
 // Agent state enum. `done` is SERVER-DERIVED: idle-but-unseen, per connection.
@@ -100,32 +121,55 @@ func agentState(status string, unseen bool) string {
 	}
 }
 
-// buildTree renders the tree for one connection.
+// buildTree renders the whole multi-session tree for one connection.
+//
+// Every id it emits is SESSION-QUALIFIED (`<session>/<herdr id>`). That is not
+// cosmetic: each Herdr session mints its own ids starting at w1:p1, so bare ids
+// collide across sessions and a client keyed on them would route input to the
+// wrong machine's pane.
 func buildTree(t *core.Tree, sess *core.Session) TreeView {
 	out := TreeView{
 		Rev: t.Rev, Connected: t.Connected,
 		HerdrVersion: t.Version, HerdrProtocol: t.Protocol,
-		Workspaces: []WorkspaceView{},
+		FocusedSession: t.FocusedSession,
+		Sessions:       []SessionView{},
 	}
-	snap := t.Snapshot
+	for _, st := range t.Sessions {
+		sv := SessionView{
+			ID: st.Name, Name: st.Name,
+			Running: st.Running, Connected: st.Connected,
+			Focused: st.Name == t.FocusedSession,
+			Origin:  st.Origin, Default: st.Default,
+			HerdrVersion: st.Version, HerdrProtocol: st.Protocol,
+			Error:      st.Err,
+			Workspaces: buildWorkspaces(st.Name, st.Snapshot, t, sess),
+		}
+		if snap := st.Snapshot; snap != nil && snap.FocusedPaneID != "" {
+			sv.FocusedPane = core.JoinTarget(st.Name, snap.FocusedPaneID)
+			if sv.Focused {
+				out.FocusedPane = sv.FocusedPane
+			}
+		}
+		out.Sessions = append(out.Sessions, sv)
+	}
+	return out
+}
+
+func buildWorkspaces(session string, snap *upstream.Snapshot, t *core.Tree, sess *core.Session) []WorkspaceView {
+	out := []WorkspaceView{}
 	if snap == nil {
 		return out
 	}
-	out.FocusedWorkspace = snap.FocusedWorkspace
-	out.FocusedTab = snap.FocusedTabID
-	out.FocusedPane = snap.FocusedPaneID
-
 	panesByTab := map[string][]PaneView{}
 	for i := range snap.Panes {
 		p := &snap.Panes[i]
-		pv := paneView(p, t, sess)
-		panesByTab[p.TabID] = append(panesByTab[p.TabID], pv)
+		panesByTab[p.TabID] = append(panesByTab[p.TabID], paneView(session, p, t, sess))
 	}
 	tabsByWorkspace := map[string][]TabView{}
 	for i := range snap.Tabs {
 		tb := &snap.Tabs[i]
 		tabsByWorkspace[tb.WorkspaceID] = append(tabsByWorkspace[tb.WorkspaceID], TabView{
-			ID: tb.TabID, Label: tb.Label, Number: tb.Number,
+			ID: core.JoinTarget(session, tb.TabID), Label: tb.Label, Number: tb.Number,
 			Focused: tb.Focused, Panes: nonNilPanes(panesByTab[tb.TabID]),
 		})
 	}
@@ -135,8 +179,8 @@ func buildTree(t *core.Tree, sess *core.Session) TreeView {
 		if tabs == nil {
 			tabs = []TabView{}
 		}
-		out.Workspaces = append(out.Workspaces, WorkspaceView{
-			ID: ws.WorkspaceID, Label: ws.Label, Number: ws.Number,
+		out = append(out, WorkspaceView{
+			ID: core.JoinTarget(session, ws.WorkspaceID), Label: ws.Label, Number: ws.Number,
 			Focused: ws.Focused, Tabs: tabs,
 		})
 	}
@@ -150,7 +194,8 @@ func nonNilPanes(p []PaneView) []PaneView {
 	return p
 }
 
-func paneView(p *upstream.Pane, t *core.Tree, sess *core.Session) PaneView {
+func paneView(session string, p *upstream.Pane, t *core.Tree, sess *core.Session) PaneView {
+	target := core.JoinTarget(session, p.PaneID)
 	title := p.TerminalTitleStripped
 	if title == "" {
 		title = p.TerminalTitle
@@ -158,9 +203,9 @@ func paneView(p *upstream.Pane, t *core.Tree, sess *core.Session) PaneView {
 	if title == "" {
 		title = p.PaneID
 	}
-	g := sess.Geometry(p.PaneID)
+	g := sess.Geometry(target)
 	pv := PaneView{
-		ID: p.PaneID, TerminalID: p.TerminalID, Title: title,
+		ID: target, TerminalID: p.TerminalID, Title: title,
 		Cwd: p.ForegroundCwd, Focused: p.Focused,
 		Cols: g.Cols, Rows: g.Rows,
 	}
@@ -178,9 +223,9 @@ func paneView(p *upstream.Pane, t *core.Tree, sess *core.Session) PaneView {
 		av := &AgentView{
 			ID:    id,
 			Kind:  p.Agent,
-			State: agentState(p.AgentStatus, sess.Seen.Unseen(p.PaneID, t.DoneSeq[p.PaneID])),
+			State: agentState(p.AgentStatus, sess.Seen.Unseen(target, t.DoneSeq[target])),
 		}
-		if ts, ok := t.ChangedAt[p.PaneID]; ok {
+		if ts, ok := t.ChangedAt[target]; ok {
 			at := ts
 			av.ChangedAt = &at
 		}
@@ -196,6 +241,7 @@ func paneView(p *upstream.Pane, t *core.Tree, sess *core.Session) PaneView {
 // for blocked agents, and only when the state actually changed.
 type agentFrame struct {
 	Target    string     `json:"target"`
+	Session   string     `json:"session"`
 	ID        string     `json:"id"`
 	Kind      string     `json:"kind,omitempty"`
 	State     string     `json:"state"`
@@ -208,34 +254,41 @@ type agentFrame struct {
 // for THIS connection since the last tree push, and unconditionally on the
 // first push so an already-blocked pane arrives with its question text.
 func (s *Server) emitAgents(ctx context.Context, conn *wsConn, view TreeView, first bool) {
-	client := s.hub.Store().Client()
-	for _, ws := range view.Workspaces {
-		for _, tab := range ws.Tabs {
-			for _, p := range tab.Panes {
-				if p.Agent == nil {
-					continue
-				}
-				prev, seen := conn.agentState[p.ID]
-				if seen && prev == p.Agent.State && !first {
-					continue
-				}
-				conn.agentState[p.ID] = p.Agent.State
-
-				f := agentFrame{
-					Target: p.ID, ID: p.Agent.ID, Kind: p.Agent.Kind,
-					State: p.Agent.State, Summary: p.Title, ChangedAt: p.Agent.ChangedAt,
-				}
-				if p.Agent.State == AgentBlocked {
-					rctx, cancel := context.WithTimeout(ctx, 3*time.Second)
-					// `detection` is the same bottom-buffer region Herdr
-					// classifies on, so the Q&A view stays generic across
-					// agent kinds with no per-agent parsing.
-					if text, err := client.PaneRead(rctx, p.ID, "detection", "text", 0); err == nil {
-						f.Detection = text
+	store := s.hub.Store()
+	for _, sv := range view.Sessions {
+		for _, ws := range sv.Workspaces {
+			for _, tab := range ws.Tabs {
+				for _, p := range tab.Panes {
+					if p.Agent == nil {
+						continue
 					}
-					cancel()
+					prev, seen := conn.agentState[p.ID]
+					if seen && prev == p.Agent.State && !first {
+						continue
+					}
+					conn.agentState[p.ID] = p.Agent.State
+
+					f := agentFrame{
+						Target: p.ID, Session: sv.ID, ID: p.Agent.ID, Kind: p.Agent.Kind,
+						State: p.Agent.State, Summary: p.Title, ChangedAt: p.Agent.ChangedAt,
+					}
+					if p.Agent.State == AgentBlocked {
+						// Route the read to THIS session's socket: a bare pane
+						// id would otherwise read the same id in another one.
+						if _, c, id, err := store.Resolve(p.ID); err == nil {
+							rctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+							// `detection` is the same bottom-buffer region
+							// Herdr classifies on, so the Q&A view stays
+							// generic across agent kinds with no per-agent
+							// parsing.
+							if text, err := c.PaneRead(rctx, id, "detection", "text", 0); err == nil {
+								f.Detection = text
+							}
+							cancel()
+						}
+					}
+					conn.SendJSON("agent", f)
 				}
-				conn.SendJSON("agent", f)
 			}
 		}
 	}

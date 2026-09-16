@@ -1,4 +1,4 @@
-# herdr-expose API v1
+# herdr-expose API v2
 
 This document is the **public contract** for herdr-expose. It is written so that
 a Swift, Kotlin, Rust or Python client can be built from this page alone, with
@@ -11,8 +11,32 @@ documented below.
 
 - **Base URL**: `http://127.0.0.1:21118` by default (port is configurable).
 - **Transport**: HTTP/1.1 and a single WebSocket.
-- **Version**: `v1`, in the path. See [Versioning](#11-versioning-and-compatibility).
+- **Version**: wire `api: "2"`. The HTTP paths stay `/v1/...`; the negotiated
+  version is the `api` field in `/v1/config` and `welcome`.
+  See [Versioning](#11-versioning-and-compatibility).
 - Verified against Herdr 0.9.0, protocol 22.
+
+## What changed in API 2 — MULTI-SESSION
+
+The owner runs many named Herdr sessions at once and wants all of them in one
+UI, so the server is no longer bound to a single socket. Two breaking changes:
+
+1. **The tree gained a top level.** It is now
+   `sessions[] -> workspaces[] -> tabs[] -> panes[]`. A session is
+   `{id, name, running, connected, focused, origin, workspaces[]}`, where `id`
+   is the SESSION NAME — stable across server restarts, unlike pane ids.
+2. **Every `target` is session-qualified**: `herdr-plugins/w2:p1`, never a bare
+   `w2:p1`. Each Herdr session mints its own ids starting at `w1:p1`, so bare
+   ids collide across sessions and would route a keystroke to the wrong
+   machine's pane. The qualified form is used everywhere a target appears:
+   `subscribe`, `viewport`, `resize`, `scroll`, `seen`, the binary frame header
+   (both directions) and `closed`/`agent`/`error` frames. Workspace and tab ids
+   are qualified the same way.
+
+The session the server was launched from (`$HERDR_SOCKET_PATH`) is one entry
+among many, flagged `origin: true`. It gets no other privileges. Sessions appear
+and disappear while the server runs — a session going down marks its entry
+`connected: false` and leaves every other session streaming.
 
 ---
 
@@ -105,7 +129,7 @@ Bootstrap for a connected client. **Never contains a token or any secret.**
 
 ```json
 {
-  "api_version": "v1",
+  "api": "2",
   "server_version": "0.1.0",
   "herdr_version": "0.9.0",
   "herdr_protocol": 22,
@@ -330,15 +354,15 @@ arrives.
 
 #### `subscribe` / `unsubscribe`
 
-Declare interest in targets. A `target` is a Herdr pane identifier, ASCII, as it
-appears in `tree`.
+Declare interest in targets. A `target` is a **session-qualified** Herdr pane
+identifier, ASCII, exactly as it appears in `tree`: `<session>/<pane_id>`.
 
 ```json
-{ "type": "subscribe",   "data": { "targets": ["w1:p1", "w1:p2"] } }
+{ "type": "subscribe",   "data": { "targets": ["herdr-plugins/w1:p1", "crypto-desk/w1:p1"] } }
 ```
 
 ```json
-{ "type": "unsubscribe", "data": { "targets": ["w1:p2"] } }
+{ "type": "unsubscribe", "data": { "targets": ["crypto-desk/w1:p1"] } }
 ```
 
 #### `resize` — required before the first frame
@@ -346,7 +370,7 @@ appears in `tree`.
 Terminal geometry, **per target, per connection**.
 
 ```json
-{ "type": "resize", "data": { "target": "w1:p1", "cols": 80, "rows": 24 } }
+{ "type": "resize", "data": { "target": "herdr-plugins/w1:p1", "cols": 80, "rows": 24 } }
 ```
 
 - **Floor: 20 cols by 6 rows.** Smaller values are clamped.
@@ -368,23 +392,40 @@ Declare what you are **rendering**. This is a statement, not a request — see
 
 ```json
 { "type": "viewport", "data": { "targets": {
-  "w1:p1": "live",
-  "w1:p2": "summary",
-  "w1:p3": "none"
+  "herdr-plugins/w1:p1": "live",
+  "herdr-plugins/w1:p2": "summary",
+  "crypto-desk/w3:p1":   "summary"
 }}}
 ```
 
 #### `command`
 
-Call a Herdr socket method. See [section 9](#9-calling-herdr-methods).
+Call a Herdr socket method **on one session's socket**. See
+[section 9](#9-calling-herdr-methods).
 
 ```json
 { "type": "command", "data": {
   "id": "c-17",
+  "session": "herdr-plugins",
   "method": "pane.send_text",
-  "params": { "pane_id": "w1:p1", "text": "ls" }
+  "params": { "pane_id": "herdr-plugins/w1:p1", "text": "ls" }
 }}
 ```
+
+Session selection, in order:
+
+1. the explicit `session` field;
+2. otherwise the session prefix on a target-ish param (`target`, `pane_id`,
+   `tab_id`, `workspace_id`, `from`, `to`, `source_pane_id`, `target_pane_id`);
+3. otherwise the session of the target this connection is currently rendering
+   live;
+4. otherwise the server's default session (`targets.default_session` in
+   `welcome`).
+
+Herdr knows nothing about the namespacing, so the server strips the resolved
+`<session>/` prefix off those params before the call goes upstream — sending
+either the qualified or the bare id works. The `result` frame echoes the
+`session` it was dispatched to.
 
 #### `ping`
 
@@ -404,7 +445,7 @@ First server message after `hello`.
 
 ```json
 { "seq": 1, "type": "welcome", "data": {
-  "api_version": "v1",
+  "api": "2",
   "server_version": "0.1.0",
   "herdr_version": "0.9.0",
   "herdr_protocol": 22,
@@ -424,16 +465,29 @@ structure client-side; two clients showing different trees is a server bug.
 
 ```json
 { "seq": 2, "type": "tree", "data": {
-  "herdr_connected": true,
-  "workspaces": [{
-    "id": "w1",
+  "rev": 41,
+  "connected": true,
+  "herdr_version": "0.9.0",
+  "herdr_protocol": 22,
+  "focused_session": "herdr-plugins",
+  "focused_pane": "herdr-plugins/w2:p1",
+  "sessions": [{
+   "id": "herdr-plugins",
+   "name": "herdr-plugins",
+   "running": true,
+   "connected": true,
+   "focused": true,
+   "origin": true,
+   "focused_pane": "herdr-plugins/w2:p1",
+   "workspaces": [{
+    "id": "herdr-plugins/w1",
     "label": "herdr-expose",
     "cwd": "/Users/me/src/herdr-expose",
     "tabs": [{
-      "id": "w1:t1",
+      "id": "herdr-plugins/w1:t1",
       "label": "build",
       "panes": [{
-        "id": "w1:p1",
+        "id": "herdr-plugins/w1:p1",
         "terminal_id": "term_8f21",
         "title": "claude",
         "cwd": "/Users/me/src/herdr-expose",
@@ -448,20 +502,26 @@ structure client-side; two clients showing different trees is a server bug.
         "mode": "live"
       }]
     }]
+   }]
   }]
 }}
 ```
 
 Notes that matter for a client:
 
-- **`id` is not stable across Herdr server restarts. `terminal_id` is stable
-  across moves.** Key your UI state on `terminal_id` where you can.
+- **A session `id` IS stable** (it is the session name). A pane `id` is not
+  stable across a Herdr server restart, while `terminal_id` is stable across
+  moves — key your UI state on `<session>/<terminal_id>` where you can.
+- A session with `connected: false` has no `workspaces`; keep its row and show
+  it as offline. It reconnects on its own, and its entry fills back in.
 - `status` is one of `idle`, `working`, `blocked`, `unknown`. `blocked` means the
   agent is waiting on a human — that is your cue for the Q&A view.
 - `idle` is a fact about the pane. **`done` is a fact about you** — see below.
 - `mode` is the mode the **server** chose for you. It may not be what you asked
   for in `viewport`.
-- `herdr_connected: false` means we lost the Herdr socket and are retrying. Keep
+- `connected: false` at the TOP level means every session is unreachable; a
+  per-session `connected: false` means only that one is. Either way we are
+  retrying. Keep
   the client connection open and show a degraded state; a fresh `tree` follows
   reconnection.
 
@@ -471,7 +531,8 @@ Agent status transitions, ahead of the next full `tree`.
 
 ```json
 { "seq": 87, "type": "agent", "data": {
-  "target": "w1:p1",
+  "target": "herdr-plugins/w1:p1",
+  "session": "herdr-plugins",
   "status": "blocked",
   "detection": "Do you want to proceed? (y/n)"
 }}
@@ -515,7 +576,7 @@ Response to a `command`, correlated by `id`.
 
 ```json
 { "seq": 88, "type": "result", "data": {
-  "id": "c-17", "ok": true, "result": { "written": 3 }
+  "id": "c-17", "session": "herdr-plugins", "ok": true, "result": { "written": 3 }
 }}
 ```
 
@@ -531,7 +592,7 @@ Response to a `command`, correlated by `id`.
 A target is gone: the pane exited, or control was lost.
 
 ```json
-{ "seq": 120, "type": "closed", "data": { "target": "w1:p1", "reason": "exited" } }
+{ "seq": 120, "type": "closed", "data": { "target": "herdr-plugins/w1:p1", "reason": "exited" } }
 ```
 
 `reason` is one of `exited`, `released`, `error`, `upstream_lost`. Stop rendering
@@ -568,7 +629,7 @@ protobuf.
 | `type` | Name | Payload |
 |---|---|---|
 | `1` | `frame` | raw ANSI bytes from the pane |
-| `2` | `snapshot` | raw ANSI bytes: a full repaint of the target |
+| `2` | `snapshot` | raw ANSI bytes: a full repaint, and a signal that **your buffer cannot be trusted** — reset the emulator and repaint |
 | `3` | `gap` | exactly 8 bytes: `u64` big-endian `bytes_dropped` |
 
 - **All integers are big-endian** (network byte order): `seq` as u64 BE, `tlen`
@@ -611,11 +672,25 @@ A `gap` announcing 131072 dropped bytes on the same target:
 A `snapshot` always follows a `gap` for the same target.
 
 **Where snapshots come from.** Herdr's own terminal records carry a `full` flag
-marking a full repaint — emitted on attach and after a resize. We forward those
-as `snapshot` (type 2) and everything else as `frame` (type 1). So the first
-thing you receive after attaching is already a complete screen: there is no
-separate "request a snapshot" call, and you do not need one on reconnect either.
-On `snapshot`, reset your emulator and write the payload.
+marking a full repaint. It is set on attach and after a resize, but ALSO
+periodically on a completely idle pane, so `full` on its own does not mean your
+buffer is stale.
+
+Type 2 therefore means exactly one thing: **this connection's buffer cannot be
+trusted.** The server sends it for the first full repaint after
+
+- you attach (or re-attach) to the target,
+- a `gap` on that target — bytes really were dropped,
+- an upstream stream restart, e.g. the observe -> control takeover respawn.
+
+Every other repaint, including Herdr's idle ones, arrives as an ordinary `frame`
+(type 1). A full repaint carries its own clear/home sequences, so writing it into
+a live buffer is seamless — resetting the emulator on each one is what makes a
+terminal visibly flicker. On `snapshot`, reset and write the payload; on `frame`,
+just write it.
+
+The first thing you receive after attaching is still a complete screen, so there
+is no separate "request a snapshot" call, and you do not need one on reconnect.
 
 ### Reference decoder
 
