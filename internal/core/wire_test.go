@@ -247,3 +247,21 @@ func BenchmarkFanoutFrame(b *testing.B) {
 	b.StopTimer()
 	c.close()
 }
+
+// BenchmarkDecodeClientFrame is the keystroke ingress path: a 3-byte header
+// parse and two subslices. No JSON, no base64, no copy.
+func BenchmarkDecodeClientFrame(b *testing.B) {
+	target := "w2:p1"
+	buf := make([]byte, 0, ClientHeaderLen+len(target)+3)
+	buf = append(buf, TypeInput, 0, byte(len(target)))
+	buf = append(buf, target...)
+	buf = append(buf, 0x1b, '[', 'A')
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, _, _, err := DecodeClientFrame(buf); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

@@ -48,8 +48,9 @@ type Server struct {
 	exposure Exposure
 	upgrader websocket.Upgrader
 
-	http *http.Server
-	addr string
+	http  *http.Server
+	addr  string
+	local localMode
 }
 
 // Options configures a Server.
@@ -88,7 +89,15 @@ func New(o Options) (*Server, error) {
 		WriteBufferSize:   4096,
 		EnableCompression: true, // permessage-deflate, context takeover left ON
 		CheckOrigin: func(r *http.Request) bool {
-			return s.auth.OriginAllowed(r.Header.Get("Origin"))
+			// A browser ALWAYS sends Origin on a WS upgrade. A missing Origin
+			// is therefore a non-browser client, which we allow only when it
+			// also carries a token (checked in handleStream before the
+			// upgrade). It is never defaulted-allow for a browser.
+			o := r.Header.Get("Origin")
+			if o == "" {
+				return true
+			}
+			return s.originAllowed(r, o)
 		},
 	}
 	s.http = &http.Server{
@@ -134,16 +143,34 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		h.Set("Referrer-Policy", "no-referrer")
 		h.Set("Content-Security-Policy", "frame-ancestors 'none'")
 
+		// Host pinning. A DNS-rebound name arrives here and will not match,
+		// which is precisely what stops rebinding against a local server that
+		// executes commands. /healthz is exempt so a tunnel health check works.
+		if r.URL.Path != "/healthz" && !s.hostAllowed(r) {
+			http.Error(w, "forbidden host", http.StatusForbidden)
+			return
+		}
+
 		origin := r.Header.Get("Origin")
 		if origin != "" {
-			if !s.auth.OriginAllowed(origin) {
+			if !s.originAllowed(r, origin) {
 				http.Error(w, "forbidden origin", http.StatusForbidden)
 				return
 			}
+			// Never reflect an arbitrary origin: only one we just allowlisted.
 			h.Set("Access-Control-Allow-Origin", origin)
 			h.Set("Vary", "Origin")
 			h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
 			h.Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		} else if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			// A state-changing request with no Origin is not a browser request
+			// we can vouch for. /v1/pair is the one exception: it is reached by
+			// a freshly-scanned phone before any origin is established, and it
+			// is already rate-limited and single-use.
+			if r.URL.Path != "/v1/pair" {
+				http.Error(w, "origin required", http.StatusForbidden)
+				return
+			}
 		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -151,6 +178,38 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// hostAllowed pins the Host header. In local mode only the loopback forms are
+// accepted; when a tunnel hostname is configured that is accepted too.
+func (s *Server) hostAllowed(r *http.Request) bool {
+	if s.local.hostPinned(r) {
+		return true
+	}
+	host := strings.ToLower(r.Host)
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	for _, o := range s.cfg.AllowedOrigins() {
+		o = strings.ToLower(strings.TrimSpace(o))
+		o = strings.TrimPrefix(strings.TrimPrefix(o, "https://"), "http://")
+		if h, _, err := net.SplitHostPort(o); err == nil {
+			o = h
+		}
+		if o != "" && o == host {
+			return true
+		}
+	}
+	return false
+}
+
+// originAllowed applies the allowlist. In local mode the loopback origins are
+// the allowlist; otherwise the configured origins are.
+func (s *Server) originAllowed(r *http.Request, origin string) bool {
+	if s.local.originPinned(origin) {
+		return true
+	}
+	return s.auth.OriginAllowed(origin)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -190,9 +249,11 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 // handleMetrics reports the measured latency of the two budgeted paths.
 // Authenticated: it tells an attacker how busy the machine is.
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.auth.Authenticate(BearerFrom(r), RemoteIP(r), r.UserAgent()); err != nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
+	if !s.local.bypassAuth(r) {
+		if _, err := s.auth.Authenticate(BearerFrom(r), RemoteIP(r), r.UserAgent()); err != nil {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, s.hub.Metrics().Snapshot())
 }
@@ -320,6 +381,12 @@ func (s *Server) Serve(ctx context.Context) error {
 	ln, err := net.Listen("tcp", s.addr)
 	if err != nil {
 		return err
+	}
+	// Derived from the LISTENER, never from a header (SPEC F1).
+	s.local = newLocalMode(ln)
+	if s.local.enabled {
+		s.log.Info("local mode: loopback listener, device token not required",
+			"origin_pinning", true, "host_pinning", true)
 	}
 	go func() {
 		<-ctx.Done()

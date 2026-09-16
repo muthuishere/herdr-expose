@@ -17,35 +17,35 @@ command = ["./scripts/build.sh"]
 command = ["./bin/herdr-expose", "daemon"]
 
 [[actions]]
-id = "open"
+id = "hex:open"
 title = "Open herdr-expose"
 description = "Open the local web UI in your browser"
 command = ["./bin/herdr-expose", "open"]
 contexts = ["global"]
 
 [[actions]]
-id = "pair"
+id = "hex:pair"
 title = "Pair a device"
 description = "Mint a single-use pairing code and show a QR to scan from a phone"
 command = ["./bin/herdr-expose", "pair"]
 contexts = ["global"]
 
 [[actions]]
-id = "status"
+id = "hex:status"
 title = "herdr-expose status"
 description = "Server state, local URL, exposed URL, and paired devices"
 command = ["./bin/herdr-expose", "status"]
 contexts = ["global"]
 
 [[actions]]
-id = "expose"
+id = "hex:expose"
 title = "Expose over a tunnel"
 description = "Start the configured tunnel and print the public URL"
 command = ["./bin/herdr-expose", "expose", "start"]
 contexts = ["global"]
 
 [[actions]]
-id = "unexpose"
+id = "hex:unexpose"
 title = "Stop exposing"
 description = "Tear down the tunnel; the server stays up on loopback"
 command = ["./bin/herdr-expose", "expose", "stop"]
@@ -55,7 +55,7 @@ contexts = ["global"]
 # leaving the TUI. Overlay so it floats above the current layout and closes
 # without disturbing panes.
 [[panes]]
-id = "pair-qr"
+id = "hex:pair-qr"
 title = "Pair a device"
 description = "Scan this QR from your phone to pair it with this machine"
 command = ["./bin/herdr-expose", "pair", "--pane"]
@@ -64,7 +64,7 @@ placement = "overlay"
 
 # A small status pane: local URL, tunnel URL, connected clients.
 [[panes]]
-id = "status"
+id = "hex:status"
 title = "herdr-expose status"
 description = "Live server and tunnel status"
 command = ["./bin/herdr-expose", "status", "--watch"]
@@ -75,7 +75,7 @@ height = 20
 # Clicking a herdr-expose URL printed in any pane opens it in the UI rather than
 # handing it to the system browser with no session.
 [[link_handlers]]
-id = "expose-url"
+id = "hex:expose-url"
 title = "Open in herdr-expose"
 pattern = "^https?://[^/]+/#/pane/"
-action = "open"
+action = "hex:open"

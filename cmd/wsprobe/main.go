@@ -18,10 +18,48 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
+
+// treeFrame mirrors the `tree` control frame: workspaces -> tabs -> panes.
+type treeFrame struct {
+	Rev          uint64 `json:"rev"`
+	Connected    bool   `json:"connected"`
+	HerdrVersion string `json:"herdr_version"`
+	FocusedPane  string `json:"focused_pane"`
+	Workspaces   []struct {
+		ID    string `json:"id"`
+		Label string `json:"label"`
+		Tabs  []struct {
+			ID    string      `json:"id"`
+			Panes []paneFrame `json:"panes"`
+		} `json:"tabs"`
+	} `json:"workspaces"`
+}
+
+type paneFrame struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+	Agent *struct {
+		ID    string `json:"id"`
+		Kind  string `json:"kind"`
+		State string `json:"state"`
+	} `json:"agent"`
+}
+
+func (t treeFrame) allPanes() []paneFrame {
+	var out []paneFrame
+	for _, ws := range t.Workspaces {
+		for _, tab := range ws.Tabs {
+			out = append(out, tab.Panes...)
+		}
+	}
+	return out
+}
 
 type envelope struct {
 	Seq  uint64          `json:"seq"`
@@ -35,12 +73,15 @@ func main() {
 	target := flag.String("target", "", "pane id (default: the focused pane from the tree)")
 	secs := flag.Int("secs", 8, "how long to stream")
 	cols := flag.Int("cols", 100, "terminal columns")
+	echo := flag.Int("echo", 0, "measure keystroke->echo latency with N probe keystrokes "+
+		"(DEFAULT 0 = read-only; this TAKES CONTROL of the pane and types into it)")
+	echoKey := flag.String("echo-key", "\x1b", "bytes to send as the probe keystroke; "+
+		"ESC is the default because it is inert in most TUIs")
 	rows := flag.Int("rows", 30, "terminal rows")
 	flag.Parse()
 
-	if *token == "" {
-		fail("no token: pass -token or set $HERDR_EXPOSE_TOKEN")
-	}
+	// An empty token is valid: in local mode (loopback listener, pinned Host and
+	// Origin) no device token is required — see SPEC F1.
 
 	// 1. /healthz, unauthenticated.
 	resp, err := http.Get("http://" + *addr + "/healthz")
@@ -56,7 +97,10 @@ func main() {
 
 	// 2. WebSocket handshake with a bearer token.
 	d := websocket.Dialer{EnableCompression: true, HandshakeTimeout: 10 * time.Second}
-	hdr := http.Header{"Authorization": {"Bearer " + *token}}
+	hdr := http.Header{}
+	if *token != "" {
+		hdr.Set("Authorization", "Bearer "+*token)
+	}
 	c, hresp, err := d.Dial("ws://"+*addr+"/v1/stream", hdr)
 	if err != nil {
 		if hresp != nil {
@@ -67,13 +111,26 @@ func main() {
 	defer c.Close()
 	fmt.Println("PASS websocket upgraded")
 
-	// 3. Rejection before upgrade is part of the contract.
-	if _, r2, err := d.Dial("ws://"+*addr+"/v1/stream", http.Header{"Authorization": {"Bearer wrong"}}); err == nil {
-		fail("FAIL a bad token was accepted")
-	} else if r2 == nil || r2.StatusCode != http.StatusUnauthorized {
-		fmt.Println("WARN bad token rejected, but not with 401")
+	// 3. Host pinning must reject a rebound DNS name before the upgrade.
+	rebind := http.Header{"Host": {"evil.example.com"}}
+	if _, r2, err := d.Dial("ws://"+*addr+"/v1/stream", rebind); err == nil {
+		fmt.Println("WARN a forged Host was accepted (Go may have overridden it)")
+	} else if r2 != nil && r2.StatusCode == http.StatusForbidden {
+		fmt.Println("PASS forged Host rejected with 403 before upgrade")
 	} else {
-		fmt.Println("PASS bad token rejected with 401 before upgrade")
+		fmt.Printf("INFO forged Host rejected (%v)\n", err)
+	}
+	// A browser-shaped upgrade from a hostile page must be refused on Origin.
+	evil := http.Header{
+		"Origin":     {"http://evil.example.com"},
+		"User-Agent": {"Mozilla/5.0"},
+	}
+	if _, r3, err := d.Dial("ws://"+*addr+"/v1/stream", evil); err == nil {
+		fail("FAIL a hostile Origin was accepted")
+	} else if r3 != nil && r3.StatusCode == http.StatusForbidden {
+		fmt.Println("PASS hostile Origin rejected with 403 before upgrade")
+	} else {
+		fmt.Printf("WARN hostile Origin rejected, but not with 403 (%v)\n", err)
 	}
 
 	var (
@@ -87,10 +144,29 @@ func main() {
 		firstFrame time.Time
 		pingSent   time.Time
 		rtt        time.Duration
+
+		echoMu      sync.Mutex
+		echoPending time.Time
+		echoSamples []time.Duration
+		echoLeft    = *echo
 	)
 
 	deadline := time.Now().Add(time.Duration(*secs) * time.Second)
 	_ = c.SetReadDeadline(deadline.Add(2 * time.Second))
+
+	// sendInput writes a binary client frame: [type=16][tlen u16][target][raw].
+	sendInput := func(target string, raw []byte) {
+		buf := make([]byte, 0, 3+len(target)+len(raw))
+		buf = append(buf, 16, byte(len(target)>>8), byte(len(target)))
+		buf = append(buf, target...)
+		buf = append(buf, raw...)
+		echoMu.Lock()
+		echoPending = time.Now()
+		echoMu.Unlock()
+		if err := c.WriteMessage(websocket.BinaryMessage, buf); err != nil {
+			fail("write input: %v", err)
+		}
+	}
 
 	send := func(typ string, data any) {
 		b, _ := json.Marshal(map[string]any{"type": typ, "data": data})
@@ -117,27 +193,23 @@ func main() {
 			case "tree":
 				if !gotTree {
 					gotTree = true
-					var t struct {
-						Connected bool `json:"connected"`
-						Snapshot  struct {
-							FocusedPane string `json:"focused_pane_id"`
-							Panes       []struct {
-								PaneID string `json:"pane_id"`
-								Agent  string `json:"agent"`
-								Title  string `json:"terminal_title_stripped"`
-							} `json:"panes"`
-						} `json:"snapshot"`
-					}
+					var t treeFrame
 					_ = json.Unmarshal(e.Data, &t)
-					fmt.Printf("PASS tree upstream_connected=%v panes=%d\n",
-						t.Connected, len(t.Snapshot.Panes))
-					for _, p := range t.Snapshot.Panes {
-						fmt.Printf("     pane %-10s agent=%-8s %s\n", p.PaneID, p.Agent, p.Title)
+					all := t.allPanes()
+					fmt.Printf("PASS tree upstream_connected=%v workspaces=%d panes=%d\n",
+						t.Connected, len(t.Workspaces), len(all))
+					for _, p := range all {
+						state, kind := "-", "-"
+						if p.Agent != nil {
+							state, kind = p.Agent.State, p.Agent.Kind
+						}
+						fmt.Printf("     pane %-10s agent=%-8s state=%-8s %s\n",
+							p.ID, kind, state, p.Title)
 					}
 					if pane == "" {
-						pane = t.Snapshot.FocusedPane
-						if pane == "" && len(t.Snapshot.Panes) > 0 {
-							pane = t.Snapshot.Panes[0].PaneID
+						pane = t.FocusedPane
+						if pane == "" && len(all) > 0 {
+							pane = all[0].ID
 						}
 					}
 					if pane == "" {
@@ -149,12 +221,22 @@ func main() {
 					send("viewport", map[string]any{"targets": map[string]string{pane: "live"}})
 					pingSent = time.Now()
 					send("ping", map[string]any{"t": pingSent.UnixMilli()})
+					if *echo > 0 {
+						fmt.Printf("     NOTE: -echo takes CONTROL of %s and types %q into it\n",
+							pane, *echoKey)
+						go func() {
+							time.Sleep(400 * time.Millisecond)
+							sendInput(pane, []byte(*echoKey))
+						}()
+					}
 				}
 			case "pong":
 				if rtt == 0 {
 					rtt = time.Since(pingSent)
 					fmt.Printf("PASS pong control-plane RTT %.2fms\n", float64(rtt.Microseconds())/1000)
 				}
+			case "agent":
+				fmt.Printf("PASS agent %s\n", compact(e.Data))
 			case "closed":
 				fmt.Printf("INFO closed %s\n", compact(e.Data))
 			case "error":
@@ -175,6 +257,22 @@ func main() {
 			case 1:
 				frames++
 				dataBytes += len(payload)
+				// keystroke -> echo: the first frame after a probe keystroke.
+				echoMu.Lock()
+				if !echoPending.IsZero() {
+					echoSamples = append(echoSamples, time.Since(echoPending))
+					echoPending = time.Time{}
+					if echoLeft > 0 {
+						echoLeft--
+					}
+				}
+				echoMu.Unlock()
+				if echoLeft > 0 && len(echoSamples) < *echo {
+					go func() {
+						time.Sleep(120 * time.Millisecond)
+						sendInput(pane, []byte(*echoKey))
+					}()
+				}
 				if firstFrame.IsZero() {
 					firstFrame = time.Now()
 					fmt.Printf("PASS first frame seq=%d target=%s bytes=%d\n", seq, tgt, len(payload))
@@ -205,6 +303,19 @@ func main() {
 		fmt.Printf("\nMEASURED server-side latency (microseconds):\n     %s\n", out)
 	}
 
+	if len(echoSamples) > 0 {
+		sort.Slice(echoSamples, func(i, j int) bool { return echoSamples[i] < echoSamples[j] })
+		q := func(p float64) time.Duration {
+			i := int(float64(len(echoSamples))*p) - 1
+			if i < 0 {
+				i = 0
+			}
+			return echoSamples[i]
+		}
+		fmt.Printf("\nMEASURED keystroke -> echo (n=%d): p50 %.2fms  p95 %.2fms  max %.2fms\n",
+			len(echoSamples), ms(q(0.5)), ms(q(0.95)), ms(echoSamples[len(echoSamples)-1]))
+	}
+
 	fmt.Printf("\nSUMMARY welcome=%v tree=%v snapshots=%d frames=%d gaps=%d payload_bytes=%d\n",
 		gotWelcome, gotTree, snapshots, frames, gaps, dataBytes)
 	if !gotWelcome || !gotTree {
@@ -215,6 +326,8 @@ func main() {
 	}
 	fmt.Println("RESULT ok")
 }
+
+func ms(d time.Duration) float64 { return float64(d.Microseconds()) / 1000 }
 
 func compact(r json.RawMessage) string {
 	if len(r) > 400 {

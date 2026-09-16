@@ -12,6 +12,18 @@
  *      without a geometry message does not work).
  *   4. Declare `viewport: live` — the SERVER decides the real mode.
  *   5. Feed raw Uint8Array straight into write(); never a decoded string.
+ *   6. Predictive echo on the input path (SPEC F2.1).
+ *
+ * Frame-cost settings (SPEC F2.3), each one deliberate:
+ *   - cursorBlink FALSE — a blinking cursor repaints ~2x/sec forever on an
+ *     otherwise idle terminal. The single biggest free win, and the easiest to
+ *     leave switched on by accident.
+ *   - smoothScrollDuration 0 — animated scrolling is frames spent on nothing.
+ *   - NO minimumContrastRatio — a per-cell colour computation on every paint,
+ *     and it would also distort the host's colours. Off for both reasons.
+ *   - document.fonts.ready is awaited BEFORE construction, so cell metrics are
+ *     measured against the real font. Otherwise the whole grid reflows on font
+ *     swap, and the 1.30 cell-height estimate is seeded from the wrong face.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -41,6 +53,7 @@ import {
   type Geometry,
 } from '../terminal/fit'
 import { attachTouch } from '../terminal/touch'
+import { PredictiveEcho } from '../terminal/predictiveEcho'
 import { useElementSize } from '../hooks/useViewport'
 
 export interface LiveTerminalProps {
@@ -56,6 +69,7 @@ export function LiveTerminal({ target, fontSize, onRenderer }: LiveTerminalProps
   const geomRef = useRef<Geometry | null>(null)
   const boxRef = useRef<{ width: number; height: number }>({ width: 0, height: 0 })
   const verifyRef = useRef<(() => void) | null>(null)
+  const echoRef = useRef<PredictiveEcho | null>(null)
   const [ready, setReady] = useState(false)
 
   const localFont = fontSize ?? DEFAULT_FONT_SIZE
@@ -72,17 +86,22 @@ export function LiveTerminal({ target, fontSize, onRenderer }: LiveTerminalProps
         import('@xterm/xterm'),
         import('@xterm/addon-unicode11'),
       ])
+      // F2.3: measure cell metrics against the REAL font, never a fallback.
+      // A font swap after construction reflows the entire grid.
+      await fontsReady()
       if (disposed || !hostRef.current) return
 
       term = new Terminal({
         scrollback: 5000,
         convertEol: true,
         allowProposedApi: true,
-        cursorBlink: true,
+        // F2.3: a blinking cursor is a forever-repaint on an idle terminal.
+        cursorBlink: false,
+        smoothScrollDuration: 0,
         fontFamily: FONT_FAMILY,
         fontSize: DEFAULT_FONT_SIZE,
         lineHeight: DEFAULT_LINE_HEIGHT,
-        // NO theme, NO minimumContrastRatio. SPEC B8: pass host colours through.
+        // NO theme, NO minimumContrastRatio (B8 fidelity AND F2.3 cost).
         macOptionIsMeta: true,
         // We reimplement touch scrolling; xterm's own has regressed repeatedly.
         scrollOnUserInput: true,
@@ -107,9 +126,19 @@ export function LiveTerminal({ target, fontSize, onRenderer }: LiveTerminalProps
         void attached.verify().then((kind) => onRenderer?.(kind))
       }
 
+      // F2.1 predictive echo. It draws nothing until a prediction has been
+      // confirmed, so it can only ever make a correct character appear sooner.
+      const echo = new PredictiveEcho(term, hostRef.current)
+      echoRef.current = echo
+      exposeEchoStats(echo)
+
       // Keystrokes: encode to bytes, send binary, never dropped (A1 / B9).
       const enc = new TextEncoder()
-      term.onData((d) => sendInput(target, enc.encode(d)))
+      term.onData((d) => {
+        // Predict BEFORE sending: the local paint must not wait on the socket.
+        echo.onInput(d)
+        sendInput(target, enc.encode(d))
+      })
       term.onBinary((d) => {
         const bytes = new Uint8Array(d.length)
         for (let i = 0; i < d.length; i++) bytes[i] = d.charCodeAt(i) & 0xff
@@ -126,6 +155,8 @@ export function LiveTerminal({ target, fontSize, onRenderer }: LiveTerminalProps
       disposed = true
       cleanupTouch?.()
       cleanupRenderer?.()
+      echoRef.current?.dispose()
+      echoRef.current = null
       termRef.current?.dispose()
       termRef.current = null
       setReady(false)
@@ -190,6 +221,8 @@ export function LiveTerminal({ target, fontSize, onRenderer }: LiveTerminalProps
     // B4: no resume. Re-subscribe, take the fresh snapshot, reset, repaint.
     const off = onReconnected(() => {
       termRef.current?.reset()
+      // The screen we were predicting against is gone.
+      echoRef.current?.wipe('reconnect')
       resendViewport()
       start()
     })
@@ -206,14 +239,39 @@ export function LiveTerminal({ target, fontSize, onRenderer }: LiveTerminalProps
     return onBytes(target, (bytes, kind) => {
       const t = termRef.current
       if (!t) return
-      // A snapshot is a full repaint, not a delta.
-      if (kind === 'snapshot') t.reset()
+      // A snapshot is a full repaint, not a delta — nothing pending survives it.
+      if (kind === 'snapshot') {
+        t.reset()
+        echoRef.current?.wipe('snapshot')
+      }
       // Raw Uint8Array: faster, and avoids decoding UTF-8 twice.
-      t.write(bytes)
+      // Reconcile in write()'s callback, once the buffer has settled.
+      t.write(bytes, () => echoRef.current?.reconcile())
     })
   }, [target, ready])
 
   return <div className="term-host" ref={hostRef} />
+}
+
+/**
+ * Wait for the terminal font, but never block the terminal forever on it — a
+ * blocked font load must not mean a blank pane.
+ */
+function fontsReady(timeoutMs = 1500): Promise<void> {
+  const ready = document.fonts?.ready
+  if (!ready) return Promise.resolve()
+  return Promise.race([
+    ready.then(() => undefined),
+    new Promise<void>((r) => setTimeout(r, timeoutMs)),
+  ])
+}
+
+/**
+ * SPEC F2.5: measure, do not assert. The live echo-latency histogram is read
+ * from the console or the harness as `__herdrEcho()`.
+ */
+function exposeEchoStats(echo: PredictiveEcho) {
+  ;(window as unknown as { __herdrEcho?: () => unknown }).__herdrEcho = () => echo.stats()
 }
 
 /** Focus the hidden textarea deliberately — only from an explicit user action. */

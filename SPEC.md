@@ -679,3 +679,22 @@ backpressure but never keystrokes, pooled zero-alloc buffers on the fanout path.
 
 **5. Measure, do not assert.** The harness must report keystroke->echo latency at
 p50/p95 in all three modes. A claimed number is not a number.
+
+---
+
+# AMENDMENTS 8 — all plugin entrypoint ids are namespaced `hex:`
+
+`herdr plugin action invoke <ACTION_ID>` takes `--plugin` as OPTIONAL, so a bare
+`open` is ambiguous the moment another installed plugin also defines `open`.
+Every action, pane and link-handler id is therefore prefixed `hex:`
+(hex = herdr-expose):
+
+  hex:open · hex:pair · hex:status · hex:expose · hex:unexpose
+  hex:pair-qr (pane) · hex:status (pane) · hex:expose-url (link handler)
+
+**Verified against live Herdr 0.9.0**, do not re-derive:
+- `:` in an id is ACCEPTED. Linked, listed, invoked, and the command log shows
+  `succeeded` with real stdout.
+- **`.` in an id is REJECTED** (`invalid_plugin_action_id`) — so `hex.open` does
+  not work. `-` and `_` are also accepted.
+- A `[[link_handlers]]` `action` field must reference the PREFIXED action id.

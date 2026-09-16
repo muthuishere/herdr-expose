@@ -59,9 +59,9 @@ That clones it, runs the build, and registers a startup hook so the server comes
 up with Herdr. Then, from the TUI or the shell:
 
 ```bash
-herdr plugin action invoke open     # open the local UI
-herdr plugin action invoke pair     # show a pairing QR for a phone
-herdr plugin action invoke status   # what is running, and where
+herdr plugin action invoke hex:open   # open the local UI
+herdr plugin action invoke hex:pair   # show a pairing QR for a phone
+herdr plugin action invoke hex:status   # what is running, and where
 ```
 
 ### From source

@@ -31,8 +31,8 @@ func TestFirstRunCreatesFileWithDefaultsAnd0600(t *testing.T) {
 	}
 	// Comments survive the first-run write.
 	body, _ := os.ReadFile(path)
-	if !strings.Contains(string(body), "# loopback only") {
-		t.Fatal("first-run file lost its comments")
+	if !strings.Contains(string(body), "the exposure mode below decides the bind address") {
+		t.Fatalf("first-run file lost its comments:\n%s", body)
 	}
 }
 
@@ -126,7 +126,12 @@ func TestBindMustBeLoopback(t *testing.T) {
 			t.Fatalf("ValidateBind(%q) = %v, want nil", b, err)
 		}
 	}
-	bad := []string{"0.0.0.0", "192.168.1.10", "::", "example.com", "", "78.46.65.254"}
+	// 0.0.0.0 is legal as the RESOLVED value of lan mode (E1), so ValidateBind
+	// accepts it; what is refused is a user naming an address in the file.
+	if err := ValidateBind(BindAll); err != nil {
+		t.Fatalf("ValidateBind(0.0.0.0) = %v, want nil (lan mode resolves to it)", err)
+	}
+	bad := []string{"192.168.1.10", "::", "example.com", "", "78.46.65.254"}
 	for _, b := range bad {
 		if err := ValidateBind(b); err == nil {
 			t.Fatalf("ValidateBind(%q) = nil, want an error", b)
@@ -140,10 +145,10 @@ func TestBindMustBeLoopback(t *testing.T) {
 	}
 	_, err := LoadFrom(path)
 	if err == nil {
-		t.Fatal("loading a 0.0.0.0 config must fail")
+		t.Fatal("loading a config that sets bind = 0.0.0.0 must fail")
 	}
-	if !strings.Contains(err.Error(), "loopback") {
-		t.Fatalf("error should mention loopback, got: %v", err)
+	if !strings.Contains(err.Error(), "lan = true") {
+		t.Fatalf("error should point at lan mode, got: %v", err)
 	}
 }
 
@@ -303,5 +308,73 @@ func TestBothProvidersRejected(t *testing.T) {
 	cfg.Expose.Ngrok = true
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("cloudflare+ngrok must be refused")
+	}
+}
+
+// A legacy config that still carries the old loopback `bind` key must keep
+// loading: the key is ignored, not fatal.
+func TestLegacyLoopbackBindIsIgnoredNotFatal(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte("[server]\nport = 21118\nbind = \"127.0.0.1\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadFrom(path)
+	if err != nil {
+		t.Fatalf("legacy bind key should load: %v", err)
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := os.ReadFile(path)
+	if strings.Contains(string(body), "bind") {
+		t.Fatalf("bind should not be written back:\n%s", body)
+	}
+}
+
+// E1: lan mode and the mode reported for each configuration.
+func TestLANModeConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte("[expose]\nlan = true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadFrom(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Expose.LAN {
+		t.Fatal("lan not parsed")
+	}
+	if cfg.Mode() != string(ModeLAN) {
+		t.Fatalf("mode = %s, want lan", cfg.Mode())
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	again, err := LoadFrom(path)
+	if err != nil || !again.Expose.LAN {
+		t.Fatalf("lan lost on round trip: %v %+v", err, again.Expose)
+	}
+
+	st := NewStore(again)
+	if st.Mode() != string(ModeLocal) || st.Bind() != BindLoopback {
+		t.Fatalf("store should start conservative: mode=%s bind=%s", st.Mode(), st.Bind())
+	}
+	if err := st.SetBinding(ModeLAN, BindAll); err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode() != string(ModeLAN) || st.Bind() != BindAll {
+		t.Fatalf("resolved binding not applied: mode=%s bind=%s", st.Mode(), st.Bind())
+	}
+	if err := st.SetBinding(ModeLAN, "192.168.1.5"); err == nil {
+		t.Fatal("SetBinding must refuse an address that is neither loopback nor 0.0.0.0")
+	}
+	// A reload must not clobber the resolved bind with the file's idea of it.
+	if err := st.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	if st.Bind() != BindAll {
+		t.Fatalf("reload clobbered the resolved bind: %s", st.Bind())
 	}
 }

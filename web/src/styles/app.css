@@ -389,12 +389,40 @@ button {
 .term-host {
   width: 100%;
   height: 100%;
+  position: relative;
   /* NEVER transform: scale() this element — xterm resolves cells from the
      unscaled CSS cell width and every hit-test would offset. */
 }
 
 .term-host .xterm {
   height: 100%;
+}
+
+/* Predictive echo overlay (SPEC F2.1). It sits ON TOP of the terminal and never
+   touches the xterm buffer, so a wrong prediction can only remove a glyph from
+   this layer — it can never corrupt the screen. Nothing renders here until a
+   prediction has been confirmed, so a phantom character is impossible. */
+.echo-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 3;
+  contain: strict;
+}
+
+.echo-char {
+  position: absolute;
+  font-family: var(--mono);
+  font-size: inherit;
+  color: var(--term-fg);
+  background: var(--term-bg);
+  white-space: pre;
+  text-align: left;
+  /* Underlined so it is visibly "not yet acknowledged by the host" without
+     being a different character than what will land. */
+  text-decoration: underline;
+  text-decoration-color: rgba(98, 176, 255, 0.55);
+  text-underline-offset: 2px;
 }
 
 .notice {

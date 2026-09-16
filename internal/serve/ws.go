@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -164,6 +165,15 @@ func (w *wsConn) writeLoop() {
 	}
 }
 
+// looksLikeBrowser reports whether a WS upgrade came from a browser. Browsers
+// always send Origin and a Sec-WebSocket-Key with a normal User-Agent; a CLI
+// client typically sends neither Origin nor a browser UA.
+func looksLikeBrowser(r *http.Request) bool {
+	ua := r.UserAgent()
+	return strings.Contains(ua, "Mozilla") || strings.Contains(ua, "Safari") ||
+		strings.Contains(ua, "Chrome") || strings.Contains(ua, "Firefox")
+}
+
 // clientMsg is a control-plane message from the client.
 //
 // Clients send seq:0; only the server sequences frames, so any inbound `seq` is
@@ -181,19 +191,44 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "too many requests", http.StatusTooManyRequests)
 		return
 	}
-	if !s.auth.OriginAllowed(r.Header.Get("Origin")) {
+	if !s.hostAllowed(r) {
+		http.Error(w, "forbidden host", http.StatusForbidden)
+		return
+	}
+	origin := r.Header.Get("Origin")
+	if origin != "" && !s.originAllowed(r, origin) {
 		http.Error(w, "forbidden origin", http.StatusForbidden)
 		return
 	}
+
 	// Reject BEFORE the upgrade. An unauthenticated peer never gets a socket.
-	who, err := s.auth.Authenticate(BearerFrom(r), ip, r.UserAgent())
-	if err != nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
+	token := BearerFrom(r)
+	var who Identity
+	if s.local.bypassAuth(r) {
+		// Local mode: the loopback listener is the grant (SPEC F1). Origin and
+		// Host pinning above have already run and are what actually defend
+		// this; a browser upgrade with no Origin is refused here.
+		if origin == "" && looksLikeBrowser(r) {
+			http.Error(w, "origin required", http.StatusForbidden)
+			return
+		}
+		who = Identity{Kind: "local", Name: "loopback"}
+		if token != "" {
+			if id, err := s.auth.Authenticate(token, ip, r.UserAgent()); err == nil {
+				who = id
+			}
+		}
+	} else {
+		var err error
+		who, err = s.auth.Authenticate(token, ip, r.UserAgent())
+		if err != nil {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
 	}
 
 	var respHeader http.Header
-	if p := BearerFrom(r); p != "" && r.Header.Get("Sec-WebSocket-Protocol") != "" {
+	if p := token; p != "" && r.Header.Get("Sec-WebSocket-Protocol") != "" {
 		respHeader = http.Header{"Sec-WebSocket-Protocol": {"bearer." + p}}
 	}
 	c, err := s.upgrader.Upgrade(w, r, respHeader)

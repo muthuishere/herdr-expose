@@ -34,6 +34,12 @@ const (
 // Resolution is the settled answer to "what do we bind, and what URL do people
 // type?". It is computed once at startup and refreshed on SIGHUP / network
 // change (the LAN IP can move under DHCP).
+//
+// Hand it to the config Store so everything downstream reads the same mode and
+// bind address through config.Provider:
+//
+//	res := mgr.Resolution()
+//	store.SetBinding(res.Mode, res.Bind)
 type Resolution struct {
 	Mode config.Mode `json:"mode"` // cloudflare | ngrok | js | lan | local
 	Bind string      `json:"bind"` // 127.0.0.1 or 0.0.0.0 — never user-settable
@@ -52,10 +58,6 @@ type Resolution struct {
 	// FellBack explains an automatic downgrade, e.g. missing cloudflared.
 	FellBack string `json:"fell_back,omitempty"`
 }
-
-// Port, Bind and Mode make a Resolution satisfy config.Provider, so the server
-// can consume it without importing a concrete type.
-func (r Resolution) providerPort() int { return r.Port }
 
 // AllowedOrigins is the browser Origin allowlist for this mode, merged with
 // anything the user pinned in config. Without the LAN origin the browser

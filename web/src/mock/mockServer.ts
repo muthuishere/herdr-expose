@@ -8,6 +8,12 @@
  *
  * It deliberately misbehaves a little (variable RTT, an occasional gap, agents
  * that block) so the degraded/blocked paths get exercised in dev.
+ *
+ * LATENCY MODEL (SPEC F2.5 — measure, do not assert): every emission is held
+ * for rtt/2 and every inbound message is treated as having already spent rtt/2
+ * in flight, so a keystroke's echo comes back at ~rtt and ping/pong reads ~rtt
+ * too. Override with `?rtt=150` on the URL; default 90ms, roughly a Cloudflare
+ * quick tunnel. `?rtt=0` gives the LAN-ish baseline.
  */
 
 import {
@@ -225,6 +231,8 @@ class MockSocket implements Transport {
   private modes: Record<PaneId, ViewportMode> = {}
   private closedFlag = false
   private session = `mock-${Math.random().toString(36).slice(2, 8)}`
+  /** Simulated round-trip time in ms. */
+  private rtt = readRttParam()
 
   constructor() {
     setTimeout(() => {
@@ -235,14 +243,34 @@ class MockSocket implements Transport {
 
   /* --- outbound helpers --- */
 
-  private text(type: string, data: unknown) {
+  /** Hold every emission for the downstream half of the simulated RTT. */
+  private emit(data: unknown) {
     if (this.closedFlag) return
-    this.onmessage?.({ data: JSON.stringify({ seq: this.seq++, type, data }) })
+    const half = this.rtt / 2
+    if (half <= 0) {
+      this.onmessage?.({ data })
+      return
+    }
+    // Jitter the tail slightly; a real tunnel is not a constant.
+    const jitter = Math.random() < 0.08 ? half * (1 + Math.random() * 2) : half
+    setTimeout(() => {
+      if (!this.closedFlag) this.onmessage?.({ data })
+    }, jitter)
+  }
+
+  private text(type: string, data: unknown) {
+    this.emit(JSON.stringify({ seq: this.seq++, type, data }))
   }
 
   private bin(type: number, target: string, payload: Uint8Array) {
-    if (this.closedFlag) return
-    this.onmessage?.({ data: encodeServerBinary(type, this.seq++, target, payload) })
+    this.emit(encodeServerBinary(type, this.seq++, target, payload))
+  }
+
+  /** Inbound messages are treated as having spent the upstream half in flight. */
+  private afterUpstream(fn: () => void) {
+    const half = this.rtt / 2
+    if (half <= 0) fn()
+    else setTimeout(fn, half)
   }
 
   private every(ms: number, fn: () => void) {
@@ -253,7 +281,7 @@ class MockSocket implements Transport {
 
   send(data: string | ArrayBuffer): void {
     if (typeof data !== 'string') {
-      this.handleInput(data)
+      this.afterUpstream(() => this.handleInput(data))
       return
     }
     let msg: { type?: string; data?: Record<string, unknown> }
@@ -267,11 +295,15 @@ class MockSocket implements Transport {
         this.onHello()
         break
       case 'ping':
-        // Variable latency so the degraded indicator has something to show.
-        setTimeout(
-          () => this.text('pong', { t: msg.data?.t, upstream_ok: true }),
-          18 + Math.random() * (Math.random() < 0.12 ? 900 : 90),
-        )
+        // The emit()/afterUpstream() pair already models the RTT; an occasional
+        // stall gives the degraded indicator something real to show.
+        this.afterUpstream(() => {
+          if (Math.random() < 0.06) {
+            setTimeout(() => this.text('pong', { t: msg.data?.t, upstream_ok: true }), 800)
+          } else {
+            this.text('pong', { t: msg.data?.t, upstream_ok: true })
+          }
+        })
         break
       case 'viewport': {
         const t = (msg.data?.targets ?? {}) as Record<PaneId, ViewportMode>
@@ -285,14 +317,12 @@ class MockSocket implements Transport {
         break
       }
       case 'command':
-        setTimeout(
-          () =>
-            this.text('result', {
-              id: msg.data?.id,
-              ok: true,
-              result: { mock: true, method: msg.data?.method },
-            }),
-          60,
+        this.afterUpstream(() =>
+          this.text('result', {
+            id: msg.data?.id,
+            ok: true,
+            result: { mock: true, method: msg.data?.method },
+          }),
         )
         break
       default:
@@ -446,6 +476,18 @@ class MockSocket implements Transport {
       for (const tab of ws.tabs)
         for (const p of tab.panes) p.mode = this.modes[p.id] ?? 'none'
     return t
+  }
+}
+
+/** `?rtt=150` overrides the simulated round trip; default 90ms. */
+function readRttParam(): number {
+  try {
+    const v = new URL(window.location.href).searchParams.get('rtt')
+    if (v === null) return 90
+    const n = Number(v)
+    return Number.isFinite(n) && n >= 0 ? n : 90
+  } catch {
+    return 90
   }
 }
 

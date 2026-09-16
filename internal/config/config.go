@@ -116,6 +116,16 @@ type Adapter struct {
 type Expose struct {
 	Cloudflare bool `toml:"cloudflare" json:"cloudflare"`
 	Ngrok      bool `toml:"ngrok" json:"ngrok"`
+
+	// LAN allows binding 0.0.0.0 so phones and laptops on the same wifi can
+	// reach the server directly. It is also the automatic fallback when a
+	// tunnel was requested but its binary is not installed (E1).
+	//
+	// Safe only because auth is mandatory in every mode and the pairing code is
+	// shown ONLY on this machine: no HTTP endpoint mints or displays one, so a
+	// neighbour on the network can reach the port and get nowhere.
+	LAN bool `toml:"lan" json:"lan"`
+
 	// Domain is REQUIRED whenever a provider is enabled (C1). There is no
 	// ephemeral/quick tunnel path: a hostname that changes on restart breaks
 	// PWA installs, bookmarks and origin-bound device tokens.
@@ -338,10 +348,16 @@ func (c *Config) Validate() error {
 	if err := ValidateBind(c.Server.Bind); err != nil {
 		return err
 	}
-	if _, explicit := rawTable(c.raw, "server")["bind"]; explicit {
-		return fmt.Errorf("server.bind is no longer settable: the exposure mode decides the bind address. " +
-			"Remove the key, and set `lan = true` under [expose] if you want devices on your wifi to reach " +
-			"this machine directly (auth is still required in every mode)")
+	// `bind` is no longer settable: the resolved mode decides it (E1). A legacy
+	// loopback value is accepted and ignored so old configs keep loading, but
+	// an attempt to widen the listen address is refused and pointed at `lan`.
+	if raw, explicit := rawTable(c.raw, "server")["bind"]; explicit {
+		val, _ := raw.(string)
+		if ip := net.ParseIP(strings.Trim(strings.TrimSpace(val), "[]")); val != "localhost" && (ip == nil || !ip.IsLoopback()) {
+			return fmt.Errorf("server.bind is no longer settable (you have %q): the exposure mode decides the "+
+				"bind address. Remove the key and set `lan = true` under [expose] if you want devices on your "+
+				"wifi to reach this machine directly — auth is still required in every mode", val)
+		}
 	}
 	if c.Auth.PairingTTLSeconds <= 0 {
 		return fmt.Errorf("auth.pairing_ttl_seconds must be positive, got %d", c.Auth.PairingTTLSeconds)
@@ -413,7 +429,7 @@ func ValidateBind(bind string) error {
 		return fmt.Errorf("server.bind %q is not an IP address; set `lan = true` under [expose] to listen on "+
 			"your LAN, or leave it unset for loopback (%q)", bind, DefaultBind)
 	}
-	if ip.IsUnspecified() {
+	if b == BindAll {
 		// 0.0.0.0 is legitimate, but only as the RESOLVED value of lan mode.
 		return nil
 	}
