@@ -1,0 +1,681 @@
+# herdr-expose — build contract
+
+ONE Go binary: Herdr socket -> WebSocket -> embedded React PWA, exposed through
+pluggable JS tunnel adapters. Verified against **Herdr 0.9.0, protocol 22**.
+
+Read `references/architecture.md` for the full rationale. This file is the
+CONTRACT between parallel workstreams — where it disagrees with architecture.md,
+this file wins (architecture.md predates the 0.9.0 verification).
+
+Module: `github.com/muthuishere/herdr-expose`   Binary: `bin/herdr-expose`
+
+## 0. Verified upstream facts (do not re-derive)
+
+- Herdr 0.9.0, protocol 22, endpoint_protocol_generation 1.
+- Socket API: **102 request methods**, 26 events. Schema: `herdr api schema --output x.json`.
+- **There is NO `terminal.*` method on the socket API.** Terminal streaming is ONLY
+  the subprocess `herdr terminal session observe|control <target> --cols N --rows N`,
+  NDJSON on stdout: `{"bytes":"<base64 ANSI>"}` and `{"type":"terminal.closed","reason":...}`.
+  Control accepts terminal.input / resize / scroll / release as NDJSON on stdin.
+- **Subscribe BEFORE snapshot.** 0.9.0 stopped replaying retained history on
+  `events.subscribe`; snapshot-then-subscribe silently loses the gap.
+- Useful 0.9.0-only methods: `pane.scroll`, `pane.selection.read`, `pane.copy_search`,
+  `pane.copy_motion`, `pane.link.activate`, `command.invoke`.
+- Env given to plugin commands: `HERDR_SOCKET_PATH`, `HERDR_BIN_PATH`, `HERDR_PLUGIN_ROOT`,
+  `HERDR_PLUGIN_CONFIG_DIR`, `HERDR_PLUGIN_STATE_DIR`, `HERDR_PLUGIN_EVENT_JSON`.
+- Pane IDs are NOT stable across server restarts. `terminal_id` is stable across moves.
+
+## 1. Hard rules
+
+1. Never reimplement Herdr. Transport + UI only.
+2. Bind `127.0.0.1` ONLY. Never 0.0.0.0. Exposure is always an adapter.
+3. One upstream stream per target regardless of client count. The hub fans out.
+4. Decode base64 once, in the upstream layer. Everything downstream is binary.
+5. Server owns layout/state/mode. Clients render what they are told.
+6. No secret literal in any file in this repo. Token is generated at runtime.
+7. Mobile-first: every view must work at 375px wide before it works at 1440px.
+
+## 2. Ownership map (no workstream writes outside its column)
+
+| workstream | owns |
+|---|---|
+| **A · go-core**    | `cmd/`, `internal/upstream/`, `internal/core/`, `internal/serve/`, `go.mod` |
+| **B · web**        | `web/` |
+| **C · expose**     | `internal/expose/`, `adapters/`, `internal/config/` |
+| **D · docs/pkg**   | `docs/`, `herdr-plugin.toml`, `scripts/`, `README.md`, `.gitignore` |
+
+## 3. Wire protocol (A defines, B consumes) — JSON over WS, v1
+
+> **PARTLY SUPERSEDED** by AMENDMENTS 1 (A1 split plane) and 2 (B2 resize, B4 no resume). See D1 below.
+
+`GET /v1/stream?token=...` (also accepts `Authorization: Bearer`). Every frame:
+`{"seq":<uint64>,"type":"<name>","data":{...}}`. seq is monotonic per connection.
+
+client->server: `hello` `subscribe` `unsubscribe` `viewport` `input` `command` `ping`
+server->client: `welcome` `tree` `frame` `closed` `snapshot` `gap` `agent` `result` `pong`
+
+- `viewport`: `{"targets":{"<paneId>":"live|summary|none"}}` — client declares what it
+  RENDERS; server decides the real mode. Clients never request live directly.
+- `frame`: `{"target":..,"bytes":"<base64>","seq":..}` (base64 only at the JSON boundary).
+- `gap`: `{"target":..,"bytes_dropped":N}` then a `snapshot`. Never buffer unboundedly.
+- `command`: `{"method":"pane.send_text","params":{...},"id":".."}` -> `result`.
+  Method names pass straight through to the Herdr socket. Do not enumerate them.
+
+Modes: LIVE = focused, full stream, 16ms coalescing / 64KB flush.
+SUMMARY = visible-unfocused, `pane.read --source visible` at 1-2Hz.
+NONE = offscreen, state changes only.
+
+## 4. HTTP surface
+
+```
+GET  /healthz     unauthenticated liveness
+GET  /v1/config   client bootstrap (no secrets)
+POST /v1/pair     one-time token -> long-lived key
+GET  /v1/stream   websocket
+GET  /*           embedded SPA (go:embed all:web/dist)
+```
+Hashed assets immutable; `index.html` + `sw.js` no-cache.
+
+## 5. Config — TOML, `$HERDR_PLUGIN_CONFIG_DIR/config.toml`, else `~/.config/herdr-expose/config.toml`
+
+> **SUPERSEDED** by AMENDMENTS 2 (B5 auth, B6 path) and 3 (C1 static domain). Canonical block is D2 below.
+
+Created with sane defaults on first run if absent. Hot-reload on SIGHUP.
+
+```toml
+[server]
+port = 21118
+bind = "127.0.0.1"          # changing this is refused with an error; loopback only
+
+[auth]
+token = ""                   # blank => generated on first run and written back, 0600
+pairing_ttl_seconds = 60
+
+[ui]
+theme = "auto"
+default_view = "grid"        # grid | focus
+
+[expose]
+enabled = false
+adapter = "cloudflare-quick" # id of an adapter below
+autostart = false
+
+[[expose.adapters]]
+id = "cloudflare-quick"
+script = "adapters/cloudflare-quick.js"
+[expose.adapters.env]        # free-form, passed to the adapter as ctx.config
+# hostname = "herdr.example.com"
+```
+
+Keys added later must not break older configs: unknown keys are ignored, missing
+keys take defaults. Never write the token to logs or to `/v1/config`.
+
+## 6. Exposure adapters — JS on embedded goja (workstream C)
+
+> **SUPERSEDED** by AMENDMENTS 3. Cloudflare is built in; JS adapters are the escape hatch only.
+
+An adapter is a JS file exporting three functions. The Go side runs it in goja;
+NO node at runtime. Ship `cloudflare-quick`, `cloudflare-named`, `ngrok`, plus
+a `template.js` people copy.
+
+```js
+// adapters/cloudflare-quick.js
+export function start(ctx) {
+  const p = ctx.spawn("cloudflared", ["tunnel", "--url", ctx.localUrl]);
+  ctx.onLine(p, (line) => {
+    const m = /(https:\/\/[a-z0-9-]+\.trycloudflare\.com)/.exec(line);
+    if (m) ctx.setUrl(m[1]);
+  });
+  return { pid: p.pid };
+}
+export function status(ctx) { return { url: ctx.url, healthy: ctx.isAlive() }; }
+export function stop(ctx)   { ctx.kill(); }
+```
+
+Host API on `ctx`: `spawn(cmd,args)` `onLine(proc,fn)` `setUrl(s)` `url` `localUrl`
+`isAlive()` `kill()` `log(s)` `config` (the adapter's `env` table) `env(name)`
+(reads a process env var by NAME; the value never crosses into logs or state).
+
+Adapter rules: no filesystem access, no network from JS (spawn a real tool),
+crash in an adapter never takes down the server, `stop()` must be idempotent.
+A running adapter's URL is surfaced in the UI and by `herdr-expose status`.
+
+## 7. CLI
+
+> **EXTENDED** by AMENDMENTS 2 (B7 supervision) and D3 below.
+
+`serve` (real server, flock on pidfile, quiet exit if held) · `daemon` (fork-exec
+serve, exit 0 immediately — startup hooks are one-shot, not supervised) ·
+`status` · `stop` · `pair` (QR) · `expose start|stop|status`.
+
+## 8. Web (workstream B) — React + Vite + TS, PWA, MOBILE-FIRST
+
+- **375px is the design target.** Single-column pane list -> tap a pane -> full-screen
+  terminal with a key bar. Desktop grid is a `@media (min-width:900px)` enhancement.
+  Test at 375 before 1440. No horizontal page scroll, ever.
+- xterm.js ONLY for the LIVE pane. SUMMARY tiles are pre-rendered ANSI-to-HTML,
+  never an xterm instance per tile — that is what kills the tab.
+- PWA: `vite-plugin-pwa`, installable, standalone display, maskable icon, offline
+  shell ONLY (app chrome + "disconnected" state). Never cache `/v1/*`. A terminal
+  is inherently online; do not pretend otherwise.
+- Reconnect with backoff, resume from last seq, show RTT-based degraded indicator.
+- Agent Q&A view when an agent is `blocked`: `agent.read --source detection` plus a
+  fixed key bar (y / n / enter / esc / arrows / 1 2 3). Generic, no per-agent parsing.
+- Safe-area insets for iOS notch; the key bar sits above the home indicator.
+
+## 9. Definition of done per workstream
+
+A: `go build ./...` clean; `herdr-expose serve` starts, `/healthz` 200, a WS client
+   gets `welcome` + `tree`, one pane streams frames, a keystroke round-trips.
+B: `npm run build` clean; renders tree from a mock WS; Lighthouse PWA installable;
+   usable at 375px.
+C: adapters load and run under goja; `expose start` brings up cloudflared and
+   reports a URL; `stop` is idempotent; config round-trips with unknown keys preserved.
+D: ADRs written; `herdr-plugin.toml` validates via `herdr plugin link .`; build
+   script produces one binary with the web app inside it.
+
+---
+
+# AMENDMENTS — authoritative, SUPERSEDE everything above
+
+Reason: the reference implementation (`~/Downloads/herdr-remote-master`) is Node.
+Mine it for FACTS about Herdr and for mobile gotchas. Do NOT inherit its
+architecture. It makes JS-shaped choices we are explicitly not making.
+**This is a Go, performance-first product. That is the differentiator.**
+
+## A1. Split plane: JSON control, BINARY data (replaces §3's framing)
+
+Carrying terminal bytes as base64 inside JSON costs +33% bandwidth and a JSON
+parse per frame, on the hot path, over cellular. We do not do that.
+
+- **Control plane** — JSON in WebSocket TEXT frames. hello/subscribe/unsubscribe/
+  viewport/command/ping and welcome/tree/agent/result/pong/gap/closed. Unchanged
+  shape from §3, minus `frame`.
+- **Data plane** — WebSocket BINARY frames. No base64, anywhere, ever:
+
+```
+ 0        1                9          11                    N
+ +--------+----------------+----------+----------+----------+
+ | type u8| seq u64 BE     | tlen u16 | target   | payload  |
+ +--------+----------------+----------+----------+----------+
+ type: 1=frame 2=snapshot 3=gap(payload=u64 bytes_dropped)
+```
+
+`target` is ASCII. `payload` is RAW ANSI bytes straight from the pane. Base64
+exists at exactly ONE place in this system: decoding Herdr's NDJSON in
+internal/upstream. After that it is `[]byte` to the socket, zero re-encoding.
+
+Client input is also binary: `[type=16][tlen u16][target][raw bytes]`. Keystroke
+latency is the metric we care about; do not put a JSON encode on that path.
+
+Enable per-message deflate. Terminal output compresses ~10x and that is what
+makes a tunnel usable on cellular.
+
+## A2. Cloudflare is FIRST-CLASS, not a JS adapter (replaces §6's default path)
+
+The common case must be two lines of config and zero JavaScript:
+
+```toml
+[expose]
+cloudflare = true
+domain = "herdr.deemwar.com"   # omit => quick tunnel, random *.trycloudflare.com
+```
+
+That alone must: create/reuse the named tunnel, write the DNS CNAME through the
+Cloudflare API, run cloudflared, health-check it, restart it if it dies, and
+surface the URL in the UI and in `herdr-expose status`. Built in Go, in-process.
+`ngrok = true` likewise. Token read from `$CLOUDFLARE_ALLPURPOSE_TOKEN` by NAME
+at point of use — never stored, never logged, never in config, never in state.
+
+JS adapters (goja) REMAIN, but demote them to the escape hatch for exotic setups
+(tailscale, custom corporate proxy, someone's homelab). They are the extension
+point, not the happy path. Nobody should write JS to put this on a domain.
+
+## A3. Performance budget — these are acceptance criteria, not aspirations
+
+| path                          | target                          |
+|-------------------------------|---------------------------------|
+| keystroke -> upstream write   | < 5ms                           |
+| output -> LIVE client (LAN)   | < 20ms including coalescing     |
+| allocations per terminal frame| ZERO steady-state (pool buffers)|
+| idle CPU, 20 panes            | < 1%                            |
+| RSS, 20 panes                 | < 60MB                          |
+
+Implied and non-negotiable: pooled buffers on the fanout path (`sync.Pool`),
+one upstream stream per target no matter how many clients, coalesce on a ~16ms
+tick or 64KB, and never a per-client copy of a frame that could be shared.
+Ship a latency harness that MEASURES these; a claimed number is not a number.
+
+## A4. The API is the product
+
+A Swift/Kotlin client must be buildable from `docs/api.md` alone, with no access
+to this source. The binary framing above is deliberately trivial to parse in any
+language — that is why it is a fixed header and not protobuf. Version the API and
+state the compatibility promise explicitly.
+
+---
+
+# AMENDMENTS 2 — from recon of the Node reference (MIT, dibin666/herdr-remote)
+
+Supersede everything above, including AMENDMENTS 1 where they conflict.
+
+## B0. SETTLED: `herdr terminal session observe` DOES exist and works
+
+Recon flagged §0 as unverified because the reference never calls that subcommand.
+**§0 stands.** It was verified empirically on this machine on BOTH 0.8.2 and 0.9.0:
+`herdr terminal session observe <pane> --cols 80 --rows 24` returns NDJSON
+`{"bytes":"<base64>"}` frames. The reference simply chose a DIFFERENT PRODUCT:
+they spawn the whole Herdr TUI in a node-pty and stream its raw ANSI, so the
+browser sees Herdr's own UI. That gets them real PTY semantics for free but
+forfeits the pane tree, summary tiles and a custom mobile layout — and costs one
+Herdr client process per browser tab. We keep the pane-tree product. Do not churn.
+
+## B1. Per-connection streams (REPLACES hard rule #3)
+
+Rule #3 said one upstream stream per target, hub fans out. **That is wrong on
+0.9.0** and it reintroduces the exact bug 0.9.0's #3526 fixed: a shared stream
+means a phone at 40 cols resizes the laptop looking at the same pane. Give each
+CONNECTION its own upstream stream and its own geometry. The hub still
+deduplicates SUMMARY reads (those are geometry-free), but LIVE is per-connection.
+
+## B2. Geometry message (FIXES an omission — we had none)
+
+There was no resize anywhere in §3; `viewport` is render-mode, not size. Add to
+the control plane:
+`{"type":"resize","data":{"target":"w1:p1","cols":N,"rows":M}}`
+Floor at 20x6. Geometry is per-connection (see B1) and must be sent before the
+first frame is requested. A terminal without a geometry message does not work.
+
+## B3. Same-tick coalescing (REPLACES "16ms coalescing")
+
+A 16ms timer adds up to 16ms to EVERY keystroke echo, which contradicts our own
+<5ms budget. Coalesce on the tick instead: drain everything already queued, write
+once, never sleep to accumulate. 64KB hard flush stays. Zero added latency, same
+syscall savings. Input side: coalesce only what is already pending, never delay.
+
+## B4. Resume is deleted (REPLACES seq/gap/snapshot replay)
+
+Dropped: the per-target 256KB ring buffer and seq-based replay. On reconnect a
+client re-subscribes, gets a fresh `snapshot`, and repaints. A terminal has no
+perceivable "missed bytes" once you repaint. `seq` stays in the binary header for
+ordering and debugging; `gap` stays as a signal under backpressure. The ring
+buffer and replay path are cut entirely — that is correctness surface we do not
+need to own.
+
+## B5. Auth overhaul (REPLACES §4/§5 auth — weakest part of the spec)
+
+This is an RCE surface behind a tunnel. A single plaintext long-lived token in a
+TOML file is not good enough.
+- Two secrets, separate concerns: a **server token** (may you talk to this
+  instance at all) and **per-device tokens** (issued by pairing).
+- **Store SHA-256 hashes only**, never the plaintext, in state (0600), not config.
+- Pairing: 6-char code, **TTL 10 minutes** (60s is hostile on a phone), single
+  use, rate-limited per address. Device token = 32 random bytes, sliding 30-day
+  TTL, max 32 devices, LRU evict, individually revocable and listable
+  (UA + last-seen IP, never the hash).
+- `crypto/subtle.ConstantTimeCompare` for every comparison. No exceptions.
+- Origin allowlist checked BEFORE echoing CORS headers. CSP `frame-ancestors
+  'none'`, `X-Frame-Options: DENY`. Handshake rate limiting on the WS endpoint.
+
+## B6. One config path (REPLACES §5 path resolution)
+
+Do NOT prefer `$HERDR_PLUGIN_CONFIG_DIR`. Herdr sets it only when Herdr launches
+us, so honoring it gives the tool two different configs depending on whether it
+was started from a shell or from a Herdr pane — a genuinely confusing bug the
+reference hit and documented. Use `~/.config/herdr-expose/config.toml`
+unconditionally. `$HERDR_PLUGIN_STATE_DIR` is still fine for the pidfile.
+
+## B7. Supervision is three layers, not one (EXTENDS §7)
+
+`daemon` fork-exec + exit 0 is only step 1. Also required:
+2. Install a real service unit — launchd LaunchAgent (`KeepAlive`) on macOS,
+   `systemd --user` with `Restart=always` on Linux. `serve` runs in the
+   foreground as that unit's main process.
+3. An append-only managed-pid ledger + `reclaimStrays()` on takeover: SIGTERM
+   every recorded pid, WAIT for the port to actually be released, then SIGKILL.
+   Route every start/stop/restart through a "is a manager in charge?" check —
+   otherwise killing the process just makes the manager respawn it, and a manual
+   start produces a second copy fighting for the port.
+Also: resolve the `herdr` binary to an ABSOLUTE path before any spawn
+(`$HERDR_BIN_PATH` -> PATH -> ~/.local/bin, ~/.cargo/bin, ~/bin,
+/opt/homebrew/bin, /usr/local/bin, /usr/bin), re-verified per session, and fail
+with a real error rather than looping. launchd/systemd units start with a minimal
+PATH that contains none of those dirs, so a bare `herdr` will fail exec.
+
+## B8. Mobile is engineering, not a media query (EXTENDS §8)
+
+"Mobile-first at 375px" is a layout goal. The actual work, all verified pain in
+the reference — budget for it:
+- **Renderer probe-and-degrade, not a config flag.** Coarse pointer => mount
+  Canvas FIRST (mobile WebGL loses context / renders blank on some drivers).
+  Then AFTER content is drawn (probing an empty buffer is a guaranteed false
+  positive) sample pixels: all-identical => dead surface => dispose, fall back to
+  the DOM renderer, and PERSIST that failure in localStorage keyed by UA with a
+  30-day TTL. Re-verify after the first resize. Without this we ship a blank
+  black rectangle on some Android devices.
+- **Never `transform: scale()` the xterm surface.** xterm resolves a cell from
+  the UNSCALED CSS cell width, so a scaled surface offsets every mouse report,
+  selection and link hit-test. Recompute cols/rows from measured cell metrics.
+- **Cell-height fallback ratio 1.30, not the configured lineHeight 1.15.** xterm
+  ceils the font line box; using bare lineHeight yields ~13% too many rows and
+  pushes agent output into scrollback. Err high.
+- **Soft keyboard: only `visualViewport.height` shrinks** (100dvh and
+  window.innerHeight both lie). Drive `--app-height` / `--keyboard-inset` from
+  it, 80px threshold to reject browser-chrome noise, coalesce in rAF (iOS fires a
+  burst for the whole keyboard animation).
+- **Browser zoom must never resize the PTY.** Keep PTY geometry independent of
+  client-local fontSize.
+- **Reimplement touch; do not use xterm's.** Tap => replay through xterm's CORE
+  MOUSE SERVICE, never a DOM mousedown (that focuses the hidden textarea and
+  summons the IME on a stray tap). Vertical drag => scrollback on the normal
+  buffer, synthesized wheel/arrows on the alternate screen. Long-press consumed,
+  not a selection. Never pointer-capture a touch pointer. Pass real mouse through
+  untouched.
+- **Key bar**: ESC TAB CTRL ALT arrows, then drawers (ctrl-chords, symbols,
+  F-keys), Enter LAST and rightmost under the thumb. Modifiers are LATCHES.
+- **Mobile shell selection is width-only** (900px breakpoint), evaluated
+  synchronously on first render. Pointer-coarse is the wrong signal: desktop-mode
+  phones and touch laptops report a fine pointer.
+- xterm: `scrollback: 5000`, `convertEol: true`, `allowProposedApi: true`,
+  Unicode11Addon, and NO client theme / NO minimumContrastRatio — let every
+  SGR/OSC colour through exactly as the host sent it.
+
+## B9. Compression tuning (EXTENDS A1)
+
+permessage-deflate `threshold: 1024` so keystrokes and small echoes skip
+compression entirely (zero CPU, zero buffering delay), level 3, and leave context
+takeover ON — full-screen TUI redraws are highly repetitive and cross-message
+context is where the 10x ratio comes from.
+Backpressure: if the socket's buffered amount exceeds ~256KB, drop WHEEL/scroll
+input but never keystrokes. Degrade scrolling, never typing.
+
+## B10. Predictive echo — phase 2, but reserve for it now
+
+Mosh-style local echo is what makes a 150ms tunnel feel local. Predictions start
+TENTATIVE and INVISIBLE; only after one is confirmed by real server output do
+they go CONFIDENT and render; any mismatch wipes all pending predictions and
+drops back to tentative, so a phantom character is never shown. Not required for
+v1, but do not design anything that forecloses it.
+
+## B11. Attribution
+
+The reference is MIT (c) 2026 dibin666. We reimplement in Go, we do not copy
+code, but we lift protocol and mobile ideas liberally. Ship `docs/ATTRIBUTION.md`
+crediting it plainly.
+
+---
+
+# AMENDMENTS 3 — STATIC DOMAIN ONLY (supersedes A2 and all prior expose text)
+
+Owner's direction, verbatim intent: the tunnel is STATIC, on HIS domain, built
+from Go using the Cloudflare token + the cloudflared CLI + the domain name.
+
+## C1. There is no ephemeral tunnel. At all.
+
+`cloudflare = true` REQUIRES `domain`. No domain => hard error at startup with a
+message telling the user to set one. **Delete the quick-tunnel path entirely** —
+no `*.trycloudflare.com`, no random hostnames, not even as a fallback. A hostname
+that changes on restart breaks PWA installs, bookmarks and origin-bound device
+tokens, which makes it worse than useless for the mobile product.
+
+```toml
+[expose]
+cloudflare = true
+domain     = "herdr.deemwar.com"   # REQUIRED
+tunnel_name = "herdr-expose"        # optional, defaults to "herdr-expose"
+```
+
+## C2. Full API-driven provisioning in Go — no `cloudflared login`
+
+This is the key move: `cloudflared tunnel login` opens a BROWSER and writes an
+interactive `cert.pem`. We never do that. With an API token we mint the tunnel
+and its credentials ourselves, so the whole thing is headless and reproducible.
+
+Inputs: `$CLOUDFLARE_ALLPURPOSE_TOKEN` (read by NAME at point of use, never
+stored/logged/returned), `$CLOUDFLARE_ACCOUNT_ID`, and `domain` from config.
+
+`expose start` is idempotent and does exactly this:
+
+1. **Zone** — `GET /zones?name=<apex of domain>` -> `zone_id`.
+2. **Tunnel** — `GET /accounts/{acct}/cfd_tunnel?name=<tunnel_name>&is_deleted=false`.
+   Reuse if present. Else `POST /accounts/{acct}/cfd_tunnel` with
+   `{name, tunnel_secret: <32 random bytes, base64>, config_src:"local"}` -> `id`.
+3. **Credentials file** — write ourselves, 0600, into the state dir:
+   `{"AccountTag":<acct>,"TunnelID":<id>,"TunnelSecret":<base64 secret>}`.
+   This is the file `cloudflared login` would have produced. We produce it from
+   the API instead. Never in the repo, never in config, never logged.
+4. **DNS** — upsert CNAME: look up `GET /zones/{zone}/dns_records?name=<domain>`;
+   PATCH if it exists, POST if not:
+   `{type:"CNAME", name:<domain>, content:"<tunnel-id>.cfargotunnel.com",
+     proxied:true}`. Never delete a record we did not create.
+5. **Ingress config** — generate a `config.yml` in the state dir:
+   `tunnel: <id>` / `credentials-file: <path>` / `ingress:
+   [{hostname:<domain>, service:"http://127.0.0.1:<port>"},
+    {service:"http_status:404"}]`
+6. **Run** — `cloudflared tunnel --config <path> run <id>`, resolved to an
+   absolute binary path first (same rule as the herdr binary, B7).
+7. **Verify** — poll `https://<domain>/healthz` until 200 or timeout. Report the
+   real URL only after it actually answers. A process that started is not a
+   tunnel that works.
+8. **Supervise** — restart on crash with backoff; surface state in
+   `herdr-expose status` and in the UI.
+
+`expose stop` kills cloudflared and leaves the tunnel + DNS record in place (it
+is a STATIC domain — tearing down DNS on every stop is the ephemeral behaviour we
+just deleted). A separate explicit `expose destroy` removes the DNS record and
+deletes the tunnel, and only ever touches records it created.
+
+## C3. Preflight before touching anything
+
+Verify the token works and has the needed scopes BEFORE provisioning:
+`GET /user/tokens/verify`, then confirm zone read + DNS edit on the target zone.
+Fail with a precise, actionable error naming the missing permission. Never
+half-provision: if DNS fails, do not leave a dangling tunnel.
+
+## C4. ngrok and JS adapters
+
+`ngrok = true` follows the same static-domain rule: a reserved domain is
+required, no random URLs. goja/JS adapters remain the escape hatch for exotic
+setups only. Neither is the happy path.
+
+---
+
+# AMENDMENTS 4 — resolving ambiguities found during packaging
+
+## D1. `gap` and `snapshot` are BINARY-ONLY. Settled.
+
+A1 listed `gap` in the control plane AND defined binary `type:3`. That was my
+error. Both `snapshot` (type 2) and `gap` (type 3) are **binary frames only**,
+never JSON. Reason: both must stay strictly ORDERED against the output stream
+they refer to. A `gap` that arrives out of order relative to the bytes it
+describes is worse than no gap at all. Remove them from the control-plane list.
+
+Control plane (JSON text) is exactly:
+  out: hello · subscribe · unsubscribe · viewport · resize · command · ping
+  in:  welcome · tree · agent · closed · result · pong
+Data plane (binary) is exactly:
+  in:  1=frame · 2=snapshot · 3=gap        out: 16=input
+
+## D2. Canonical config — this block replaces §5's
+
+```toml
+[server]
+port = 21118
+# no `bind` key: loopback is not configurable. It is enforced in code.
+
+[auth]
+pairing_ttl_seconds = 600     # 10 minutes. No token key — secrets live in
+                              # state as SHA-256 hashes, never in config.
+
+[ui]
+theme = "auto"
+default_view = "grid"
+
+[expose]
+cloudflare  = false
+domain      = ""              # REQUIRED when cloudflare = true
+tunnel_name = "herdr-expose"
+autostart   = false
+```
+Path: `~/.config/herdr-expose/config.toml`, unconditionally (B6).
+Unknown keys preserved on rewrite; missing keys take defaults.
+
+## D3. CLI gains `install-service` / `uninstall-service`
+
+B7 requires a launchd/systemd unit but §7 had no verb for it. Add:
+`herdr-expose install-service` (writes and loads the LaunchAgent / systemd --user
+unit, idempotent) and `uninstall-service`. `daemon` stays as the one-shot-hook
+entry point; `serve` stays as the foreground process the unit supervises.
+
+## D4. Manifest facts verified against live Herdr 0.9.0 (do not re-derive)
+
+- `[[panes]]` requires id/title/command. `placement` ∈ overlay|popup|split|tab|zoomed.
+- **`width`/`height` are POPUP-ONLY.** Setting them with `placement="overlay"`
+  is rejected: `invalid_plugin_pane_size`. (Hit for real; overlay takes the whole
+  terminal area anyway.) They accept a cell count or a "NN%" string.
+- `[[link_handlers]]` requires id/title/pattern/action, where `action` is an
+  action id. The invoked command receives `clicked_url` and `link_handler_id` in
+  its invocation context.
+- `[[actions]]` also accepts `contexts` ∈ global|workspace|tab|pane|selection.
+
+---
+
+# AMENDMENTS 5 — LAN mode (RELAXES hard rule #2, deliberately)
+
+Owner's direction: "if cloudflared is not there let it expose everywhere so
+people in wifi and all they can connect."
+
+## E1. Three exposure modes, resolved in this order
+
+1. **cloudflare** — `cloudflare = true` AND `domain` set AND the cloudflared
+   binary is resolvable. Public, static domain. Binds 127.0.0.1; the tunnel is
+   the only remote path.
+2. **lan** — bind `0.0.0.0`, reachable by anyone on the wifi/LAN. Chosen when
+   `lan = true`, OR AUTOMATICALLY when cloudflare was requested but **cloudflared
+   is not installed** — log loudly, fall back, do not fail.
+3. **local** — bind 127.0.0.1. The default when nothing else is configured.
+
+```toml
+[expose]
+cloudflare = true
+domain     = "herdr.deemwar.com"
+lan        = true    # allow LAN; also the automatic fallback when cloudflared is absent
+```
+
+`bind` is no longer user-settable — the MODE decides it. Keep the key rejecting
+manual values with a message pointing at `lan`.
+
+## E2. Why this is safe: auth is mandatory, and the QR is local-only
+
+Hard rule #2 said loopback only, because this binary executes arbitrary commands.
+LAN mode is acceptable ONLY because of the pairing design (E3 in AMENDMENTS 6 /
+the local-only QR):
+
+- **Auth is never optional. There is no "trusted LAN" bypass.** A device token is
+  required in every mode, including local.
+- **The pairing code is displayed ONLY on the physically-present machine** and no
+  HTTP endpoint ever mints or shows one. So someone on the same wifi can reach
+  the port, complete a TLS/WS handshake, and get exactly nowhere: they cannot
+  obtain a pairing code without looking at your screen.
+- Therefore the LAN exposure surface is: an unauthenticated `/healthz`, a static
+  SPA, and a hard rate-limited `POST /v1/pair` that only ACCEPTS codes.
+
+Log a clear one-line warning on every LAN-mode start naming the bind address and
+reminding that anyone on the network can reach the port.
+
+## E3. LAN mechanics
+
+- Resolve the primary non-loopback IPv4 at startup; show it in `status`, in the
+  UI, and encode it in the QR (`http://<lan-ip>:<port>/?pair=<code>`).
+- The QR URL is chosen by MODE: cloudflare -> `https://<domain>`, lan ->
+  `http://<lan-ip>:<port>`, local -> `http://127.0.0.1:<port>`.
+- Re-resolve the IP on SIGHUP and on network change; a DHCP lease change must not
+  silently leave a stale URL in `status`.
+- Origin allowlist must accept the LAN origin in lan mode, or the browser will
+  refuse the WebSocket.
+- **Plain HTTP on LAN means no service worker and no PWA install** (both require
+  a secure context; `localhost` is exempt, a LAN IP is not). Say so plainly in
+  status and in the README — on LAN the phone gets a working web app but not an
+  installable one. That is a real limitation of the mode, not a bug to chase.
+
+---
+
+# AMENDMENTS 6 — port
+
+**The port is 21118**, not 7420. Owner's assignment. Every default, doc, test,
+example, ingress config and dev proxy uses 21118. `references/` is historical and
+is left alone.
+
+---
+
+# AMENDMENTS 7 — speed, and no-auth on localhost
+
+## F1. Localhost needs no token — but Origin/Host pinning is NOT optional
+
+Owner's call: in `local` mode (bound to 127.0.0.1) no device token is required.
+Correct — anyone who can reach loopback already has shell on the box, so a token
+adds nothing.
+
+**But do not read "no auth" as "no checks."** The real attack on a loopback
+service is not a local user, it is the BROWSER: any website you visit can issue
+requests to 127.0.0.1, and DNS rebinding turns a hostile page into a client of
+this server. That is an actively exploited class of bug against local dev
+servers, and this server runs arbitrary commands.
+
+So in local mode, these are mandatory and replace the token:
+- **Origin allowlist, strictly enforced on the WS upgrade and every non-GET.**
+  Accept only `http://127.0.0.1:<port>` and `http://localhost:<port>`. A missing
+  Origin on a browser-initiated WS upgrade is REJECTED, not defaulted-allow.
+- **Host header pinning.** Reject any request whose Host is not `127.0.0.1:<port>`
+  or `localhost:<port>`. This is what defeats DNS rebinding: the rebound name
+  arrives in Host and will not match.
+- Keep `SameSite` and never reflect arbitrary CORS origins.
+
+Mode summary:
+
+| mode       | bind      | device token | Origin + Host pinning |
+|------------|-----------|--------------|-----------------------|
+| local      | 127.0.0.1 | NOT required | REQUIRED              |
+| lan        | 0.0.0.0   | REQUIRED     | REQUIRED              |
+| cloudflare | 127.0.0.1 | REQUIRED     | REQUIRED              |
+
+Auth is skipped ONLY because the bind address is loopback — never because a
+request merely claims to be local. Derive it from the listener, never from a
+header, and never from `X-Forwarded-For`.
+
+## F2. Speed: the renderer is not the bottleneck; latency is
+
+Owner wants it extremely fast. Spend the effort where it is felt:
+
+**1. Predictive echo is PROMOTED from phase 2 to v1 (was B10).** Paint time is
+~1ms; tunnel RTT is 30-150ms. Local echo is the only thing that removes that from
+perception. Mosh-style: predictions start TENTATIVE and INVISIBLE, go CONFIDENT
+and render only after one is confirmed by real server output, and any mismatch
+wipes all pending predictions back to tentative — so a phantom character is never
+shown. This is the single largest perceived-speed win available and nothing else
+comes close.
+
+**2. Renderer order**: WebGL where it is proven, Canvas where WebGL is risky, DOM
+only as a last resort. Keep the probe-and-degrade machinery from B8 exactly as
+built — do NOT force WebGL on mobile to chase paint throughput. Mobile WebGL
+context loss renders a blank black rectangle, and canvas already paints far
+faster than the network delivers. Trading a correctness cliff for an
+imperceptible gain is a bad trade.
+
+**3. xterm settings that actually cost frames:**
+- `cursorBlink: false` — blinking forces a repaint cycle ~2x/sec forever, on an
+  otherwise idle terminal. Biggest free win.
+- `smoothScrollDuration: 0`.
+- Never set `minimumContrastRatio` — it forces a per-cell colour computation on
+  every paint (we already omit it for fidelity; it is also expensive).
+- Load the terminal webfont and await `document.fonts.ready` BEFORE constructing
+  the terminal — otherwise cell metrics are measured against a fallback font and
+  the whole grid reflows on font swap.
+- Feed `Uint8Array` to `write()`, never a string (no UTF-8 round trip).
+
+**4. Already in and keep**: bytes bypass React entirely, same-tick coalescing,
+deflate threshold 1024 so keystrokes skip compression, wheel-drop under
+backpressure but never keystrokes, pooled zero-alloc buffers on the fanout path.
+
+**5. Measure, do not assert.** The harness must report keystroke->echo latency at
+p50/p95 in all three modes. A claimed number is not a number.

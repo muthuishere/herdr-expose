@@ -1,0 +1,298 @@
+package upstream
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"os/exec"
+	"strconv"
+	"sync"
+	"time"
+)
+
+// TerminalMode is observe (read-only) or control (one holder, can write).
+type TerminalMode string
+
+const (
+	ModeObserve TerminalMode = "observe"
+	ModeControl TerminalMode = "control"
+)
+
+// TerminalFrame is one decoded frame from a terminal stream.
+//
+// Data is a pooled buffer holding RAW ANSI bytes: base64 is decoded exactly
+// here, once, and never re-encoded anywhere downstream. The receiver owns one
+// reference and must Release it.
+type TerminalFrame struct {
+	Data *Buf
+	// Off is the number of reserved bytes at the front of Data.B. The raw ANSI
+	// payload is Data.B[Off:]. The reservation lets the wire header be written
+	// in place, so a frame travels from base64 decode to the socket with zero
+	// copies and zero allocations.
+	Off    int
+	Full   bool
+	Width  int
+	Height int
+	UpSeq  uint64
+}
+
+// TerminalHandler receives stream events. OnFrame owns f.Data's reference.
+type TerminalHandler interface {
+	OnFrame(f TerminalFrame)
+	OnClosed(reason string)
+}
+
+// TerminalStream wraps `herdr terminal session observe|control <target>`.
+//
+// There is NO terminal.* method on the socket API in 0.9.0; this subprocess is
+// the only streaming primitive. Control accepts NDJSON on stdin.
+type TerminalStream struct {
+	Target   string
+	Mode     TerminalMode
+	Cols     int
+	Rows     int
+	Takeover bool
+	// Reserve is the header space left in front of every decoded payload.
+	Reserve int
+
+	log     *slog.Logger
+	handler TerminalHandler
+
+	mu      sync.Mutex
+	cmd     *exec.Cmd
+	stdin   io.WriteCloser
+	closed  bool
+	inbuf   []byte
+	started time.Time
+}
+
+// NewTerminalStream builds (but does not start) a stream.
+func NewTerminalStream(target string, mode TerminalMode, cols, rows int, h TerminalHandler, log *slog.Logger) *TerminalStream {
+	if log == nil {
+		log = slog.Default()
+	}
+	if cols <= 0 {
+		cols = 120
+	}
+	if rows <= 0 {
+		rows = 32
+	}
+	return &TerminalStream{Target: target, Mode: mode, Cols: cols, Rows: rows, handler: h, log: log,
+		inbuf: make([]byte, 0, 1024)}
+}
+
+// Start spawns the subprocess and pumps frames until it exits or ctx is done.
+// It returns once the process is running; Wait blocks for teardown.
+func (t *TerminalStream) Start(ctx context.Context) error {
+	args := []string{"terminal", "session", string(t.Mode), t.Target,
+		"--cols", strconv.Itoa(t.Cols), "--rows", strconv.Itoa(t.Rows)}
+	if t.Mode == ModeControl && t.Takeover {
+		args = append(args, "--takeover")
+	}
+	bin, err := ResolveHerdrBin()
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(bin, args...)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if t.Mode == ModeControl {
+		sin, err := cmd.StdinPipe()
+		if err != nil {
+			return err
+		}
+		t.stdin = sin
+	}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("upstream: start %s %s: %w", t.Mode, t.Target, err)
+	}
+	t.mu.Lock()
+	t.cmd = cmd
+	t.started = time.Now()
+	t.mu.Unlock()
+
+	go func() {
+		<-ctx.Done()
+		t.Stop()
+	}()
+
+	go func() {
+		reason := t.pump(stdout)
+		// Reap deterministically: close stdin, wait, never leave a zombie.
+		t.mu.Lock()
+		if t.stdin != nil {
+			_ = t.stdin.Close()
+			t.stdin = nil
+		}
+		t.mu.Unlock()
+		_ = cmd.Wait()
+		if reason == "" {
+			if s := bytes.TrimSpace(stderr.Bytes()); len(s) > 0 {
+				reason = string(s)
+			} else {
+				reason = "stream ended"
+			}
+		}
+		t.handler.OnClosed(reason)
+	}()
+	return nil
+}
+
+// pump reads NDJSON records, decoding base64 directly into pooled buffers.
+// Returns the close reason if terminal.closed was seen.
+func (t *TerminalStream) pump(r io.ReadCloser) string {
+	defer r.Close()
+	br := bufio.NewReaderSize(r, 1<<18)
+	for {
+		line, err := readLine(br)
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				t.log.Debug("terminal stream read", "target", t.Target, "err", err)
+			}
+			return ""
+		}
+		if len(line) == 0 {
+			continue
+		}
+		if reason, ok := t.handleLine(line); ok {
+			return reason
+		}
+	}
+}
+
+var (
+	kBytes  = []byte(`"bytes":"`)
+	kSeq    = []byte(`"seq":`)
+	kFullT  = []byte(`"full":true`)
+	kWidth  = []byte(`"width":`)
+	kHeight = []byte(`"height":`)
+	kClosed = []byte(`terminal.closed`)
+)
+
+// handleLine parses one NDJSON record. The fast path avoids allocating a Go
+// string for the (large) base64 payload: base64 never contains a quote or a
+// backslash, so the value region can be sliced out of the raw line directly and
+// decoded straight into a pooled buffer.
+func (t *TerminalStream) handleLine(line []byte) (reason string, closed bool) {
+	if bytes.Contains(line, kClosed) {
+		var rec TerminalRecord
+		if err := json.Unmarshal(line, &rec); err == nil && rec.Type == "terminal.closed" {
+			if rec.Reason == "" {
+				rec.Reason = "terminal.closed"
+			}
+			return rec.Reason, true
+		}
+	}
+	i := bytes.Index(line, kBytes)
+	if i < 0 {
+		return "", false
+	}
+	start := i + len(kBytes)
+	end := bytes.IndexByte(line[start:], '"')
+	if end < 0 {
+		return "", false
+	}
+	enc := line[start : start+end]
+
+	off := t.Reserve
+	buf := GetBuf(off + base64.StdEncoding.DecodedLen(len(enc)))
+	dst := buf.B[:cap(buf.B)]
+	n, err := base64.StdEncoding.Decode(dst[off:], enc)
+	if err != nil {
+		buf.Release()
+		t.log.Debug("terminal frame: bad base64", "target", t.Target, "err", err)
+		return "", false
+	}
+	buf.B = dst[:off+n]
+
+	t.handler.OnFrame(TerminalFrame{
+		Data:   buf,
+		Off:    off,
+		Full:   bytes.Contains(line, kFullT),
+		Width:  scanInt(line, kWidth),
+		Height: scanInt(line, kHeight),
+		UpSeq:  uint64(scanInt(line, kSeq)),
+	})
+	return "", false
+}
+
+func scanInt(line, key []byte) int {
+	i := bytes.Index(line, key)
+	if i < 0 {
+		return 0
+	}
+	j := i + len(key)
+	n := 0
+	for j < len(line) && line[j] >= '0' && line[j] <= '9' {
+		n = n*10 + int(line[j]-'0')
+		j++
+	}
+	return n
+}
+
+// Send writes one NDJSON control record on stdin (control mode only).
+func (t *TerminalStream) Send(rec any) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.stdin == nil {
+		return errors.New("upstream: stream is not a controller")
+	}
+	b, err := json.Marshal(rec)
+	if err != nil {
+		return err
+	}
+	t.inbuf = append(t.inbuf[:0], b...)
+	t.inbuf = append(t.inbuf, '\n')
+	_, err = t.stdin.Write(t.inbuf)
+	return err
+}
+
+// SendInput writes raw keystrokes upstream. This is the keystroke hot path:
+// one small JSON envelope, no intermediate copies of the payload.
+func (t *TerminalStream) SendInput(data []byte) error {
+	return t.Send(map[string]any{"type": "terminal.input", "bytes": base64.StdEncoding.EncodeToString(data)})
+}
+
+// Resize asks the upstream terminal to change geometry.
+func (t *TerminalStream) Resize(cols, rows int) error {
+	t.mu.Lock()
+	t.Cols, t.Rows = cols, rows
+	t.mu.Unlock()
+	return t.Send(map[string]any{"type": "terminal.resize", "cols": cols, "rows": rows})
+}
+
+// Scroll moves the viewport.
+func (t *TerminalStream) Scroll(delta int) error {
+	return t.Send(map[string]any{"type": "terminal.scroll", "delta": delta})
+}
+
+// Release gives up control without killing the pane.
+func (t *TerminalStream) Release() error {
+	return t.Send(map[string]any{"type": "terminal.release"})
+}
+
+// Stop tears the subprocess down. Idempotent.
+func (t *TerminalStream) Stop() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closed || t.cmd == nil || t.cmd.Process == nil {
+		t.closed = true
+		return
+	}
+	t.closed = true
+	if t.stdin != nil {
+		_ = t.stdin.Close()
+		t.stdin = nil
+	}
+	_ = t.cmd.Process.Kill()
+}

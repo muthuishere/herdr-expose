@@ -1,0 +1,612 @@
+syntax = "proto3";
+
+package mux.v1;
+
+option go_package = "github.com/you/mux/gen/muxv1;muxv1";
+
+// ============================================================
+// SOURCE OF TRUTH
+//
+// This file is the CLIENT contract (Rust TUI, React web, later
+// Swift/Kotlin). It is NOT the source of truth for the Herdr
+// socket API. That ships with the binary:
+//
+//   herdr api schema --json --output herdr-api.schema.json
+//
+// Generate/diff against that on every upstream bump. Anything
+// here that drifts from it is a bug in this file.
+//
+// The Go server is a TRANSLATION layer, not a reimplementation:
+//   herdr socket API  <->  Go server  <->  this protocol  <->  clients
+// Never reimplement pane management, agent detection, or worktree
+// logic. Every command below maps to a socket method Herdr already
+// exposes.
+//
+// TRANSPORT
+//   GET  /healthz              liveness, no auth
+//   POST /v1/pair              one-time token -> long-lived key
+//   GET  /v1/stream            WebSocket, binary protobuf frames
+//   GET  /*                    embedded web UI (go:embed)
+// One origin, one port. `cloudflared tunnel --url localhost:7420`
+// or `ngrok http 7420` exposes the whole product unchanged.
+// ============================================================
+
+message Envelope {
+  uint64 seq = 1;                        // server->client, monotonic per connection
+  oneof payload {
+    // client -> server
+    Hello         hello          = 10;
+    Subscribe     subscribe      = 11;
+    Unsubscribe   unsubscribe    = 12;
+    Viewport      viewport       = 13;
+    TerminalInput terminal_input = 14;
+    Command       command        = 15;
+    Ping          ping           = 16;
+
+    // server -> client
+    Welcome       welcome        = 30;
+    TerminalFrame frame          = 31;
+    TerminalClosed closed        = 32;
+    Snapshot      snapshot       = 33;
+    Gap           gap            = 34;
+    TreeChanged   tree           = 35;
+    AgentEvent    agent_event    = 36;
+    NotificationEvent notification = 37;
+    CommandResult result         = 38;
+    Pong          pong           = 39;
+  }
+}
+
+// ============================================================
+// MODEL — mirrors Herdr's hierarchy exactly
+//   session > workspace > tab > pane
+// Worktree workspaces are normal workspaces with Git provenance,
+// grouped with their parent repo workspace.
+// ============================================================
+
+message Session {
+  string name    = 1;                    // "default" is explicit, not implicit
+  bool   running = 2;
+  string socket_path = 3;
+}
+
+message Workspace {
+  string workspace_id = 1;
+  string label        = 2;
+  string cwd          = 3;
+  repeated string tab_ids = 4;
+  map<string, string> env = 5;
+
+  // Worktree provenance. Empty group_id means a plain workspace.
+  string group_id     = 10;              // links worktrees to parent repo workspace
+  bool   is_primary   = 11;              // the parent repo workspace of the group
+  string branch       = 12;
+  string checkout_path = 13;
+
+  // From workspace report-metadata --token NAME=VALUE. Space sidebar
+  // rows render these as $name. TTL is enforced server-side.
+  map<string, string> tokens = 20;
+
+  // Rollup of the workspace's agents, by Herdr's urgency order:
+  // blocked > unseen-done > working > idle.
+  AgentState rollup_state = 21;
+}
+
+message Tab {
+  string tab_id       = 1;
+  string workspace_id = 2;
+  string label        = 3;
+  repeated string pane_ids = 4;
+}
+
+message Pane {
+  string pane_id      = 1;               // workspace-qualified; changes on cross-workspace move
+  string previous_pane_id = 2;           // retained alias after pane move
+  string terminal_id  = 3;               // stable across moves; what terminal attach targets
+  string tab_id       = 4;
+  string workspace_id = 5;
+  string label        = 6;
+
+  string cwd           = 10;             // pane/workspace cwd, used for labels + follow-cwd
+  string foreground_cwd = 11;            // cwd of the foreground process, when resolvable
+  uint32 cols          = 12;
+  uint32 rows          = 13;
+  bool   zoomed        = 14;
+  bool   dead          = 15;
+
+  ProcessInfo process   = 20;
+  ScrollState scroll    = 21;
+  PaneMetadata metadata = 22;
+  string agent_id       = 23;            // empty when no agent detected
+}
+
+message ProcessInfo {
+  string foreground_command = 1;
+  int32  pid                = 2;
+  bool   shell_owns_foreground = 3;      // agent start requires this true
+}
+
+// offset_from_bottom == 0 means pinned to the bottom of scrollback.
+// Clients use this to decide whether to auto-follow new output.
+message ScrollState {
+  uint32 offset_from_bottom = 1;
+  uint32 total_lines        = 2;
+}
+
+// Display-only. From pane report-metadata. Never drives semantic
+// state — that is what report-agent is for.
+message PaneMetadata {
+  string title         = 1;              // capped 80 chars server-side
+  string display_agent = 2;
+  map<string, string> state_labels = 3;  // "blocked" -> "needs review"
+  map<string, string> tokens       = 4;  // $name in Agent sidebar rows
+}
+
+// Full tree. Small enough to resend on any structural change, and
+// resending is what keeps TUI and web pixel-identical: neither
+// client computes layout itself.
+message TreeChanged {
+  repeated Session   sessions   = 1;
+  repeated Workspace workspaces = 2;
+  repeated Tab       tabs       = 3;
+  repeated Pane      panes      = 4;
+  string focused_workspace_id   = 5;
+  string focused_tab_id         = 6;
+  string focused_pane_id        = 7;
+}
+
+// ============================================================
+// AGENTS
+// ============================================================
+
+enum AgentState {
+  AGENT_STATE_UNSPECIFIED = 0;
+  AGENT_STATE_IDLE        = 1;  // ready for input
+  AGENT_STATE_WORKING     = 2;
+  AGENT_STATE_BLOCKED     = 3;  // approval/question UI recognized -> push notification
+  AGENT_STATE_DONE        = 4;  // idle but not yet marked seen
+  AGENT_STATE_UNKNOWN     = 5;  // agent present, not confidently classified
+}
+
+// MULTI-CLIENT SEEN STATE — decide this early.
+// In Herdr, `done` is idle-but-unseen, `pane focus`/`agent focus`
+// mark seen, reads do not, and each TUI client tracks viewed
+// completions independently. With web + TUI + two phones attached,
+// "seen" must be per-client or every client clears everyone else's
+// Done badges. Server holds the authoritative idle state; each
+// connection holds its own seen set and derives DONE locally.
+message SeenState {
+  repeated string unseen_agent_ids = 1;  // per-connection, not global
+}
+
+message Agent {
+  string     agent_id  = 1;              // unique live name, [a-z][a-z0-9_-]{0,31}
+  string     pane_id   = 2;
+  string     kind      = 3;              // pi|claude|codex|gemini|cursor|devin|agy|cline|
+                                         // omp|mastracode|opencode|copilot|kimi|kiro|droid|
+                                         // amp|grok|hermes|kilo|qodercli|qwen|maki|muse
+  string     display_name = 4;
+  AgentState state     = 5;
+  int64      state_since_unix_ms = 6;
+
+  AgentSessionRef session = 10;          // present only when an official integration reported it
+  Detection       detection = 11;
+}
+
+// Native session identity reported by an installed integration.
+// Omitted entirely when no native reference is stored — do not
+// synthesize one.
+message AgentSessionRef {
+  string agent_session_id   = 1;         // the agent's own resumable id
+  string agent_session_path = 2;
+  string source             = 3;         // reporting integration id
+}
+
+// From agent explain. Show fidelity in the UI — hook-reported state
+// and pattern-matched state are not equivalent and users deserve to
+// know which they are looking at.
+message Detection {
+  string manifest_source  = 1;
+  string manifest_version = 2;
+  string matched_rule     = 3;
+  repeated string evidence = 4;
+  repeated string warnings = 5;
+  bool   fallback         = 6;
+  bool   from_integration = 7;           // true = integration-reported, false = screen heuristics
+}
+
+message AgentEvent {
+  Agent agent      = 1;                  // full state after the event
+  int64 at_unix_ms = 2;
+  oneof detail {
+    StateChanged state_changed = 10;
+    AgentStarted started       = 11;
+    AgentReleased released     = 12;
+    SessionChanged session_changed = 13;
+  }
+}
+
+message StateChanged   { AgentState from = 1; AgentState to = 2; string message = 3; }
+message AgentStarted   { string kind = 1; repeated string args = 2; }
+message AgentReleased  { string source = 1; }
+message SessionChanged { AgentSessionRef session = 1; string start_source = 2; }
+
+// ============================================================
+// TERMINAL STREAMS
+//
+// Maps onto `terminal session control|observe`. Herdr's model:
+// exactly one controller per terminal (takeover to steal it),
+// unlimited observers. Preserve that — it is what makes a phone
+// safe to attach while the desktop TUI is open.
+// ============================================================
+
+enum StreamRole {
+  STREAM_ROLE_UNSPECIFIED = 0;
+  STREAM_ROLE_OBSERVE     = 1;  // read-only, always permitted
+  STREAM_ROLE_CONTROL     = 2;  // exclusive; fails unless takeover
+}
+
+enum ReadSource {
+  READ_SOURCE_UNSPECIFIED     = 0;
+  READ_SOURCE_VISIBLE         = 1;  // rendered screen; best for UI feedback loops
+  READ_SOURCE_RECENT          = 2;  // scrollback with terminal wrapping
+  READ_SOURCE_RECENT_UNWRAPPED = 3; // scrollback without soft wrap; best for logs
+  READ_SOURCE_DETECTION       = 4;  // bottom-buffer snapshot used by agent detection
+}
+
+// PERFORMANCE — two modes per pane, server-chosen from Viewport.
+// A browser grid of 20 panes runs 1 LIVE + 19 SUMMARY. Twenty live
+// xterm.js instances will stall the tab; twenty snapshot tiles will
+// not. The Rust TUI uses the same mechanism for unfocused panes, so
+// both clients feel identical.
+enum OutputMode {
+  OUTPUT_MODE_UNSPECIFIED = 0;
+  OUTPUT_MODE_LIVE        = 1;  // frames coalesced into ~16ms batches
+  OUTPUT_MODE_SUMMARY     = 2;  // visible-screen snapshot at 1-2 Hz
+  OUTPUT_MODE_NONE        = 3;  // state only, no output
+}
+
+message Subscribe {
+  repeated string targets = 1;           // pane / terminal / agent ids
+  StreamRole role         = 2;
+  bool takeover           = 3;
+}
+message Unsubscribe { repeated string targets = 1; }
+
+// Client declares what it is actually rendering. Server picks the
+// mode. Clients never request LIVE directly — that is how you end
+// up with 20 live streams.
+message Viewport {
+  message Entry {
+    string target  = 1;
+    bool   visible = 2;
+    bool   focused = 3;
+    uint32 cols    = 4;                  // rendered size, may differ from pane size
+    uint32 rows    = 5;
+  }
+  repeated Entry entries = 1;
+}
+
+// Raw ANSI bytes. Binary frames, never base64 — Herdr's CLI stream
+// base64s them for line-delimited JSON, and your server should
+// decode once at the boundary rather than pushing that cost to
+// every client. Terminal output deflates ~10x, which is what makes
+// this usable over a tunnel on cellular.
+message TerminalFrame {
+  string target = 1;
+  bytes  data   = 2;
+}
+
+message TerminalClosed { string target = 1; string reason = 2; }
+
+message Snapshot {
+  string target     = 1;
+  uint64 up_to_seq  = 2;
+  uint32 cols       = 3;
+  uint32 rows       = 4;
+  bytes  screen     = 5;                 // ANSI-encoded visible grid
+  uint32 cursor_col = 6;
+  uint32 cursor_row = 7;
+}
+
+// Sent instead of silently dropping bytes under backpressure, or
+// after reconnect when the ring buffer rolled past the client's
+// seq. Always followed by a Snapshot. Losing output is fine;
+// lying about it is not.
+message Gap {
+  string target        = 1;
+  uint64 from_seq      = 2;
+  uint64 to_seq        = 3;
+  uint64 bytes_dropped = 4;
+}
+
+message TerminalInput {
+  string target = 1;
+  oneof kind {
+    bytes  data   = 2;                   // raw keystrokes -> terminal.input
+    Resize resize = 3;                   // -> terminal.resize
+    int32  scroll = 4;                   // -> terminal.scroll, +up/-down
+    bool   release = 5;                  // -> terminal.release
+  }
+}
+message Resize { uint32 cols = 1; uint32 rows = 2; }
+
+// ============================================================
+// COMMANDS — one oneof, mirroring the CLI surface 1:1
+// ============================================================
+
+message Command {
+  string command_id = 1;                 // client-generated, echoed back
+  oneof op {
+    // sessions
+    SessionList     session_list     = 100;
+    SessionStop     session_stop     = 101;
+    SessionDelete   session_delete   = 102;
+
+    // workspaces
+    WorkspaceCreate workspace_create = 110;
+    WorkspaceFocus  workspace_focus  = 111;
+    WorkspaceRename workspace_rename = 112;
+    WorkspaceClose  workspace_close  = 113;
+    WorkspaceReportMetadata workspace_report_metadata = 114;
+
+    // worktrees
+    WorktreeList    worktree_list    = 120;
+    WorktreeCreate  worktree_create  = 121;
+    WorktreeOpen    worktree_open    = 122;
+    WorktreeRemove  worktree_remove  = 123;
+
+    // tabs
+    TabCreate       tab_create       = 130;
+    TabFocus        tab_focus        = 131;
+    TabRename       tab_rename       = 132;
+    TabClose        tab_close        = 133;
+
+    // panes
+    PaneSplit       pane_split       = 140;
+    PaneClose       pane_close       = 141;
+    PaneFocus       pane_focus       = 142;
+    PaneResize      pane_resize      = 143;
+    PaneZoom        pane_zoom        = 144;
+    PaneRename      pane_rename      = 145;
+    PaneSwap        pane_swap        = 146;
+    PaneMove        pane_move        = 147;
+    PaneRead        pane_read        = 148;
+    PaneSendText    pane_send_text   = 149;
+    PaneSendKeys    pane_send_keys   = 150;
+    PaneRun         pane_run         = 151;
+    PaneWaitOutput  pane_wait_output = 152;
+    PaneReportMetadata pane_report_metadata = 153;
+    PaneReportAgent pane_report_agent = 154;
+    PaneReleaseAgent pane_release_agent = 155;
+
+    // agents
+    AgentStart      agent_start      = 160;
+    AgentPrompt     agent_prompt     = 161;
+    AgentSendKeys   agent_send_keys  = 162;
+    AgentRead       agent_read       = 163;
+    AgentWait       agent_wait       = 164;
+    AgentRename     agent_rename     = 165;
+    AgentFocus      agent_focus      = 166;
+    AgentExplain    agent_explain    = 167;
+
+    // notifications, integrations, plugins, machines, server
+    NotificationShow notification_show = 170;
+    IntegrationInstall integration_install = 180;
+    IntegrationUninstall integration_uninstall = 181;
+    IntegrationStatus  integration_status = 182;
+    PluginInstall   plugin_install   = 190;
+    PluginUninstall plugin_uninstall = 191;
+    PluginEnable    plugin_enable    = 192;
+    PluginDisable   plugin_disable   = 193;
+    PluginActionInvoke plugin_action_invoke = 194;
+    PluginPaneOpen  plugin_pane_open = 195;
+    MachineList     machine_list     = 200;
+    ServerReloadConfig server_reload_config = 210;
+    ServerUpdateAgentManifests server_update_agent_manifests = 211;
+  }
+}
+
+message SessionList   {}
+message SessionStop   { string name = 1; }
+message SessionDelete { string name = 1; }
+
+// focus defaults to false everywhere — Herdr does not steal focus
+// on create, and neither should you.
+message WorkspaceCreate { string cwd = 1; string label = 2; map<string,string> env = 3; bool focus = 4; }
+message WorkspaceFocus  { string workspace_id = 1; }
+message WorkspaceRename { string workspace_id = 1; string label = 2; }
+// group=true is REQUIRED to close a primary workspace that has open
+// linked worktree workspaces, else the server returns
+// WORKSPACE_GROUP_CLOSE_REQUIRED and closes nothing.
+message WorkspaceClose  { string workspace_id = 1; bool group = 2; }
+message WorkspaceReportMetadata {
+  string workspace_id = 1; string source = 2;
+  map<string,string> tokens = 3; repeated string clear_tokens = 4;
+  uint64 seq = 5; uint32 ttl_ms = 6;     // ttl 1..86400000
+}
+
+message WorktreeList   { string workspace_id = 1; string cwd = 2; bool trust_repository = 3; }
+// Existing local branch -> checked out. Otherwise created from base,
+// or HEAD. Without path, checkout lands under
+// <worktrees.directory>/<repo>/<branch-slug>.
+message WorktreeCreate {
+  string workspace_id = 1; string cwd = 2; string branch = 3; string base = 4;
+  string path = 5; string label = 6; bool focus = 7; bool trust_repository = 8;
+}
+message WorktreeOpen   {
+  string workspace_id = 1; string cwd = 2; string path = 3; string branch = 4;
+  string label = 5; bool focus = 6; bool trust_repository = 7;
+}
+// Runs `git worktree remove`. Never deletes the branch. force is
+// required when Git refuses a dirty checkout.
+message WorktreeRemove { string workspace_id = 1; bool force = 2; bool trust_repository = 3; }
+
+message TabCreate { string workspace_id = 1; string cwd = 2; string label = 3; map<string,string> env = 4; bool focus = 5; }
+message TabFocus  { string tab_id = 1; }
+message TabRename { string tab_id = 1; string label = 2; }
+// Closing a workspace's last tab closes the workspace. If it would
+// close a whole worktree group and confirm_close is on, the server
+// returns CONFIRMATION_REQUIRED.
+message TabClose  { string tab_id = 1; }
+
+enum Direction {
+  DIRECTION_UNSPECIFIED = 0;
+  DIRECTION_LEFT = 1; DIRECTION_RIGHT = 2; DIRECTION_UP = 3; DIRECTION_DOWN = 4;
+}
+
+message PaneSplit  { string pane_id = 1; Direction direction = 2; float ratio = 3; string cwd = 4; map<string,string> env = 5; bool focus = 6; }
+message PaneClose  { string pane_id = 1; }
+message PaneFocus  { string pane_id = 1; Direction direction = 2; }
+message PaneResize { string pane_id = 1; Direction direction = 2; float amount = 3; }
+message PaneZoom   { string pane_id = 1; enum Mode { TOGGLE = 0; ON = 1; OFF = 2; } Mode mode = 2; }
+message PaneRename { string pane_id = 1; string label = 2; bool clear = 3; }
+message PaneSwap   { string pane_id = 1; Direction direction = 2; string source_pane_id = 3; string target_pane_id = 4; }
+message PaneMove   {
+  string pane_id = 1;
+  oneof dest {
+    ToTab       to_tab       = 2;
+    NewTab      new_tab      = 3;
+    NewWorkspace new_workspace = 4;
+  }
+  bool focus = 5;
+  message ToTab       { string tab_id = 1; Direction split = 2; string target_pane_id = 3; float ratio = 4; }
+  message NewTab      { string workspace_id = 1; string label = 2; }
+  message NewWorkspace { string label = 1; string tab_label = 2; }
+}
+message PaneRead      { string pane_id = 1; ReadSource source = 2; uint32 lines = 3; bool ansi = 4; bool raw = 5; }
+message PaneSendText  { string pane_id = 1; string text = 2; }
+// Herdr key-combo syntax: a, enter, tab, esc, backspace, arrows,
+// ctrl+h, alt+x, shift+tab, f1, minus, plus, backtick. Legacy C-c
+// accepted. Every key is validated before any bytes are written.
+message PaneSendKeys  { string pane_id = 1; repeated string keys = 2; }
+// Honors bracketed paste and submits text+Enter atomically. Always
+// prefer this over send-text followed by send-keys enter.
+message PaneRun       { string pane_id = 1; string command = 2; }
+// Checks the existing snapshot first, then polls. Omitted timeout
+// waits indefinitely.
+message PaneWaitOutput { string pane_id = 1; string match = 2; string regex = 3; ReadSource source = 4; uint32 lines = 5; uint32 timeout_ms = 6; }
+message PaneReportMetadata {
+  string pane_id = 1; string source = 2; string agent = 3; string applies_to_source = 4;
+  string title = 5; string display_agent = 6;
+  map<string,string> state_labels = 7; map<string,string> tokens = 8;
+  repeated string clear_tokens = 9; uint64 seq = 10; uint32 ttl_ms = 11;
+}
+message PaneReportAgent {
+  string pane_id = 1; string source = 2; string agent = 3; AgentState state = 4;
+  string message = 5; uint64 seq = 6;
+  string agent_session_id = 7; string agent_session_path = 8;
+}
+message PaneReleaseAgent { string pane_id = 1; string source = 2; string agent = 3; uint64 seq = 4; }
+
+// Requires an available shell pane: interactive shell owns the
+// foreground, no command/editor/agent running. Topology must exist
+// first. Default timeout 30000ms, valid range 3001..300000.
+message AgentStart { string name = 1; string kind = 2; string pane_id = 3; uint32 timeout_ms = 4; repeated string args = 5; }
+// Writes text then delayed Enter as one ordered submission, even
+// while working. Returns AGENT_BLOCKED without sending if already
+// blocked. With wait, five seconds to observe working/blocked or
+// AGENT_PROMPT_STALLED. until requires wait.
+message AgentPrompt { string target = 1; string text = 2; bool wait = 3; repeated AgentState until = 4; uint32 timeout_ms = 5; }
+message AgentSendKeys { string target = 1; repeated string keys = 2; }
+message AgentRead   { string target = 1; ReadSource source = 2; uint32 lines = 3; bool ansi = 4; }
+message AgentWait   { string target = 1; repeated AgentState until = 2; uint32 timeout_ms = 3; }
+message AgentRename { string target = 1; string name = 2; bool clear = 3; }
+message AgentFocus  { string target = 1; }
+message AgentExplain { string target = 1; string file = 2; string agent_label = 3; bool verbose = 4; }
+
+message NotificationShow { string title = 1; string body = 2; string position = 3; string sound = 4; }
+message NotificationEvent { string title = 1; string body = 2; string sound = 3; string agent_id = 4; }
+
+message IntegrationInstall   { string kind = 1; }
+message IntegrationUninstall { string kind = 1; }
+message IntegrationStatus    { bool outdated_only = 1; }
+
+message PluginInstall   { string shorthand = 1; string ref = 2; bool yes = 3; }
+message PluginUninstall { string plugin_id = 1; }
+message PluginEnable    { string plugin_id = 1; }
+message PluginDisable   { string plugin_id = 1; }
+message PluginActionInvoke { string action_id = 1; string plugin_id = 2; }
+message PluginPaneOpen  {
+  string plugin_id = 1; string entrypoint_id = 2; string placement = 3;
+  string width = 4; string height = 5; string workspace_id = 6;
+  string target_pane_id = 7; Direction direction = 8; string cwd = 9;
+  map<string,string> env = 10; bool focus = 11;
+}
+
+message MachineList {}
+message ServerReloadConfig {}
+message ServerUpdateAgentManifests {}
+
+// ============================================================
+// RESULTS
+// ============================================================
+
+// Herdr's real error codes. Map them through verbatim — clients
+// need to distinguish "needs --group" from a generic failure.
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+  ERROR_CODE_TIMEOUT = 1;
+  ERROR_CODE_AGENT_NOT_READY = 2;
+  ERROR_CODE_AGENT_BLOCKED = 3;
+  ERROR_CODE_AGENT_PROMPT_STALLED = 4;
+  ERROR_CODE_WORKSPACE_GROUP_CLOSE_REQUIRED = 5;
+  ERROR_CODE_CONFIRMATION_REQUIRED = 6;
+  ERROR_CODE_NOT_FOUND = 7;
+  ERROR_CODE_CONTROL_HELD = 8;           // another client owns control; retry with takeover
+  ERROR_CODE_INTERNAL = 9;
+}
+
+message CommandResult {
+  string    command_id = 1;
+  bool      ok         = 2;
+  ErrorCode code       = 3;
+  string    error      = 4;
+  oneof value {
+    Workspace workspace = 10;
+    Tab       tab       = 11;
+    Pane      pane      = 12;
+    Agent     agent     = 13;
+    TextResult text     = 14;             // pane read / agent read
+    ListResult list     = 15;
+    Detection detection = 16;             // agent explain
+  }
+}
+
+message TextResult { string content = 1; bool ansi = 2; }
+message ListResult {
+  repeated Session   sessions   = 1;
+  repeated Workspace workspaces = 2;
+  repeated Tab       tabs       = 3;
+  repeated Pane      panes      = 4;
+  repeated Agent     agents     = 5;
+  repeated string    raw_json   = 6;     // plugins, machines, integrations: pass through
+}
+
+// ============================================================
+// LIFECYCLE
+// ============================================================
+
+message Hello {
+  string client_name    = 1;             // "web" | "tui" | "ios" | "android"
+  string client_version = 2;
+  uint32 protocol       = 3;             // server refuses on mismatch
+  string session        = 4;             // "" = default
+  uint64 resume_from_seq = 5;            // replay from ring buffer, or Gap + Snapshot
+}
+
+message Welcome {
+  string server_version = 1;
+  string herdr_version  = 2;             // surface upstream version; schema drift is real
+  uint32 protocol       = 3;
+  string host_name      = 4;
+  bool   resumed        = 5;             // false = discard local state
+  TreeChanged tree      = 6;
+  SeenState seen        = 7;
+}
+
+// Proxies and tunnels close idle WebSockets. ~30s ping keeps the
+// connection alive and gives the client an RTT reading to display
+// when it is on a slow path.
+message Ping { int64 sent_unix_ms = 1; }
+message Pong { int64 sent_unix_ms = 1; int64 server_unix_ms = 2; }

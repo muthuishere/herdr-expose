@@ -1,0 +1,759 @@
+/*
+ * MOBILE-FIRST. Everything here is the 375px layout. Desktop is one
+ * `@media (min-width: 900px)` block at the bottom, and nothing above it assumes
+ * a wide screen. No horizontal page scroll at any width.
+ *
+ * Heights use --app-height (driven from visualViewport in hooks/useViewport.ts)
+ * rather than 100vh / 100dvh, both of which lie when the iOS keyboard opens.
+ */
+
+:root {
+  --bg: #0b0d10;
+  --bg-1: #11141a;
+  --bg-2: #171b22;
+  --bg-3: #1e232c;
+  --line: #262c36;
+  --fg: #e6e9ef;
+  --fg-dim: #9aa3b2;
+  --fg-faint: #6b7483;
+
+  --accent: #62b0ff;
+  --blocked: #ff8b3d;
+  --done: #5ddc8a;
+  --working: #62b0ff;
+  --idle: #6b7483;
+
+  --term-bg: #0b0d10;
+  --term-fg: #c6ccd8;
+
+  --radius: 12px;
+  --radius-sm: 8px;
+  --mono: 'SFMono-Regular', ui-monospace, 'JetBrains Mono', Menlo, Consolas,
+    'Liberation Mono', monospace;
+  --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Roboto, sans-serif;
+
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+
+  /* Overwritten at runtime by installViewportDriver(). */
+  --app-height: 100dvh;
+  --keyboard-inset: 0px;
+
+  --keybar-h: 52px;
+
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--sans);
+  -webkit-font-smoothing: antialiased;
+  /* No horizontal page scroll, ever. */
+  overflow-x: hidden;
+  overscroll-behavior-y: none;
+}
+
+body {
+  /* The shell owns scrolling; the document never bounces behind it. */
+  position: fixed;
+  inset: 0;
+  width: 100%;
+}
+
+#root {
+  height: 100%;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+/* ---------------------------------------------------------------- shell */
+
+.app {
+  height: var(--app-height);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.appbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: calc(var(--safe-top) + 10px) calc(var(--safe-right) + 14px) 10px
+    calc(var(--safe-left) + 14px);
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+
+.brand {
+  font-family: var(--mono);
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: -0.02em;
+}
+
+.scroll {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: calc(var(--safe-bottom) + 24px);
+}
+
+/* ---------------------------------------------------------------- list */
+
+.panelist {
+  padding: 4px calc(var(--safe-left) + 12px) 0 calc(var(--safe-right) + 12px);
+}
+
+.ws-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+  margin: 18px 2px 8px;
+}
+
+.tab-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-dim);
+  margin: 12px 2px 6px;
+}
+
+.rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.row {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  text-align: left;
+  padding: 12px 14px;
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--line);
+  border-radius: var(--radius);
+  /* Comfortable thumb target at 375px. */
+  min-height: 68px;
+}
+
+.row:active {
+  background: var(--bg-2);
+}
+
+.row.is-active {
+  border-color: var(--accent);
+}
+
+.row-blocked {
+  border-left-color: var(--blocked);
+}
+.row-done {
+  border-left-color: var(--done);
+}
+.row-working {
+  border-left-color: var(--working);
+}
+
+.row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.row-title {
+  font-weight: 600;
+  font-size: 15px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.row-sub {
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--fg-dim);
+  /* One line, clipped — never a source of horizontal scroll. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.row-meta {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.chip {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--fg-faint);
+  background: var(--bg-3);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+.chip-dead {
+  color: #ff8b8b;
+}
+.chip-gap {
+  color: var(--blocked);
+}
+
+/* ---------------------------------------------------------------- badges */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--bg-3);
+  color: var(--fg-dim);
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+.badge-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.badge-blocked {
+  color: #0b0d10;
+  background: var(--blocked);
+}
+.badge-done {
+  color: var(--done);
+  background: rgba(93, 220, 138, 0.14);
+}
+.badge-working {
+  color: var(--working);
+  background: rgba(98, 176, 255, 0.14);
+}
+.badge-working .badge-dot {
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+.conn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+.conn-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--done);
+}
+
+.conn-degraded .conn-dot {
+  background: var(--blocked);
+}
+.conn-reconnecting .conn-dot,
+.conn-connecting .conn-dot {
+  background: var(--blocked);
+  animation: pulse 1s linear infinite;
+}
+.conn-offline .conn-dot {
+  background: #ff6b7a;
+}
+
+/* ---------------------------------------------------------------- pane view */
+
+.paneview {
+  display: flex;
+  flex-direction: column;
+  height: var(--app-height);
+  overflow: hidden;
+  background: var(--term-bg);
+}
+
+.paneview-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: calc(var(--safe-top) + 8px) calc(var(--safe-right) + 10px) 8px
+    calc(var(--safe-left) + 6px);
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+.paneview-titles {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.paneview-title {
+  font-weight: 600;
+  font-size: 15px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.paneview-sub {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.paneview-tools {
+  display: flex;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+
+.iconbtn {
+  min-width: 36px;
+  height: 36px;
+  border-radius: var(--radius-sm);
+  font-size: 15px;
+  color: var(--fg-dim);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.iconbtn:active {
+  background: var(--bg-2);
+}
+
+.term-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+  padding: 6px 0 0 calc(var(--safe-left) + 6px);
+}
+
+.term-host {
+  width: 100%;
+  height: 100%;
+  /* NEVER transform: scale() this element — xterm resolves cells from the
+     unscaled CSS cell width and every hit-test would offset. */
+}
+
+.term-host .xterm {
+  height: 100%;
+}
+
+.notice {
+  font-size: 12px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--line);
+  color: var(--fg-dim);
+  background: var(--bg-1);
+  flex: 0 0 auto;
+}
+
+.notice-gap {
+  color: var(--blocked);
+}
+.notice-dead {
+  color: #ff8b8b;
+}
+
+.renderer-note {
+  position: absolute;
+  right: 8px;
+  bottom: calc(var(--keybar-h) + var(--safe-bottom) + 6px);
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--fg-faint);
+  background: rgba(11, 13, 16, 0.8);
+  padding: 2px 6px;
+  border-radius: 4px;
+  pointer-events: none;
+}
+
+/* ---------------------------------------------------------------- Q&A */
+
+.qa {
+  flex: 0 0 auto;
+  max-height: 42vh;
+  overflow: auto;
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--blocked);
+  padding: 10px calc(var(--safe-right) + 12px) 12px calc(var(--safe-left) + 12px);
+}
+
+.qa-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.qa-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--blocked);
+}
+
+.qa-title {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--blocked);
+}
+
+.qa-empty {
+  font-family: var(--sans);
+  color: var(--fg-dim);
+  margin: 0;
+}
+
+/* ---------------------------------------------------------------- ansi */
+
+.ansi {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.42;
+  margin: 0;
+  color: var(--term-fg);
+  background: transparent;
+  /* Terminal output wraps rather than pushing the page sideways. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  max-width: 100%;
+}
+
+/* ---------------------------------------------------------------- keybar */
+
+.keybar {
+  flex: 0 0 auto;
+  background: var(--bg-1);
+  border-top: 1px solid var(--line);
+  /* Above the home indicator, and lifted clear of the soft keyboard. */
+  padding: 6px calc(var(--safe-right) + 6px)
+    calc(var(--safe-bottom) + 6px) calc(var(--safe-left) + 6px);
+  margin-bottom: var(--keyboard-inset);
+  user-select: none;
+}
+
+.keybar-row {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+  min-width: 0;
+}
+
+/* Only the left group scrolls; it never widens the page. */
+.keybar-scroll {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+.keybar-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+.keybar-drawer {
+  display: flex;
+  gap: 5px;
+  overflow-x: auto;
+  padding-bottom: 6px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid var(--line);
+  scrollbar-width: none;
+}
+
+.keybar-drawer::-webkit-scrollbar {
+  display: none;
+}
+
+.key {
+  flex: 0 0 auto;
+  min-width: 42px;
+  height: 40px;
+  padding: 0 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-3);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 13px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+}
+
+.key:active {
+  background: var(--accent);
+  color: #06090d;
+}
+
+.key-sm {
+  min-width: 40px;
+  height: 36px;
+  font-size: 12px;
+}
+
+.key-arrow {
+  min-width: 38px;
+  font-size: 16px;
+}
+
+/* Very narrow phones: tighten so more of the bar is reachable without scroll. */
+@media (max-width: 360px) {
+  .key {
+    min-width: 38px;
+    padding: 0 7px;
+  }
+  .key-arrow {
+    min-width: 34px;
+  }
+}
+
+.key-mod.is-on {
+  background: var(--accent);
+  color: #06090d;
+  font-weight: 700;
+}
+
+.key-mod.is-locked {
+  box-shadow: inset 0 -3px 0 #06090d;
+}
+
+.key-drawer.is-on {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.key-enter {
+  /* LAST and rightmost — under the thumb. Outside the scroller, so it is always
+     reachable and can never overlap a key that scrolled under it. */
+  flex: 0 0 auto;
+  min-width: 62px;
+  background: var(--accent);
+  color: #06090d;
+  font-weight: 700;
+}
+
+.key-quick {
+  border-color: var(--blocked);
+}
+
+.key-yes {
+  background: var(--done);
+  color: #06090d;
+  font-weight: 700;
+}
+
+.key-no {
+  background: var(--bg-3);
+  color: #ff8b8b;
+  font-weight: 700;
+}
+
+/* ---------------------------------------------------------------- states */
+
+.disconnected {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 12px;
+  padding: 12px 14px;
+  border-radius: var(--radius);
+  background: rgba(255, 139, 61, 0.1);
+  border: 1px solid rgba(255, 139, 61, 0.3);
+  font-size: 13px;
+}
+
+.disconnected-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--blocked);
+  flex: 0 0 auto;
+  animation: pulse 1s linear infinite;
+}
+
+.disconnected-sub {
+  display: block;
+  color: var(--fg-dim);
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+.empty {
+  text-align: center;
+  padding: 64px 24px;
+  color: var(--fg-faint);
+}
+
+.empty-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--fg-dim);
+  margin: 0 0 6px;
+}
+
+.empty-sub {
+  font-size: 13px;
+  margin: 0;
+}
+
+/* ---------------------------------------------------------------- desktop */
+
+@media (min-width: 900px) {
+  .app-desktop {
+    flex-direction: row;
+  }
+
+  .sidebar {
+    flex: 0 0 320px;
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid var(--line);
+    min-width: 0;
+    background: var(--bg);
+  }
+
+  .main {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .grid {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 12px;
+    padding: 16px;
+    align-content: start;
+  }
+
+  .tile {
+    text-align: left;
+    background: var(--bg-1);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--line);
+    border-radius: var(--radius);
+    padding: 10px 12px;
+    overflow: hidden;
+    min-height: 180px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .tile:hover {
+    border-color: var(--accent);
+  }
+
+  .tile-blocked {
+    border-left-color: var(--blocked);
+  }
+  .tile-done {
+    border-left-color: var(--done);
+  }
+  .tile-working {
+    border-left-color: var(--working);
+  }
+
+  .tile-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .tile-title {
+    font-weight: 600;
+    font-size: 13px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .tile .ansi {
+    flex: 1 1 auto;
+    overflow: hidden;
+    font-size: 11px;
+  }
+
+  /* The key bar is a touch affordance; a desktop has a real keyboard. */
+  .app-desktop .keybar {
+    display: none;
+  }
+
+  .row {
+    min-height: 0;
+    padding: 10px 12px;
+  }
+}

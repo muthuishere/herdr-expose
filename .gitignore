@@ -1,0 +1,45 @@
+# ---- build output -------------------------------------------------------
+bin/
+dist/
+*.exe
+
+# The embedded web build. Produced by scripts/build.sh, never committed.
+web/dist/
+web/node_modules/
+web/.vite/
+web/dev-dist/
+node_modules/
+
+# ---- config and secrets -------------------------------------------------
+# Real config lives in ~/.config/herdr-expose/. Nothing with a token belongs
+# in this repo, in any form. See docs/adr/0009 and docs/adr/0017.
+*.local.toml
+config.toml
+config.local.toml
+herdr-expose.toml
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+secrets/
+state/
+*.token
+
+# ---- runtime ------------------------------------------------------------
+*.pid
+*.log
+logs/
+.herdr-expose/
+
+# ---- tooling ------------------------------------------------------------
+schema.json
+*.test
+*.out
+coverage.*
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

@@ -1,0 +1,81 @@
+id = "dev.deemwar.herdr-expose"
+name = "herdr-expose"
+version = "0.1.0"
+description = "Your Herdr panes in a browser or on your phone: one Go binary, embedded web UI, loopback-only with a tunnel you start."
+min_herdr_version = "0.9.0"
+platforms = ["macos", "linux"]
+
+# Builds the React app, then the Go binary with the app embedded in it.
+# Requires node and go at build time only; neither is needed at run time.
+[[build]]
+command = ["./scripts/build.sh"]
+
+# Startup hooks are one-shot and unsupervised, so `daemon` fork-execs the real
+# server and returns immediately. `serve` holds an exclusive flock on the
+# pidfile, which makes a repeated hook (every session restore) harmless.
+[[startup]]
+command = ["./bin/herdr-expose", "daemon"]
+
+[[actions]]
+id = "open"
+title = "Open herdr-expose"
+description = "Open the local web UI in your browser"
+command = ["./bin/herdr-expose", "open"]
+contexts = ["global"]
+
+[[actions]]
+id = "pair"
+title = "Pair a device"
+description = "Mint a single-use pairing code and show a QR to scan from a phone"
+command = ["./bin/herdr-expose", "pair"]
+contexts = ["global"]
+
+[[actions]]
+id = "status"
+title = "herdr-expose status"
+description = "Server state, local URL, exposed URL, and paired devices"
+command = ["./bin/herdr-expose", "status"]
+contexts = ["global"]
+
+[[actions]]
+id = "expose"
+title = "Expose over a tunnel"
+description = "Start the configured tunnel and print the public URL"
+command = ["./bin/herdr-expose", "expose", "start"]
+contexts = ["global"]
+
+[[actions]]
+id = "unexpose"
+title = "Stop exposing"
+description = "Tear down the tunnel; the server stays up on loopback"
+command = ["./bin/herdr-expose", "expose", "stop"]
+contexts = ["global"]
+
+# Opened by the `pair` action, or on its own, to show the pairing QR without
+# leaving the TUI. Overlay so it floats above the current layout and closes
+# without disturbing panes.
+[[panes]]
+id = "pair-qr"
+title = "Pair a device"
+description = "Scan this QR from your phone to pair it with this machine"
+command = ["./bin/herdr-expose", "pair", "--pane"]
+# overlay takes the whole terminal area; width/height are only valid for popup
+placement = "overlay"
+
+# A small status pane: local URL, tunnel URL, connected clients.
+[[panes]]
+id = "status"
+title = "herdr-expose status"
+description = "Live server and tunnel status"
+command = ["./bin/herdr-expose", "status", "--watch"]
+placement = "popup"
+width = "70%"
+height = 20
+
+# Clicking a herdr-expose URL printed in any pane opens it in the UI rather than
+# handing it to the system browser with no session.
+[[link_handlers]]
+id = "expose-url"
+title = "Open in herdr-expose"
+pattern = "^https?://[^/]+/#/pane/"
+action = "open"
