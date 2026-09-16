@@ -9,7 +9,9 @@ puts that UI behind a tunnel so you can check on your agents from anywhere.
 ```
 Herdr  --unix socket-->  herdr-expose  --127.0.0.1:21118-->  browser
                               |
-                              +--cloudflared/ngrok-->  your phone
+                              +--LAN 0.0.0.0:21118----->  your phone, same wifi
+                              +--cloudflared tunnel---->  your phone, anywhere
+                                 (static, your domain)
 ```
 
 **The API is the product.** The web UI is its first client; a native mobile app
@@ -34,8 +36,10 @@ WebSocket contract.
 - **DONE badges that are yours.** Seen state is per device, so glancing at a pane
   on your laptop does not wipe the badge on your phone.
 - **An installable PWA**: home-screen icon, standalone display, safe-area
-  handling. Online only, on purpose — a cached terminal is a lie.
-- **Loopback by default.** Remote access is a tunnel you start, and stop.
+  handling. Online only, on purpose — a cached terminal is a lie. (Not available
+  in `lan` mode: plain HTTP on a LAN IP is not a secure context.)
+- **Loopback by default**, your wifi if you ask, your own domain if you mean it —
+  and a device token required in both of the latter.
 
 ---
 
@@ -63,6 +67,10 @@ herdr plugin action invoke hex:open   # open the local UI
 herdr plugin action invoke hex:pair   # show a pairing QR for a phone
 herdr plugin action invoke hex:status   # what is running, and where
 ```
+
+Every id is namespaced `hex:` because `herdr plugin action invoke` takes
+`--plugin` as optional, so a bare `open` would collide with any other plugin
+defining one. (`:` is a legal id character in Herdr 0.9.0; `.` is not.)
 
 ### From source
 
@@ -107,63 +115,108 @@ herdr-expose status
 | `stop` | stop the running server |
 | `pair` | mint a single-use pairing code and show a QR |
 | `expose start\|stop\|status` | bring the tunnel up or down |
-| `install-service` | install a launchd / systemd unit for crash recovery |
+| `expose destroy` | remove the DNS record and delete the tunnel (explicit, and only what it created) |
+| `install-service` / `uninstall-service` | install or remove a launchd / systemd unit for crash recovery |
 
 ---
 
 ## Exposing it
 
-The server **never** binds anything but `127.0.0.1`. Remote access is always a
-tunnel you start. Three ways, in order of how much setup they need.
+Three modes. The mode decides the bind address — **`bind` is not a setting you
+control**, which is deliberate, because this binary runs commands.
 
-### Cloudflare quick tunnel — zero setup
+| mode | reachable from | device token | installable PWA |
+|---|---|---|---|
+| `local` (default) | this machine only | not required | yes |
+| `lan` | anyone on your wifi | **required** | **no** (see below) |
+| `cloudflare` | the internet, on your domain | **required** | yes |
 
-A random `*.trycloudflare.com` URL, no account, no DNS. Good for "let me check on
-this from the train".
+### local — the default
+
+Bound to `127.0.0.1`. No token needed: anyone who can reach loopback already has
+shell on the box. Origin and Host pinning are enforced instead, which is what
+stops a website you are visiting from driving your terminal via DNS rebinding.
+
+```bash
+herdr-expose open
+```
+
+### lan — your wifi, no setup at all
+
+For the common case of a phone and a laptop on the same network, with no domain
+and no account.
 
 ```toml
 # ~/.config/herdr-expose/config.toml
 [expose]
-enabled = true
-cloudflare = true      # no domain => quick tunnel
+lan = true
 ```
 
 ```bash
 herdr-expose expose start
-# https://ancient-violet-bread-9f2x.trycloudflare.com
+# http://192.168.1.24:21118   (also shown as a QR by `herdr-expose pair`)
 ```
 
-Needs `cloudflared` on your PATH (`brew install cloudflared`).
+This binds `0.0.0.0`, so **anyone on the network can reach the port** — the
+server logs a warning saying so on every start. It is safe because a device token
+is mandatory and **the pairing code is only ever shown on this machine's screen**;
+no endpoint will hand one out. LAN mode is also the automatic fallback when
+`cloudflare = true` is configured but `cloudflared` is not installed: it logs
+loudly and falls back rather than leaving you with nothing.
 
-### Cloudflare named tunnel — your own domain
+> **No PWA install in lan mode.** Plain HTTP on a LAN IP is not a secure context
+> (`localhost` is exempt; `192.168.x.x` is not), so the browser will not register
+> a service worker or offer to install the app. `status` reports
+> `secure_context: false`. You get a working web app in a browser tab, not a
+> home-screen app. That is a rule of the web platform, not something we can fix.
 
-A stable URL you can bookmark and install as a PWA.
+### cloudflare — your own domain, static
+
+A stable `https://` URL you can bookmark, install as a PWA, and bind device
+tokens to.
 
 ```toml
 [expose]
-enabled = true
-cloudflare = true
-domain = "herdr.example.com"
+cloudflare  = true
+domain      = "herdr.example.com"   # REQUIRED
+tunnel_name = "herdr-expose"        # optional
 ```
 
 ```bash
-export CLOUDFLARE_ALLPURPOSE_TOKEN=...   # or whatever you have named it
+export CLOUDFLARE_ALLPURPOSE_TOKEN=...
+export CLOUDFLARE_ACCOUNT_ID=...
 herdr-expose expose start
 # https://herdr.example.com
 ```
 
-That one command creates or reuses the named tunnel, writes the DNS CNAME
-through the Cloudflare API, runs `cloudflared`, health-checks it, and restarts it
-if it dies. The API token is read **from the environment by name, at point of
-use** — it is never written to the config file, the state directory, or a log.
+That one command verifies your token's scopes, creates or reuses the named
+tunnel, **writes the tunnel credentials itself from the API** (so there is no
+`cloudflared login`, no browser, no interactive `cert.pem` — it works fine over
+SSH), upserts the DNS CNAME, generates the ingress config, runs `cloudflared`,
+**polls `/healthz` until the domain actually answers**, and restarts it if it
+dies. The API token is read from the environment **by name, at point of use** —
+never written to config, state, or a log.
+
+`expose stop` stops `cloudflared` and leaves the tunnel and DNS in place, because
+the domain is meant to be static. `expose destroy` is the explicit verb that
+removes them, and it only ever touches records it created.
+
+> **There is no quick tunnel.** No `*.trycloudflare.com`, not even as a fallback.
+> A hostname that changes on every restart breaks PWA installs, bookmarks and
+> origin-bound device tokens — which makes it worse than useless for the mobile
+> product this exists to serve. `cloudflare = true` without `domain` is a startup
+> error. Use `lan` if you want zero setup.
+
+Needs `cloudflared` on your PATH (`brew install cloudflared`).
 
 ### ngrok
 
+Same static-domain rule — a reserved domain is required, no random URLs.
+
 ```toml
 [expose]
-enabled = true
-ngrok = true
-# domain = "herdr.ngrok.app"   # optional, with a reserved domain
+ngrok  = true
+domain = "herdr.ngrok.app"
 ```
 
 Needs `ngrok` on your PATH and authenticated (`ngrok config add-authtoken ...`).
@@ -192,8 +245,7 @@ export function stop(ctx)   { ctx.kill(); }   // must be idempotent
 
 ```toml
 [expose]
-enabled = true
-adapter = "my-tunnel"
+adapter = "my-tunnel"      # an adapter id selects the escape hatch
 
 [[expose.adapters]]
 id = "my-tunnel"
@@ -232,7 +284,7 @@ by a newer version survives an older binary.
 ```toml
 [server]
 port = 21118
-bind = "127.0.0.1"           # any other value is refused at startup
+# no `bind` key: the exposure mode decides it, and it is enforced in code
 
 [auth]
 pairing_ttl_seconds = 600    # 10 minutes
@@ -244,11 +296,11 @@ theme = "auto"
 default_view = "grid"        # grid | focus
 
 [expose]
-enabled = false
-cloudflare = false
-ngrok = false
-# domain = "herdr.example.com"
-autostart = false
+cloudflare  = false
+domain      = ""             # REQUIRED when cloudflare = true
+tunnel_name = "herdr-expose"
+lan         = false          # also the automatic fallback if cloudflared is missing
+autostart   = false
 ```
 
 **There are no secrets in this file.** Tokens live as SHA-256 hashes in the state
@@ -272,10 +324,18 @@ is a screenshot. So authentication here is the primary feature, not a checkbox.
 
 ### What the tool does about it
 
-- **Binds `127.0.0.1` only.** Setting `bind` to anything else is **refused with
-  an error**, not warned about. There is no flag to expose it directly to your
-  network; a leaked token does not also hand you to everyone on the coffee-shop
-  wifi.
+- **You do not choose the bind address; the mode does.** `local` and
+  `cloudflare` bind `127.0.0.1`. `lan` binds `0.0.0.0` and says so loudly in the
+  log on every start. There is no free-form `bind` setting to get wrong.
+- **The pairing code is only ever displayed on this machine** — the terminal, or
+  the QR pane inside the Herdr TUI. **No HTTP endpoint mints or reveals one.**
+  `POST /v1/pair` only accepts codes. That is what makes `lan` mode defensible:
+  someone on your wifi can reach the port and get nowhere without your screen.
+- **On loopback, no token is required — but Origin and Host are pinned.** The
+  real attacker against a local server is the browser: any site you visit can
+  call `127.0.0.1`, and DNS rebinding turns a hostile page into a client. Only
+  `127.0.0.1:<port>` and `localhost:<port>` are accepted as Origin and Host, and
+  a missing Origin on a WebSocket upgrade is rejected rather than allowed.
 - **Two secrets**: a server token (may you talk to this instance at all) and
   per-device tokens issued by pairing.
 - **Hashes only.** SHA-256, in 0600 state, never plaintext, never in config,
@@ -295,6 +355,8 @@ is a screenshot. So authentication here is the primary feature, not a checkbox.
 
 - **Do not leave a tunnel up.** `herdr-expose expose stop` when you are done. The
   server keeps running on loopback.
+- **Do not leave `lan = true` on at a conference or a coffee shop.** It is meant
+  for your own network.
 - **Revoke devices you no longer use.** `herdr-expose status` lists them.
 - **Your tunnel provider terminates TLS.** Cloudflare or ngrok can see the
   traffic. This is not end-to-end encrypted and nobody should imply otherwise.
@@ -324,6 +386,10 @@ Short version, with the details in the ADRs:
   ([ADR 0006](docs/adr/0006-split-plane-json-control-binary-data.md)).
 - **The server picks the mode** — live, summary or none — so a client cannot ask
   for twenty live terminals ([ADR 0007](docs/adr/0007-server-owned-viewport-modes.md)).
+- **Predictive local echo**, Mosh-style, in v1: paint time is ~1ms and tunnel RTT
+  is 30-150ms, so this is the only thing that makes a remote terminal feel local.
+  A prediction is invisible until confirmed, so a phantom character is never
+  shown ([ADR 0024](docs/adr/0024-predictive-echo-in-v1.md)).
 - **The performance budget is acceptance criteria**: keystroke to upstream under
   5ms, output to a live client under 20ms, zero steady-state allocations per
   frame, measured by a shipped harness
@@ -334,7 +400,7 @@ Short version, with the details in the ADRs:
 | | |
 |---|---|
 | [`docs/api.md`](docs/api.md) | the full public API — build a client from this alone |
-| [`docs/adr/`](docs/adr/) | 20 architecture decision records, and why each cost was accepted |
+| [`docs/adr/`](docs/adr/) | 25 architecture decision records, and why each cost was accepted |
 | [`docs/ATTRIBUTION.md`](docs/ATTRIBUTION.md) | prior art this design learned from |
 | [`SPEC.md`](SPEC.md) | the binding build contract |
 
@@ -371,6 +437,10 @@ with restart ([ADR 0019](docs/adr/0019-three-layer-supervision.md)).
 after drawing and falls back to the DOM renderer when the surface comes back
 dead, remembering the result. If it is still blank, file an issue with your
 device and browser — that probe has a device list to grow.
+
+**`cloudflare = true` refuses to start.** You need `domain` set — there is no
+ephemeral tunnel to fall back to, by design. Either set a domain, or use
+`lan = true`.
 
 **My settings keep reverting.** They should not: the config path is
 `~/.config/herdr-expose/config.toml` regardless of how the process was started.

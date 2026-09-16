@@ -18,18 +18,40 @@ export interface PairResult {
   error?: string
 }
 
-/** Read and CONSUME `?pair=` from the URL. Returns null when absent. */
+let consumed = false
+let memo: string | null = null
+
+/**
+ * Read and CONSUME `?pair=` from the URL.
+ *
+ * IDEMPOTENT ON PURPOSE. Stripping the query string is a side effect, and this
+ * is read from a `useState` initializer — which React StrictMode invokes twice.
+ * A naive implementation consumes the code on the first call and hands the
+ * second call `null`, which is the value React keeps, so the deep link
+ * silently does nothing in dev. Memoise instead.
+ */
 export function takePairCodeFromUrl(): string | null {
+  if (consumed) return memo
+  consumed = true
   try {
     const url = new URL(window.location.href)
     const code = url.searchParams.get('pair')
-    if (!code) return null
+    if (!code) {
+      memo = null
+      return null
+    }
     url.searchParams.delete('pair')
     window.history.replaceState({}, '', url.pathname + url.search + url.hash)
-    return normalizeCode(code)
+    memo = normalizeCode(code)
   } catch {
-    return null
+    memo = null
   }
+  return memo
+}
+
+/** Forget the consumed code once it has been redeemed (or abandoned). */
+export function clearPairCode(): void {
+  memo = null
 }
 
 /** Codes are 6 chars, case-insensitive, entered on a phone keyboard. */

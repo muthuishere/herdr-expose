@@ -1,6 +1,6 @@
 # 4. Loopback-only bind; remote access is always a user-started tunnel
 
-Status: Accepted
+Status: Accepted (relaxed by ADR 0022 and ADR 0023 — see Consequences)
 
 ## Context
 
@@ -36,3 +36,10 @@ whatever coffee-shop wifi the laptop joined, with one config typo.
   The README says so plainly rather than implying end-to-end encryption.
 - Auth bugs are treated as the top-severity class in this repo.
 - ADR 0017 refines the mechanism; this ADR fixes the posture it has to serve.
+- **This ADR has since been relaxed, on purpose.** ADR 0022 adds a `lan` mode
+  that binds `0.0.0.0`, and ADR 0023 drops the token requirement on loopback
+  while making Origin and Host pinning mandatory. Both are gated by the
+  reasoning above rather than in spite of it: the pairing code is shown only on
+  the physically present machine, so reaching the port buys an attacker nothing.
+  The posture — *this is an RCE surface and auth is the primary feature* — is
+  unchanged and is what those ADRs had to argue against.

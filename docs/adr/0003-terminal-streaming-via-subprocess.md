@@ -14,10 +14,23 @@ Terminal bytes are only reachable through the CLI:
 herdr terminal session observe|control <target> --cols N --rows M
 ```
 
-which emits NDJSON on stdout — `{"bytes":"<base64 ANSI>"}` frames and a final
-`{"type":"terminal.closed","reason":...}` — and, in `control` mode, accepts
+which emits NDJSON on stdout and, in `control` mode, accepts
 `terminal.input` / `terminal.resize` / `terminal.scroll` / `terminal.release` as
 NDJSON on stdin.
+
+The real output record is richer than early drafts assumed — verified live:
+
+```json
+{"type":"terminal.frame","seq":N,"bytes":"<base64>","encoding":"ansi",
+ "full":true,"width":120,"height":40}
+```
+
+**The `full` flag is load-bearing.** It marks Herdr's own full-repaint frame,
+which is emitted on attach and after a resize. We map `full: true` straight to
+our binary `snapshot` (type 2) and everything else to `frame` (type 1) — which
+is why there is **no separate snapshot machinery** on attach or on reconnect.
+Upstream already tells us when the screen is whole. A `terminal.closed` record
+ends the stream.
 
 This was **verified empirically on this machine, on both 0.8.2 and 0.9.0**, not
 inferred from docs and not assumed. It is worth stating because the best-known

@@ -16,6 +16,10 @@ command = ["./scripts/build.sh"]
 [[startup]]
 command = ["./bin/herdr-expose", "daemon"]
 
+# Every action / pane / link-handler id is namespaced `hex:` because
+# `herdr plugin action invoke` takes --plugin as OPTIONAL, so a bare `open`
+# collides with any other plugin defining one. Verified on 0.9.0: `:` is a legal
+# id character, `.` is rejected (invalid_plugin_action_id). See docs/adr/0025.
 [[actions]]
 id = "hex:open"
 title = "Open herdr-expose"

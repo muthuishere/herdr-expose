@@ -16,12 +16,15 @@ exactly the thing you cannot afford to have wiped by another device.
 
 ## Decision
 
-The server holds the authoritative *idle* state, which is a fact about the pane.
-Each **connection** holds its own unseen set and derives DONE locally from
-`idle AND unseen`. A focus event from a client marks seen **for that connection
-only**. Seen state is not persisted across reconnects beyond the resume window;
-a genuinely new connection starts by treating currently-idle panes as seen so it
-does not open with a wall of stale badges.
+The server holds the authoritative *idle* state, which is a fact about the pane,
+**and one unseen set per connection**. `done` is derived as `idle AND unseen-by-
+this-connection` and shipped in that connection's `tree` — so the server does the
+derivation, but separately for every connection, and two clients legitimately
+receive different `done` values for the same pane in the same instant.
+
+A focus event from a client marks seen **for that connection only**. A new
+connection starts by treating currently-idle panes as seen, so a client does not
+open with a wall of stale badges.
 
 ## Consequences
 
@@ -31,6 +34,9 @@ does not open with a wall of stale badges.
 - A client that reconnects with a valid resume seq keeps its seen set; one that
   gets a full `snapshot` rebuilds it. Both paths are defined, so the behaviour is
   never accidental.
-- DONE cannot be computed server-side into a single shared tree field. The tree
-  carries `idle`; DONE is a client-local derivation. Documented in `docs/api.md`
-  so the mobile client does not reinvent it wrongly.
+- `done` **cannot** be a single shared field computed once and broadcast. It is
+  per-connection state that happens to live on the server, which means the tree
+  is rendered per connection rather than serialised once for everybody. That is a
+  real cost on the fanout path and it is the price of the feature.
+- Clients must **render `done`, not recompute it**, and must not treat it as a
+  property of the pane they can cache globally. Documented in `docs/api.md`.

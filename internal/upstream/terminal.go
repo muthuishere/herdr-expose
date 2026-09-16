@@ -65,6 +65,7 @@ type TerminalStream struct {
 	handler TerminalHandler
 
 	mu      sync.Mutex
+	done    chan struct{}
 	cmd     *exec.Cmd
 	stdin   io.WriteCloser
 	closed  bool
@@ -84,7 +85,7 @@ func NewTerminalStream(target string, mode TerminalMode, cols, rows int, h Termi
 		rows = 32
 	}
 	return &TerminalStream{Target: target, Mode: mode, Cols: cols, Rows: rows, handler: h, log: log,
-		inbuf: make([]byte, 0, 1024)}
+		inbuf: make([]byte, 0, 1024), done: make(chan struct{})}
 }
 
 // Start spawns the subprocess and pumps frames until it exits or ctx is done.
@@ -136,6 +137,7 @@ func (t *TerminalStream) Start(ctx context.Context) error {
 		}
 		t.mu.Unlock()
 		_ = cmd.Wait()
+		close(t.done)
 		if reason == "" {
 			if s := bytes.TrimSpace(stderr.Bytes()); len(s) > 0 {
 				reason = string(s)
@@ -279,6 +281,26 @@ func (t *TerminalStream) Scroll(delta int) error {
 // Release gives up control without killing the pane.
 func (t *TerminalStream) Release() error {
 	return t.Send(map[string]any{"type": "terminal.release"})
+}
+
+// Wait blocks until the subprocess has been reaped, or the timeout elapses.
+//
+// This matters when upgrading observe -> control on the same terminal: Herdr
+// allows ONE attached client, so starting the controller before the observer
+// has actually exited fails with "already has an attached client".
+func (t *TerminalStream) Wait(timeout time.Duration) bool {
+	t.mu.Lock()
+	started := t.cmd != nil
+	t.mu.Unlock()
+	if !started {
+		return true
+	}
+	select {
+	case <-t.done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }
 
 // Stop tears the subprocess down. Idempotent.

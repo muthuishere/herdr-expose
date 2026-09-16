@@ -32,6 +32,10 @@ Mechanics, all non-negotiable:
 - **Device token**: 32 random bytes, **sliding 30-day TTL**, max 32 devices with
   LRU eviction, individually revocable, listable by `herdr-expose status` showing
   user-agent and last-seen IP — **never the hash**.
+- **The pairing code is shown ONLY on the physically present machine** — the
+  terminal, or the `hex:pair-qr` overlay pane. **No HTTP endpoint ever mints or
+  displays one.** `POST /v1/pair` only *accepts* codes. This single property is
+  what makes `lan` mode defensible (ADR 0022).
 - **`crypto/subtle.ConstantTimeCompare` for every comparison. No exceptions.**
 - **Origin allowlist checked *before* echoing any CORS header.** Reflecting an
   origin and then deciding is the standard way to hand a cross-site attacker a
@@ -39,6 +43,10 @@ Mechanics, all non-negotiable:
 - `Content-Security-Policy: frame-ancestors 'none'` and `X-Frame-Options: DENY`.
 - Handshake rate limiting on the WebSocket endpoint; auth checked **before** the
   upgrade.
+- A device token is required in **lan** and **cloudflare** modes without
+  exception. In **local** mode it is not, and Origin + Host pinning take its
+  place — see ADR 0023, which is the argument for why that is safe and what it
+  costs.
 
 ## Consequences
 

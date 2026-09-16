@@ -2,6 +2,7 @@ package expose
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"time"
 )
@@ -50,6 +51,37 @@ type tunnel interface {
 // Cloudflare edge answers 502/530 with a perfectly good HTTP response while the
 // tunnel is not actually routing, and "the process started" is not "the tunnel
 // works".
+// probeClient resolves through public DNS rather than the host stub resolver.
+//
+// We probe a hostname we created seconds earlier. Cloudflare publishes it almost
+// immediately, but a stub resolver that was asked for it *before* it existed can
+// hold a negative answer well past the record's TTL — macOS mDNSResponder does
+// exactly this. The symptom is ugly and misleading: `dig` resolves, the tunnel is
+// registered and healthy, the site answers from any other machine, and the tool
+// reports "did not report a public url" and tears down a working deployment.
+//
+// Resolving via 1.1.1.1 (then 8.8.8.8) sidesteps the stale negative entry. This
+// is verification only; nothing else in the process changes its resolver.
+var probeClient = &http.Client{
+	Transport: &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout: 10 * time.Second,
+			Resolver: &net.Resolver{
+				PreferGo: true,
+				Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+					d := net.Dialer{Timeout: 3 * time.Second}
+					c, err := d.DialContext(ctx, network, "1.1.1.1:53")
+					if err == nil {
+						return c, nil
+					}
+					return d.DialContext(ctx, network, "8.8.8.8:53")
+				},
+			},
+		}).DialContext,
+		TLSHandshakeTimeout: 10 * time.Second,
+	},
+}
+
 func probe(ctx context.Context, url string) bool {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -57,7 +89,7 @@ func probe(ctx context.Context, url string) bool {
 	if err != nil {
 		return false
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := probeClient.Do(req)
 	if err != nil {
 		return false
 	}

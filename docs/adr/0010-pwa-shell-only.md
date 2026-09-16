@@ -32,3 +32,9 @@ No background sync, no offline queue of keystrokes.
   fetch; this is an easy regression and is worth a test.
 - `index.html` and `sw.js` are served `no-cache` so a new binary's UI is picked
   up on the next load instead of being pinned by the old worker.
+- **In `lan` mode there is no PWA at all.** Service workers and installation
+  require a secure context; `localhost` is exempt but a plain-HTTP LAN IP is not,
+  so `status.secure_context` is `false` and the phone gets a working web app
+  rather than an installable one (ADR 0022). That is a property of the web
+  platform, not a bug to chase — the app must detect it and not offer an install
+  prompt that cannot work.

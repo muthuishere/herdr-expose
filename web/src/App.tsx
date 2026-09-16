@@ -16,7 +16,7 @@ import { PaneView } from './components/PaneView'
 import { ConnectionBadge } from './components/AgentBadge'
 import { DesktopGrid } from './components/DesktopGrid'
 import { PairScreen } from './components/PairScreen'
-import { takePairCodeFromUrl } from './net/pair'
+import { clearPairCode, takePairCodeFromUrl } from './net/pair'
 import { envStatus } from './net/env'
 import { connect } from './net/connection'
 
@@ -68,6 +68,7 @@ export function App() {
       <PairScreen
         initialCode={pairCode}
         onPaired={() => {
+          clearPairCode()
           setPairCode(null)
           connect()
         }}

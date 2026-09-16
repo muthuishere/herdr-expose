@@ -40,7 +40,9 @@ Non-negotiable implications:
   16ms of the 5ms keystroke budget. 64KB hard flush.
 
 **We ship a latency harness that measures these**, and it is run before a
-release. A claimed number is not a number.
+release. It reports keystroke-to-echo at **p50 and p95 in all three exposure
+modes** (local, lan, cloudflare), because the number that matters is the one over
+the tunnel. A claimed number is not a number.
 
 ## Consequences
 

@@ -188,6 +188,10 @@ func (s *Session) ensureControl(target string) (*liveStream, error) {
 		return ls, nil
 	}
 	s.mu.Unlock()
+	// Tear the observer down and WAIT for it: Herdr permits one attached client
+	// per terminal, so a controller started before the observer has exited is
+	// rejected with "already has an attached client". Takeover is also set, so
+	// even a lost race resolves in our favour rather than wedging the pane.
 	s.stopStream(target)
 	return s.startStream(target, upstream.ModeControl)
 }
@@ -227,6 +231,7 @@ func (s *Session) startStream(target string, mode upstream.TerminalMode) (*liveS
 	h := &streamHandler{sess: s, target: target, hdrLen: hdr}
 	ts := upstream.NewTerminalStream(target, mode, g.Cols, g.Rows, h, s.log)
 	ts.Reserve = hdr
+	ts.Takeover = mode == upstream.ModeControl
 	ls.stream = ts
 	if err := ts.Start(s.ctx); err != nil {
 		s.mu.Lock()
@@ -245,6 +250,7 @@ func (s *Session) stopStream(target string) {
 	s.mu.Unlock()
 	if ls != nil && ls.stream != nil {
 		ls.stream.Stop()
+		ls.stream.Wait(2 * time.Second)
 	}
 }
 

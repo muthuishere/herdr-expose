@@ -22,7 +22,18 @@ any that the snapshot already reflects. The same order applies on every
 reconnect to the Herdr socket.
 
 On reconnect we resync the whole tree rather than diffing: it is one request and
-it cannot be wrong.
+it cannot be wrong. That request is **`session.snapshot`**, which returns the
+entire tree in a single call — verified, and strictly better than composing
+`workspace.list` + `tab.list` + `pane.list` + `agent.list`, which is four
+round trips and four chances to interleave with an event.
+
+**Subscribing is not uniform, and getting it wrong fails everything.** Of the 27
+subscription kinds, only 24 work session-wide. `pane.agent_status_changed`,
+`pane.output_matched` and `pane.scroll_changed` are **per-pane** and require a
+`pane_id` — and subscribing to all 27 at once fails the **entire call** with
+`missing field pane_id`, not just the three. We subscribe to the 24 session-wide
+kinds; `pane.updated` covers status changes globally, so the per-pane three are
+not needed for the tree.
 
 ## Consequences
 

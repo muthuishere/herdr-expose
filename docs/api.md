@@ -36,9 +36,34 @@ documented below.
 ## 1. Threat model — read this first
 
 This API can run arbitrary commands on the machine hosting it. `pane.run` and
-`agent.prompt` are, by design, remote code execution as the logged-in user. The
-server binds `127.0.0.1` only and is reachable remotely exclusively through a
-tunnel the user started.
+`agent.prompt` are, by design, remote code execution as the logged-in user.
+
+The server runs in one of **three exposure modes**, and the mode decides both the
+bind address and whether you need a token:
+
+| mode | bind | device token | Origin + Host pinning | secure context |
+|---|---|---|---|---|
+| `local` | `127.0.0.1` | **not** required | required | yes (`localhost` is exempt) |
+| `lan` | `0.0.0.0` | **required** | required | **no** |
+| `cloudflare` | `127.0.0.1` + tunnel | **required** | required | yes |
+
+- **`local`** — the default. Anyone who can reach loopback already has shell on
+  the box, so no token is required. Origin and Host pinning replace it, and they
+  are strictly enforced: only `http://127.0.0.1:<port>` and
+  `http://localhost:<port>` are accepted, a **missing `Origin` on a WebSocket
+  upgrade is rejected**, and a `Host` that does not match is rejected. That is
+  what defeats DNS rebinding, which is the real attack on a loopback service.
+- **`lan`** — bound to `0.0.0.0`, reachable by anyone on the wifi. A device token
+  is mandatory. **Plain HTTP on a LAN IP is not a secure context**, so
+  `status.secure_context` is `false`, **the service worker does not register and
+  the PWA cannot be installed**. Your client must detect this and not offer an
+  install prompt that cannot work. A native mobile client is unaffected.
+- **`cloudflare`** — loopback plus a static, API-provisioned tunnel on the user's
+  own domain. There is no ephemeral `*.trycloudflare.com` URL in this product:
+  a hostname that changes on restart breaks PWA installs, bookmarks and
+  origin-bound device tokens.
+
+Read `mode` and `secure_context` from `/v1/config`; never infer them.
 
 A client author's obligations:
 
@@ -85,6 +110,10 @@ Bootstrap for a connected client. **Never contains a token or any secret.**
   "herdr_version": "0.9.0",
   "herdr_protocol": 22,
   "features": ["binary_frames", "pairing", "expose"],
+  "mode": "local",
+  "secure_context": true,
+  "auth_required": false,
+  "public_url": null,
   "limits": {
     "max_frame_bytes": 65536,
     "min_cols": 20,
@@ -93,6 +122,11 @@ Bootstrap for a connected client. **Never contains a token or any secret.**
   "ui": { "theme": "auto", "default_view": "grid" }
 }
 ```
+
+`mode` is `local`, `lan` or `cloudflare`. `secure_context` is `false` only in
+`lan` mode — when it is, skip service-worker registration and hide any install
+affordance. `auth_required` is `false` only in `local` mode. `public_url` is the
+tunnel URL in `cloudflare` mode and `null` otherwise.
 
 `features` is an open-ended array of strings. **Ignore entries you do not
 recognise** — new capabilities are announced here rather than by bumping the API
@@ -133,7 +167,14 @@ HTTP `401`, not a socket that closes a moment later.
 
 ### Pairing flow
 
-Pairing exists so a phone never has to type a long token.
+Pairing exists so a phone never has to type a long token. It is **not** needed in
+`local` mode, where `auth_required` is `false`.
+
+**The pairing code is only ever displayed on the physically present machine** —
+in the terminal, or in the `hex:pair-qr` overlay pane inside the Herdr TUI. **No
+HTTP endpoint mints or reveals a code.** `POST /v1/pair` only *accepts* one. This
+is the whole reason `lan` mode is safe: somebody on your wifi can reach the port
+and get precisely nowhere without looking at your screen.
 
 ```
   phone                         server                     user's laptop
@@ -149,11 +190,17 @@ Pairing exists so a phone never has to type a long token.
     |--- GET /v1/stream (Bearer) ->|                             |
 ```
 
-The QR encodes the full URL so a scan needs no typing at all:
+The QR encodes the full URL so a scan needs no typing at all, and the host in it
+follows the mode:
 
 ```
-https://herdr.example.com/#pair=7K2QX9
+cloudflare   https://herdr.example.com/?pair=7K2QX9
+lan          http://192.168.1.24:21118/?pair=7K2QX9
+local        http://127.0.0.1:21118/?pair=7K2QX9
 ```
+
+In `lan` mode the IP is re-resolved on network change, so a DHCP lease change
+does not leave a stale URL behind.
 
 **`POST /v1/pair`**
 
@@ -215,7 +262,23 @@ server always speaks both.
 | Plane | Opcode | Encoding | Carries |
 |---|---|---|---|
 | **Control** | TEXT | JSON | tree, state, commands, results, lifecycle |
-| **Data** | BINARY | fixed 11-byte header plus raw bytes | terminal output and input |
+| **Data** | BINARY | fixed header plus raw bytes | terminal output and input |
+
+The full inventory, and it is exactly this — there is nothing else on the wire:
+
+```
+control (JSON text)
+  client -> server   hello · subscribe · unsubscribe · viewport · resize · command · ping
+  server -> client   welcome · tree · agent · closed · result · pong
+
+data (binary)
+  server -> client   1 = frame · 2 = snapshot · 3 = gap
+  client -> server   16 = input
+```
+
+**`snapshot` and `gap` are binary-only and never JSON.** Both must stay strictly
+ordered against the output stream they refer to; a `gap` that arrives out of
+order relative to the bytes it describes is worse than no `gap` at all.
 
 **Terminal bytes are never base64 and never JSON.** Base64 exists at exactly one
 place in the whole system — decoding Herdr's own NDJSON inside the server — and
@@ -240,8 +303,9 @@ Every control frame:
 { "seq": 41, "type": "tree", "data": { } }
 ```
 
-- `seq` is a `uint64`, monotonic per connection, assigned by the server. Clients
-  may omit `seq` on messages they send.
+- `seq` is a `uint64`, monotonic **per connection**, assigned by the server **at
+  write time** across both planes from one counter. **Clients send `seq: 0`** (or
+  omit it); an inbound `seq` is parsed and ignored.
 - `type` is a lowercase string.
 - `data` is an object, always present, possibly empty.
 
@@ -376,6 +440,7 @@ structure client-side; two clients showing different trees is a server bug.
         "agent": "claude",
         "status": "working",
         "idle": false,
+        "done": false,
         "focused": true,
         "cols": 120,
         "rows": 40,
@@ -393,7 +458,7 @@ Notes that matter for a client:
   across moves.** Key your UI state on `terminal_id` where you can.
 - `status` is one of `idle`, `working`, `blocked`, `unknown`. `blocked` means the
   agent is waiting on a human — that is your cue for the Q&A view.
-- `idle` is a server fact. **DONE is not.** See `agent` below.
+- `idle` is a fact about the pane. **`done` is a fact about you** — see below.
 - `mode` is the mode the **server** chose for you. It may not be what you asked
   for in `viewport`.
 - `herdr_connected: false` means we lost the Herdr socket and are retrying. Keep
@@ -412,22 +477,37 @@ Agent status transitions, ahead of the next full `tree`.
 }}
 ```
 
+`detection` is present **only when `status` is `blocked`** — do not expect it on
+other transitions, and do not render an empty Q&A view when it is absent.
+
+**Every known agent is emitted as an `agent` frame immediately after the first
+`tree`**, so a freshly connected client has complete agent state without asking
+for it. After that, frames arrive on transitions.
+
 `detection` is the raw text Herdr classified on. Render it as-is; **do not parse
 per agent kind** — that is a maintenance treadmill and it breaks on every agent
 update. Pair it with a fixed key bar (y / n / enter / esc / arrows / 1 2 3).
 
-**Deriving DONE.** The server reports `idle`, which is a fact about the pane. It
-does **not** report DONE, which is a fact about *you*. Each connection keeps its
-own unseen set:
+**`done` is per connection, and the server derives it for you.** It is computed
+as:
 
 ```
-DONE = idle AND unseen-by-this-connection
+done = idle AND unseen-by-THIS-connection
 ```
 
-Mark a pane seen when the user focuses it, not when you read it. Your "mark all
-read" affects only your device — with a laptop and two phones attached, a global
-seen set would mean whoever glances first wipes everyone else's badges. Seen
-state lives on the client; the server will not keep it for you.
+The server keeps one unseen set per connection, so **two clients can legitimately
+receive different `done` values for the same pane at the same instant**, and that
+is correct: with a laptop and two phones attached, a global seen set would mean
+whoever glances first wipes everyone else's badges.
+
+Client rules:
+
+- **Render `done`. Do not recompute it**, and do not cache it as a property of
+  the pane shared across connections.
+- A pane is marked seen for your connection when **the user focuses it** — reads
+  do not mark seen. Focus travels as a `command`.
+- A new connection starts with currently-idle panes already seen, so you will not
+  open to a wall of stale badges.
 
 #### `result`
 
@@ -491,7 +571,8 @@ protobuf.
 | `2` | `snapshot` | raw ANSI bytes: a full repaint of the target |
 | `3` | `gap` | exactly 8 bytes: `u64` big-endian `bytes_dropped` |
 
-- All integers are **big-endian** (network byte order).
+- **All integers are big-endian** (network byte order): `seq` as u64 BE, `tlen`
+  as u16 BE, and `bytes_dropped` in a `gap` payload as u64 BE.
 - `target` is ASCII, exactly `tlen` bytes, no terminator.
 - `payload` is **everything after the target** — its length is the frame length
   minus `11 + tlen`. There is no payload-length field; the WebSocket frame
@@ -528,6 +609,13 @@ A `gap` announcing 131072 dropped bytes on the same target:
 ```
 
 A `snapshot` always follows a `gap` for the same target.
+
+**Where snapshots come from.** Herdr's own terminal records carry a `full` flag
+marking a full repaint — emitted on attach and after a resize. We forward those
+as `snapshot` (type 2) and everything else as `frame` (type 1). So the first
+thing you receive after attaching is already a complete screen: there is no
+separate "request a snapshot" call, and you do not need one on reconnect either.
+On `snapshot`, reset your emulator and write the payload.
 
 ### Reference decoder
 
@@ -588,8 +676,12 @@ Coalesce only what is already pending. **Never delay a keystroke to batch it.**
 
 ### `seq`
 
-`seq` is a `uint64`, monotonic per connection, assigned across **both** planes
-from one counter. It is for **ordering and debugging**.
+`seq` is a `uint64`, monotonic per connection, assigned by the server **at write
+time**, from one counter shared across both planes. It is for **ordering and
+debugging**.
+
+Clients send `seq: 0` on control frames and carry no `seq` at all on binary input
+frames. Any `seq` a client sends is parsed and discarded.
 
 **`seq` is not a resume cursor.** Do not persist it. Do not send it back on
 reconnect. There is no replay.
@@ -668,6 +760,29 @@ Rules a client must honour:
 
 ## 9. Calling Herdr methods
 
+> ### If you are talking to the Herdr socket yourself
+>
+> You do not need this to use *our* API — we handle it — but if you are writing
+> anything that speaks to Herdr 0.9.0 directly, these three facts are
+> undocumented upstream and each one costs a day:
+>
+> 1. **The socket serves exactly ONE request per connection, then closes it.**
+>    Pipelining a second request on the same connection gets a broken pipe. Dial
+>    a fresh unix connection per call. Only `events.subscribe` holds one open,
+>    for the life of the subscription. Every instinct you have about connection
+>    reuse is wrong here, and the failure surfaces on the *second* call, which is
+>    not where you will look.
+> 2. **`session.snapshot` returns the whole tree in one call** — use it instead
+>    of composing `workspace.list` + `tab.list` + `pane.list` + `agent.list`.
+> 3. **Three of the 27 subscription kinds are per-pane and require a `pane_id`**:
+>    `pane.agent_status_changed`, `pane.output_matched`, `pane.scroll_changed`.
+>    Subscribing to all 27 at once fails the **entire call** with
+>    `missing field pane_id` — not just those three. Subscribe to the 24
+>    session-wide kinds; `pane.updated` covers status changes globally.
+>
+> And subscribe **before** you snapshot: 0.9.0 does not replay retained event
+> history, so snapshot-then-subscribe silently loses the gap between them.
+
 `command` is a straight pass-through to the Herdr socket API. **Method names are
 not enumerated or validated here** — whatever Herdr 0.9.0 accepts (102 request
 methods), you can send. Run `herdr api schema` for the authoritative list; this
@@ -710,7 +825,7 @@ HTTP:
 |---|---|
 | `400` | malformed request |
 | `401` | missing, invalid, expired or revoked token |
-| `403` | origin not allowlisted |
+| `403` | origin not allowlisted, or `Host` did not match the pinned value |
 | `404` | no such route |
 | `429` | rate-limited (pairing attempts, handshakes) |
 | `503` | server up, Herdr socket unavailable |
@@ -758,7 +873,8 @@ For as long as `/v1` is served:
 - **New `type` bytes** in the binary plane. **Ignore any binary frame whose type
   byte you do not recognise** — the header is fixed, so you can always skip it
   cleanly.
-- **New entries in `features`** on `/v1/config` and `welcome`.
+- **New entries in `features`** on `/v1/config` and `welcome`, and new values of
+  `mode`.
 - Anything under `/*` — the embedded web app is not API surface.
 
 ### Client requirements
@@ -787,13 +903,18 @@ Until then this document is the schema.
 ## 12. A minimal client, end to end
 
 ```js
-// 1. bootstrap
-const cfg = await fetch("/v1/config", {
-  headers: { Authorization: `Bearer ${token}` }
-}).then(r => r.json());
+// 1. bootstrap. In local mode cfg.auth_required is false and the header is
+//    simply ignored; in lan and cloudflare mode a device token is mandatory.
+const auth = token ? { Authorization: `Bearer ${token}` } : {};
+const cfg  = await fetch("/v1/config", { headers: auth }).then(r => r.json());
+
+// lan mode is plain HTTP on a LAN IP: not a secure context, so no service
+// worker and no install prompt. Check, do not assume.
+if (!cfg.secure_context) hideInstallPrompt();
 
 // 2. connect
-const ws = new WebSocket(`wss://host/v1/stream?token=${token}`);
+const q  = token ? `?token=${token}` : "";
+const ws = new WebSocket(`${location.origin.replace(/^http/, "ws")}/v1/stream${q}`);
 ws.binaryType = "arraybuffer";
 
 ws.onopen = () => send({ type: "hello", data: { client: "demo", protocol: 1 } });
@@ -803,7 +924,8 @@ ws.onmessage = (ev) => {
     const msg = JSON.parse(ev.data);
     switch (msg.type) {
       case "welcome": break;
-      case "tree":    render(msg.data); break;
+      case "tree":    render(msg.data); break;   // render done, do not recompute
+      case "agent":   agentUpdate(msg.data); break;
       case "pong":    rtt = Date.now() - msg.data.t; break;
       case "closed":  drop(msg.data.target); break;
       case "result":  resolve(msg.data.id, msg.data); break;

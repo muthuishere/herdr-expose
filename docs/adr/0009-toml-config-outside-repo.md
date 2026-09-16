@@ -32,6 +32,28 @@ a token gets committed and then pushed.
   point of use (ADR 0005).
 - `.gitignore` covers `*.local.toml` and any local config copy.
 
+The canonical block, with the port fixed at **21118**:
+
+```toml
+[server]
+port = 21118
+# no `bind` key: the exposure mode decides it (ADR 0022), enforced in code
+
+[auth]
+pairing_ttl_seconds = 600     # 10 minutes (ADR 0017)
+
+[ui]
+theme = "auto"
+default_view = "grid"
+
+[expose]
+cloudflare  = false
+domain      = ""              # REQUIRED when cloudflare = true (ADR 0005)
+tunnel_name = "herdr-expose"
+lan         = false           # ADR 0022
+autostart   = false
+```
+
 ## Consequences
 
 - "Where is my config" has exactly one answer, printable by `herdr-expose
