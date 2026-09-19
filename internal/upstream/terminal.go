@@ -60,8 +60,17 @@ type TerminalStream struct {
 	// MUST set it per subprocess: without it every stream would attach to
 	// whichever session launched the plugin, and pane ids (which all start at
 	// w1:p1) would silently resolve against the wrong tree.
-	Socket   string
-	Mode     TerminalMode
+	Socket string
+	Mode   TerminalMode
+	// Cols/Rows are the geometry to ATTACH AT. Zero means "do not pass
+	// --cols/--rows at all", which makes herdr attach at the pane's OWN
+	// current size and report it back in the first frame's width/height.
+	//
+	// That is the non-destructive default and it is the whole point: verified
+	// on 0.9.0, `terminal session observe` never changes a pane's PTY, while
+	// `terminal session control --cols --rows` changes it permanently. Passing
+	// nothing means we cannot impose a size even by accident, and the first
+	// frame tells us the size we must render at.
 	Cols     int
 	Rows     int
 	Takeover bool
@@ -85,12 +94,9 @@ func NewTerminalStream(target string, mode TerminalMode, cols, rows int, h Termi
 	if log == nil {
 		log = slog.Default()
 	}
-	if cols <= 0 {
-		cols = 120
-	}
-	if rows <= 0 {
-		rows = 32
-	}
+	// cols/rows of zero are PRESERVED, not defaulted: they mean "attach at the
+	// pane's own size". Defaulting them to 120x32 was how a browser silently
+	// imposed a geometry on somebody else's terminal.
 	return &TerminalStream{Target: target, Mode: mode, Cols: cols, Rows: rows, handler: h, log: log,
 		inbuf: make([]byte, 0, 1024), done: make(chan struct{})}
 }
@@ -98,8 +104,10 @@ func NewTerminalStream(target string, mode TerminalMode, cols, rows int, h Termi
 // Start spawns the subprocess and pumps frames until it exits or ctx is done.
 // It returns once the process is running; Wait blocks for teardown.
 func (t *TerminalStream) Start(ctx context.Context) error {
-	args := []string{"terminal", "session", string(t.Mode), t.Target,
-		"--cols", strconv.Itoa(t.Cols), "--rows", strconv.Itoa(t.Rows)}
+	args := []string{"terminal", "session", string(t.Mode), t.Target}
+	if t.Cols > 0 && t.Rows > 0 {
+		args = append(args, "--cols", strconv.Itoa(t.Cols), "--rows", strconv.Itoa(t.Rows))
+	}
 	if t.Mode == ModeControl && t.Takeover {
 		args = append(args, "--takeover")
 	}

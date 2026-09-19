@@ -3,16 +3,17 @@
  * fixed key bar under the terminal. On the phone this IS the screen; on desktop
  * it is the right-hand column.
  *
- * SPEC J2 — two views, chosen by what the pane IS:
- *   - a pane with an AGENT opens as a TRANSCRIPT. Reflowed readable text, no
- *     geometry, so opening it on a phone does not SIGWINCH the agent into
- *     throwing its screen away.
- *   - a pane with NO agent opens as a TERMINAL, exactly as before.
- * Either is reachable on any pane from the header toggle, and the choice is
- * remembered per pane.
+ * LOOKING MUST NOT TOUCH (supersedes J2's "terminal for a pane with no agent"):
+ *   - EVERY pane opens as a TRANSCRIPT, agent or plain shell. It declares no
+ *     geometry, takes no control and polls a read-only buffer, so opening a
+ *     pane from the browser cannot move anything on the owner's laptop.
+ *   - The TERMINAL is still one tap away and still exact, but it is now
+ *     something you ask for: the first time on a pane we say in one line what
+ *     it does, and wait. After that, for this session, we do not ask again.
+ * The choice is remembered per pane.
  */
 
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 import type { PaneId } from '../protocol/types'
 import { useStore } from '../store/store'
 import { LiveTerminal } from './LiveTerminal'
@@ -22,9 +23,12 @@ import { AgentQA, QA_QUICK_KEYS } from './AgentQA'
 import { AgentBadge } from './AgentBadge'
 import { formatBytes } from './PaneList'
 import type { RendererKind } from '../terminal/renderer'
-import { DEFAULT_FONT_SIZE } from '../terminal/fit'
+import { ptyGeometry } from '../terminal/fit'
+import { sendMatchGeometry, sendResize } from '../net/connection'
 import {
+  grantTerminalConsent,
   hasRealAgent,
+  hasTerminalConsent,
   readPaneView,
   writePaneView,
   type PaneViewKind,
@@ -61,8 +65,9 @@ export function PaneView({
   // The render-health watchdog spent its repair budget and the grid is still
   // misaligned. Say so in one line rather than sitting there looking broken.
   const [health, setHealth] = useState<HealthReading | null>(null)
-  // Local display size only. It never reaches the PTY (SPEC B8).
-  const [fontSize, setFontSize] = useState(DEFAULT_FONT_SIZE)
+  // Local display NUDGE only, in font-size steps on top of the size the
+  // terminal fits itself to. It never reaches the PTY (SPEC B8).
+  const [fontStep, setFontStep] = useState(0)
   const blocked = pane?.agent?.state === 'blocked'
   const hasAgent = hasRealAgent(pane)
 
@@ -81,15 +86,60 @@ export function PaneView({
    */
   const [choice, setChoice] = useState<{ target: PaneId; kind: PaneViewKind } | null>(null)
   const stored = useMemo(() => readPaneView(target, hasAgent), [target, hasAgent])
-  const view: PaneViewKind = choice && choice.target === target ? choice.kind : stored
+  const requested: PaneViewKind = choice && choice.target === target ? choice.kind : stored
+
+  /*
+   * THE CONSENT GATE. A remembered `terminal` preference is not a licence to
+   * attach on sight either: consent is per SESSION, so a pane that was in
+   * terminal view yesterday still asks once today. Until it is granted the
+   * transcript stays on screen, which means the pane is readable the whole
+   * time the question is up — there is no blank "are you sure" screen.
+   */
+  const [asking, setAsking] = useState<PaneId | null>(null)
+  const consented = hasTerminalConsent(target)
+  const view: PaneViewKind = requested === 'terminal' && !consented ? 'transcript' : requested
+
+  /** What we are actually rendering at, and whether it is the pane's own size. */
+  const [geom, setGeom] = useState<{
+    cols: number
+    rows: number
+    source: 'pane' | 'client'
+  } | null>(null)
 
   const choose = useCallback(
     (kind: PaneViewKind) => {
+      if (kind === 'terminal' && !hasTerminalConsent(target)) {
+        // Do NOT write the preference yet. A tap that was answered "no" must
+        // not leave the pane remembering that it wants a terminal.
+        setAsking(target)
+        return
+      }
+      setAsking(null)
       writePaneView(target, kind)
       setChoice({ target, kind })
     },
     [target],
   )
+
+  /**
+   * The explicit, confirmed mutation. Everything else in this component is
+   * read-only by construction; this is the one action that changes the pane
+   * for every client attached to it, and it is reversible (⤺ pane size).
+   */
+  const termWrapRef = useRef<HTMLDivElement>(null)
+  const fitToWindow = useCallback(() => {
+    const el = termWrapRef.current
+    if (!el) return
+    const g = ptyGeometry({ width: el.clientWidth, height: el.clientHeight })
+    sendResize(target, g.cols, g.rows)
+  }, [target])
+
+  const confirmTerminal = useCallback(() => {
+    grantTerminalConsent(target)
+    setAsking(null)
+    writePaneView(target, 'terminal')
+    setChoice({ target, kind: 'terminal' })
+  }, [target])
 
   // Until the tree has told us whether this pane has an agent, render NEITHER
   // view. The default depends on that answer, and guessing "terminal" would
@@ -157,17 +207,39 @@ export function PaneView({
               <button
                 className="iconbtn"
                 aria-label="Smaller text"
-                onClick={() => setFontSize((f) => Math.max(9, f - 1))}
+                onClick={() => setFontStep((f) => Math.max(-8, f - 1))}
               >
                 A−
               </button>
               <button
                 className="iconbtn"
                 aria-label="Bigger text"
-                onClick={() => setFontSize((f) => Math.min(22, f + 1))}
+                onClick={() => setFontStep((f) => Math.min(9, f + 1))}
               >
                 A+
               </button>
+              {/* THE ONLY CONTROL IN THIS APP THAT RESIZES SOMEBODY ELSE'S
+                  TERMINAL. It is a deliberate, named, reversible action rather
+                  than a side effect of opening a pane. */}
+              {geom?.source === 'client' ? (
+                <button
+                  className="iconbtn"
+                  aria-label="Give the pane its own size back"
+                  title="Stop imposing this window's size on the pane"
+                  onClick={() => sendMatchGeometry(target)}
+                >
+                  ⤺ pane size
+                </button>
+              ) : (
+                <button
+                  className="iconbtn"
+                  aria-label="Fit the pane to my window"
+                  title="Resizes this pane for EVERYONE attached to it, including your laptop"
+                  onClick={() => fitToWindow()}
+                >
+                  ⤢ fit
+                </button>
+              )}
             </>
           ) : null}
         </div>
@@ -198,6 +270,35 @@ export function PaneView({
           The server is serving this pane as <b>{mode}</b>, not live.
         </div>
       ) : null}
+      {asking === target ? (
+        // ONE LINE, and it states the real cost rather than a scary one.
+        // Measured on herdr 0.9.0: observing a pane does not change its size,
+        // but a pane has ONE size shared by everyone attached to it, so
+        // "fit to my window" reflows it on the owner's laptop — and typing
+        // takes control of the pane they are sitting in front of.
+        <div className="notice notice-confirm" role="alertdialog" aria-label="Open the terminal?">
+          <span>
+            Terminal view attaches to this pane. It renders at the pane&apos;s own size and
+            leaves it alone, but typing takes control of it, and <b>Fit to my window</b> would
+            resize it for everyone looking — including your laptop. Text view never attaches.
+          </span>
+          <span className="notice-actions">
+            <button type="button" className="key key-sm key-yes" onClick={confirmTerminal}>
+              Show terminal
+            </button>
+            <button type="button" className="key key-sm" onClick={() => setAsking(null)}>
+              Stay in text
+            </button>
+          </span>
+        </div>
+      ) : null}
+      {view === 'terminal' && geom ? (
+        <p className="paneview-geom">
+          {geom.source === 'pane'
+            ? `Rendering at the pane's own size, ${geom.cols}x${geom.rows}. Nothing on your laptop moved.`
+            : `You fitted this pane to ${geom.cols}x${geom.rows}. Everyone attached to it, including your laptop, sees that size.`}
+        </p>
+      ) : null}
 
       {view === 'transcript' ? (
         // The transcript already renders the blocked-agent detection text and
@@ -208,12 +309,13 @@ export function PaneView({
       ) : (
         <>
           {blocked ? <AgentQA target={target} /> : null}
-          <div className="term-wrap">
+          <div className="term-wrap" ref={termWrapRef}>
             <LiveTerminal
               target={target}
-              fontSize={fontSize}
+              fontSize={fontStep}
               onRenderer={setRenderer}
               onHealth={setHealth}
+              onGeometry={setGeom}
             />
           </div>
           <KeyBar target={target} quickKeys={blocked ? QA_QUICK_KEYS : undefined} />

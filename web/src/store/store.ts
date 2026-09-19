@@ -15,6 +15,7 @@ import type {
   AgentData,
   ClosedData,
   PaneId,
+  GeometryData,
   ResultData,
   TreeData,
   TranscriptData,
@@ -77,6 +78,12 @@ export interface AppState {
    * idle agent keeps showing what it last displayed rather than blanking.
    */
   transcript: Record<PaneId, TranscriptData>
+  /**
+   * The size each live target is ACTUALLY attached at, as herdr reported it,
+   * plus where that size came from. `source: 'pane'` is the non-destructive
+   * case and the default: we matched the pane instead of resizing it.
+   */
+  geometry: Record<PaneId, GeometryData>
 
   /** The pane the USER has opened full-screen; drives the `viewport` frame. */
   focused: PaneId | null
@@ -106,6 +113,7 @@ const initial: AppState = {
   runtime: {},
   detection: {},
   transcript: {},
+  geometry: {},
   focused: null,
   visible: [],
   serverModes: {},
@@ -303,6 +311,18 @@ export const apply = {
     setLazy({ lastSeq: seq, transcript: { ...state.transcript, [d.target]: d } })
   },
 
+  /**
+   * Control-plane `geometry`. The client renders AT this size and scales to
+   * fit; it does not choose it. That inversion is the fix for "you are
+   * scrolling actual herdr terminal".
+   */
+  geometry(seq: number, d: GeometryData) {
+    if (!d?.target || !d.cols || !d.rows) return
+    const prev = state.geometry[d.target]
+    if (prev && prev.cols === d.cols && prev.rows === d.rows && prev.source === d.source) return
+    set({ lastSeq: seq, geometry: { ...state.geometry, [d.target]: d } })
+  },
+
   result(seq: number, d: ResultData) {
     set({ lastSeq: seq, results: { ...state.results, [d.id]: d } })
   },
@@ -376,6 +396,7 @@ export function resetSession() {
     runtime: {},
     detection: {},
     transcript: {},
+    geometry: {},
     tree: EMPTY_TREE,
     panesById: {},
   })

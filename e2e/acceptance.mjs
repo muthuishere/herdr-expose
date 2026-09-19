@@ -126,7 +126,7 @@ async function waitForTermText(page, needle, timeoutMs) {
  * test. The app's own viewport map says which target it is streaming `live`,
  * which is exactly the question "is the right pane open?".
  */
-async function openPane(page, session, paneId, want = 'live') {
+async function openPane(page, session, paneId, want = 'transcript') {
   const target = `${session}/${paneId}`
   // BY TARGET, never by index or title. Row order is not stable — "Needs you"
   // re-pins a pane the moment it blocks — and a title is whatever the shell
@@ -165,6 +165,12 @@ async function setView(page, session, paneId, kind) {
   const target = `${session}/${paneId}`
   const want = kind === 'transcript' ? 'transcript' : 'live'
   await page.locator(`.viewtoggle-btn:text-is("${kind === 'transcript' ? 'text' : 'term'}")`).click()
+  // The terminal is opt-in: the first tap on a pane asks what it costs and
+  // waits. Answering is part of switching view, so the helper answers.
+  if (kind === 'terminal') {
+    const confirm = page.locator('.notice-confirm button:text-is("Show terminal")')
+    if (await confirm.isVisible().catch(() => false)) await confirm.click()
+  }
   for (let i = 0; i < 24; i++) {
     const vp = (await stats(page))?.viewport ?? {}
     if (vp[target] === want) return true
@@ -199,6 +205,89 @@ function viewportRows(pane) {
   } catch {
     return null
   }
+}
+
+/**
+ * THE NON-MUTATION BASELINE.
+ *
+ * Everything the browser could disturb about the owner's session, in one
+ * comparable object: each pane's PTY rows (`scroll.viewport_rows` — verified to
+ * track the real PTY, moving 40 -> 60 when an external controller resized it),
+ * each pane's scrollback position, and which pane herdr considers focused.
+ *
+ * "Looking must not touch" is only a claim until this is captured before and
+ * after and found identical.
+ */
+function paneState() {
+  try {
+    const panes = herdrJSON('pane', 'list').panes ?? []
+    const out = { focused: null, panes: {} }
+    for (const p of panes) {
+      out.panes[p.pane_id] = {
+        viewport_rows: p.scroll?.viewport_rows ?? null,
+        offset_from_bottom: p.scroll?.offset_from_bottom ?? null,
+      }
+      if (p.focused) out.focused = p.pane_id
+    }
+    return out
+  } catch (e) {
+    return { error: String(e) }
+  }
+}
+
+/**
+ * Assert that nothing the owner would notice has moved.
+ *
+ * `label` names the thing the browser just did, so a failure reads as
+ * "switching panes resized w1:p2" rather than as a diff of two blobs.
+ */
+function checkUntouched(label, before, after = paneState()) {
+  const diffs = []
+  if (before.focused !== after.focused)
+    diffs.push(`focused pane ${before.focused} -> ${after.focused}`)
+  for (const [id, b] of Object.entries(before.panes ?? {})) {
+    const a = after.panes?.[id]
+    if (!a) {
+      diffs.push(`${id} vanished`)
+      continue
+    }
+    if (b.viewport_rows !== a.viewport_rows)
+      diffs.push(`${id} viewport_rows ${b.viewport_rows} -> ${a.viewport_rows}`)
+    if (b.offset_from_bottom !== a.offset_from_bottom)
+      diffs.push(`${id} scroll.offset_from_bottom ${b.offset_from_bottom} -> ${a.offset_from_bottom}`)
+  }
+  check(
+    `LOOKING DOES NOT TOUCH: ${label} leaves every pane's rows, scroll and focus alone`,
+    diffs.length === 0,
+    diffs.length === 0
+      ? `checked ${Object.keys(before.panes ?? {}).length} panes, focused=${after.focused}`
+      : diffs.join('; '),
+  )
+  return after
+}
+
+/**
+ * The PTY's real size, asked of the shell itself.
+ *
+ * `pane list` reports rows but no COLS anywhere in herdr 0.9.0, and cols are
+ * exactly what a browser window used to impose. So we ask the shell: `tput`
+ * reads the tty, which is the ground truth nothing can fake.
+ */
+async function ptySize(pane, tag) {
+  try {
+    herdr('pane', 'send-text', pane, `echo ${tag}=$(tput cols)x$(tput lines)`)
+    await sleep(300)
+    herdr('pane', 'send-keys', pane, 'enter')
+  } catch {
+    return null
+  }
+  const re = new RegExp(`${tag}=(\\d+)x(\\d+)`)
+  for (let i = 0; i < 25; i++) {
+    await sleep(400)
+    const m = re.exec(paneText(pane, 40))
+    if (m) return `${m[1]}x${m[2]}`
+  }
+  return null
 }
 
 async function stats(page) {
@@ -330,13 +419,26 @@ const main = async () => {
     false,
   )
 
-  /* -- 4. TRANSCRIPT: the default for an agent pane, and non-destructive -- */
+  /* -- 4. LOOKING MUST NOT TOUCH ---------------------------------------- */
   //
-  // This is the headline property of AMENDMENTS 13. A live observer attaches a
-  // PTY at the browser's size, which SIGWINCHes an agent TUI into discarding
-  // its screen — so opening a pane on a phone used to destroy the history you
-  // opened it to read. A transcript subscriber declares no geometry at all, and
-  // `viewport_rows` is where that is either true or false.
+  // The owner, working at his laptop while a browser was open on the same
+  // session: "you are scrolling actual herdr terminal."
+  //
+  // So the baseline is taken BEFORE the browser looks at anything, and every
+  // step below is checked against it. What is compared is exactly what he
+  // would notice: each pane's PTY rows, each pane's scrollback position, and
+  // which pane herdr thinks is focused.
+  const UNTOUCHED = paneState()
+  check(
+    'herdr gives us a full pane baseline to hold the browser to',
+    !UNTOUCHED.error && Object.keys(UNTOUCHED.panes).length >= 3,
+    JSON.stringify(UNTOUCHED),
+  )
+  // Cols are the number a browser window used to impose and that herdr reports
+  // nowhere, so we ask the shell's own tty for them.
+  const ptyBefore = await ptySize(SHELL_PANE, 'PTYA')
+  check('the shell pane reports its real PTY size', !!ptyBefore, `tput says ${ptyBefore}`)
+
   const rowsBefore = viewportRows(AGENT_PANE)
   check(
     'herdr reports a viewport_rows for the agent pane before we attach',
@@ -359,6 +461,7 @@ const main = async () => {
     rowsBefore !== null && rowsAfter === rowsBefore,
     `viewport_rows ${rowsBefore} -> ${rowsAfter}`,
   )
+  checkUntouched('opening a pane in the browser', UNTOUCHED)
   const trStats = (await stats(page))?.targets?.[`${SESSION}/${AGENT_PANE}`] ?? {}
   check(
     'and the client sent no `resize` for it at all',
@@ -421,14 +524,57 @@ const main = async () => {
     rowsAfterPrompt === rowsBefore,
     `viewport_rows ${rowsBefore} -> ${rowsAfterPrompt}`,
   )
+  // A prompt is the user acting, and it is still not allowed to resize or
+  // scroll anything: agent.prompt carries no geometry and takes no control.
+  checkUntouched('sending a prompt from the transcript', UNTOUCHED)
 
-  /* -- 4c. the terminal renders what the agent says ---------------------- */
-  // Terminal is still available on any pane, via the header toggle, and is
-  // still the right tool when you need exactness. Ask for it explicitly now
-  // that transcript is the default for agents.
+  /* -- 4c. the terminal is OPT-IN, and even then does not resize --------- */
+  // Terminal is still available on any pane and is still the right tool when
+  // you need exactness — but it now costs one deliberate answer, and when it
+  // does attach it renders at the PANE'S size rather than this window's.
+  await page.locator('.viewtoggle-btn:text-is("term")').click()
+  const confirmBar = page.locator('.notice-confirm')
+  const asked = await confirmBar
+    .waitFor({ state: 'visible', timeout: 8000 })
+    .then(() => true)
+    .catch(() => false)
+  const confirmText = asked ? await confirmBar.innerText() : ''
+  check('tapping `term` ASKS before attaching, on this pane, once', asked, confirmText.slice(0, 120))
+  check(
+    'and the question says what it costs and what text view does not',
+    /resize/i.test(confirmText) && /text view/i.test(confirmText),
+    JSON.stringify(confirmText.slice(0, 200)),
+  )
+  check(
+    'declining leaves the pane in text view and nothing attached',
+    await (async () => {
+      await page.locator('.notice-confirm button:text-is("Stay in text")').click()
+      await sleep(600)
+      const vp = (await stats(page))?.viewport ?? {}
+      return vp[`${SESSION}/${AGENT_PANE}`] === 'transcript'
+    })(),
+  )
+  checkUntouched('tapping `term` and declining', UNTOUCHED)
+
   check(
     `the header toggle switches the agent pane to the terminal and it goes live`,
     await setView(page, SESSION, AGENT_PANE, 'terminal'),
+  )
+  await sleep(3000)
+  // THE HEADLINE REVERSAL. Terminal view used to send `resize` on attach, which
+  // herdr applies to the pane for EVERY client on it — that is the reflow the
+  // owner felt under his hands. It now attaches with no geometry at all.
+  checkUntouched('switching to TERMINAL view at 1280x900', UNTOUCHED)
+  const geomLine = await page.locator('.paneview-geom').innerText().catch(() => '')
+  check(
+    'the terminal says what size it is rendering at, and whose size it is',
+    /pane's own size/i.test(geomLine) && /\d+x\d+/.test(geomLine),
+    JSON.stringify(geomLine),
+  )
+  check(
+    'the client sent no `resize` for the agent pane at any point',
+    ((await stats(page))?.targets?.[`${SESSION}/${AGENT_PANE}`]?.resizeSent ?? 0) === 0,
+    `resizeSent=${(await stats(page))?.targets?.[`${SESSION}/${AGENT_PANE}`]?.resizeSent ?? 0}`,
   )
   await page
     .locator('.term-host .xterm')
@@ -464,6 +610,15 @@ const main = async () => {
     remembered === 'terminal',
     `stored ${JSON.stringify(remembered)}`,
   )
+  const consent = await page.evaluate(
+    (t) => sessionStorage.getItem('hex.termok.' + t),
+    `${SESSION}/${AGENT_PANE}`,
+  )
+  check(
+    'and the terminal answer is remembered too — it does not nag again this session',
+    consent === '1',
+    `stored ${JSON.stringify(consent)}`,
+  )
 
   /* -- 5. keystrokes typed in the browser reach the pane ----------------- */
   const typed = `hexe2e-typed-${Math.random().toString(16).slice(2, 8)}`
@@ -485,6 +640,13 @@ const main = async () => {
   )
   // Leave the agent's prompt box as we found it.
   await page.keyboard.press('Control+u').catch(() => {})
+  await sleep(2000)
+  // TAKING CONTROL MUST NOT ALSO RESIZE. Typing upgrades the stream from
+  // `observe` to `control --takeover`, and that is the one call in this program
+  // that really can change the owner's pane — measured on 0.9.0, a controller
+  // attaching at 100x60 moved the pane from 120x40 and left it there. It now
+  // reuses the size herdr already told us the pane is.
+  checkUntouched('TAKING CONTROL by typing in the browser', UNTOUCHED)
 
   /* -- 6. the agent badge reflects reality ------------------------------- */
   // Both sides move: wait for agreement rather than sampling a race. A badge
@@ -608,25 +770,31 @@ const main = async () => {
   /* -- 8. THE ONE THAT MATTERS: an idle pane still streams --------------- */
   // A plain shell, not the agent: an agent TUI repaints on its own and would
   // mask exactly the bug this is here to catch. A bash prompt emits nothing.
-  const shellOpen = await openPane(page, SESSION, SHELL_PANE)
-  check(`the idle pane (${SHELL_PANE}) opens and goes live`, shellOpen)
-  // A pane with no agent still DEFAULTS to the terminal (SPEC J2). Herdr
-  // reports `agent_status: "unknown"` for every plain shell, so "does this
-  // pane have an agent object" is the wrong question and once sent every
-  // shell to the transcript.
+  const shellOpen = await openPane(page, SESSION, SHELL_PANE, 'transcript')
+  check(`the idle pane (${SHELL_PANE}) opens`, shellOpen)
+  // EVERY pane opens as a transcript now, including a plain shell. A shell is
+  // output like any other output, and reading it is the one thing that cannot
+  // disturb the person typing into it.
   check(
-    'a pane with no agent still defaults to the TERMINAL view',
-    await page.locator('.term-host .xterm').isVisible().catch(() => false),
+    'a pane with NO agent also defaults to the TEXT view',
+    await page.locator('.tr-body').isVisible().catch(() => false),
     'no stored preference for this pane',
   )
-  // Resize shortly AFTER mount, which is what a real client does when it fits
-  // itself to the box — and what made LIVE targets die silently before
-  // 4e9aee3. Without this the idle soak below passes on a broken build.
+  checkUntouched(`switching panes (to ${SHELL_PANE})`, UNTOUCHED)
+  // Now ask for the terminal explicitly, which is what the rest of section 8
+  // measures (flicker, render health, the idle stream).
+  check(
+    `the idle pane goes live once the terminal is asked for`,
+    await setView(page, SESSION, SHELL_PANE, 'terminal'),
+  )
+  // A browser-window resize, which is what a real client does when the layout
+  // moves. It must change what WE render and nothing upstream.
   await sleep(800)
   await page.setViewportSize({ width: 1240, height: 860 })
   await sleep(800)
   await page.setViewportSize({ width: 1280, height: 900 })
   await sleep(2000)
+  checkUntouched('resizing the BROWSER window while a terminal is open', UNTOUCHED)
 
   const statsBefore = await stats(page)
   const shotA = await page.locator('.term-wrap').screenshot()
@@ -718,6 +886,9 @@ const main = async () => {
     (tgtMid.termCreate ?? 0) === 1,
     `termCreate=${tgtMid.termCreate ?? 0}`,
   )
+  // The soak is also a non-mutation test: a pane left open for a minute must
+  // not drift the owner's terminal a cell.
+  checkUntouched(`leaving a terminal open for ${IDLE_SECS}s`, UNTOUCHED)
 
   const token2 = `HEXE2E-LIVE-${Math.random().toString(16).slice(2, 8)}`
   herdr('pane', 'send-text', SHELL_PANE, `echo ${token2}`)
@@ -763,8 +934,12 @@ const main = async () => {
   const mobileRows = await page.locator('.row-title').allInnerTexts()
   check('the pane list is usable at 375px', mobileRows.length >= 2, `${mobileRows.length} rows`)
   await shot('08-mobile-list')
-  const mobileOpen = await openPane(page, SESSION, SHELL_PANE)
+  const mobileOpen = await openPane(page, SESSION, SHELL_PANE, 'live')
   check('the idle pane opens at 375px', mobileOpen)
+  // It opens in the TERMINAL because this device already chose that for this
+  // pane and already answered the question — the toggle is sticky per pane and
+  // the consent is sticky for the session, so a phone does not re-litigate a
+  // decision made thirty seconds ago on the same tab.
   const mobileTerm = await page
     .locator('.term-host .xterm')
     .waitFor({ state: 'visible', timeout: 20000 })
@@ -818,14 +993,24 @@ const main = async () => {
     rowsBeforePhone !== null && rowsMobile === rowsBeforePhone,
     `viewport_rows ${rowsBeforePhone} -> ${rowsMobile} at 375px`,
   )
-  // The contrast, stated as an assertion rather than a claim: the terminal
-  // view at 1280x900 DID resize this pane earlier in the run. That is exactly
-  // the destruction AMENDMENTS 13 is about, and exactly what a phone must not
-  // do to an agent's screen.
+  // THE CLAIM, STATED AS A MEASUREMENT. This assertion used to read "for
+  // contrast: the terminal view earlier in this run DID resize it" — the
+  // suite proved the destruction and shipped it as a documented contrast.
+  // It is now inverted: the terminal view at 1280x900, the phone at 375px,
+  // typing, prompting and a minute of idle are all in this run, and the
+  // owner's pane came out of all of it unchanged.
   check(
-    'for contrast: the terminal view earlier in this run DID resize it',
-    rowsBefore !== null && rowsBeforePhone !== null && rowsBeforePhone !== rowsBefore,
-    `viewport_rows ${rowsBefore} (before any attach) -> ${rowsBeforePhone} (after the terminal view)`,
+    'NOTHING in this whole browser session resized the agent pane',
+    rowsBefore !== null && rowsBeforePhone === rowsBefore && rowsMobile === rowsBefore,
+    `viewport_rows ${rowsBefore} (before any attach) -> ${rowsBeforePhone} (after the terminal view at 1280x900) -> ${rowsMobile} (at 375px)`,
+  )
+  checkUntouched('the entire browser session, end to end', UNTOUCHED)
+  // And the number herdr never reports: the shell's own tty, asked directly.
+  const ptyAfter = await ptySize(SHELL_PANE, 'PTYZ')
+  check(
+    "the shell pane's REAL PTY size (tput, its own tty) is byte-for-byte what we found",
+    !!ptyBefore && ptyAfter === ptyBefore,
+    `tput ${ptyBefore} -> ${ptyAfter}`,
   )
 
   check(

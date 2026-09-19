@@ -525,20 +525,34 @@ button {
   flex: 1 1 auto;
   min-height: 0;
   position: relative;
-  overflow: hidden;
+  /* The grid is the PANE'S size, not this window's (see LiveTerminal). At the
+     minimum readable font a wide pane can still be wider than a phone, so this
+     scrolls rather than overflowing the document — the alternative was
+     resizing the owner's terminal to fit our screen, which is the bug. */
+  overflow: auto;
   padding: 6px 0 0 calc(var(--safe-left) + 6px);
 }
 
-.term-host {
+.term-box {
   width: 100%;
   height: 100%;
+  position: relative;
+}
+
+.term-host {
+  /* Sized by the GRID, not by the box: the grid is the pane's own cols x rows
+     and we scale the font to it. min-width/min-height keep a small pane filling
+     the space instead of hugging the top-left corner. */
+  width: max-content;
+  min-width: 100%;
+  min-height: 100%;
   position: relative;
   /* NEVER transform: scale() this element — xterm resolves cells from the
      unscaled CSS cell width and every hit-test would offset. */
 }
 
 .term-host .xterm {
-  height: 100%;
+  min-height: 100%;
 }
 
 /* Predictive echo overlay (SPEC F2.1). It sits ON TOP of the terminal and never
@@ -594,6 +608,35 @@ button {
   color: var(--blocked);
   background: rgba(255, 139, 61, 0.1);
   font-family: var(--sans);
+}
+
+/* THE CONSENT LINE. One row, above the pane, with the pane still readable
+   underneath it — a modal would have hidden the very thing you are deciding
+   about. Warm rather than alarming: the answer "yes" is perfectly reasonable. */
+.notice-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--sans);
+  color: var(--fg);
+  background: rgba(255, 139, 61, 0.1);
+  border-bottom: 1px solid rgba(255, 139, 61, 0.35);
+}
+
+.notice-actions {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
+/* The honest geometry line: what we are rendering at, and whose size it is. */
+.paneview-geom {
+  margin: 0;
+  padding: 4px calc(var(--safe-left) + 10px);
+  font-size: 11px;
+  color: var(--fg-dim);
+  flex: 0 0 auto;
 }
 
 .renderer-note {

@@ -19,6 +19,7 @@ import type {
   ClientFrame,
   ClosedData,
   GapData,
+  GeometryData,
   PaneId,
   PongData,
   ResultData,
@@ -301,6 +302,11 @@ function handleControl(raw: string) {
       // terminal bytes, and must never reach the byte bus (SPEC J3).
       apply.transcript(seq, msg.data as TranscriptData)
       break
+    case 'geometry':
+      // The size the server ATTACHED at. The client renders to it; it does not
+      // choose it. See sendResize's comment for why that inversion exists.
+      apply.geometry(seq, msg.data as GeometryData)
+      break
     case 'closed':
       apply.closed(seq, msg.data as ClosedData)
       break
@@ -377,8 +383,16 @@ export function sendViewport(targets: Record<PaneId, ViewportMode>) {
 }
 
 /**
- * B2 — geometry, per-connection, floored at 20x6. MUST be sent before the first
- * frame is requested for a target.
+ * RESIZE IS A MUTATION. Do not send it just because a pane is on screen.
+ *
+ * Herdr gives a pane ONE size, shared by everyone attached to it, so fitting a
+ * pane to this browser window resizes it on the owner's laptop too — their
+ * agent gets a SIGWINCH, throws its screen away and redraws under their hands.
+ * B2's "send geometry before the first frame" is withdrawn: the server now
+ * attaches with no geometry at all and reports the pane's own size back in a
+ * `geometry` frame, which is what we render to.
+ *
+ * Call this ONLY from an explicit, confirmed user action.
  */
 export function sendResize(target: PaneId, cols: number, rows: number) {
   countEvent('resizeSent', target)
@@ -391,6 +405,16 @@ export function sendResize(target: PaneId, cols: number, rows: number) {
       rows: Math.max(MIN_ROWS, Math.floor(rows)),
     },
   })
+}
+
+/**
+ * Give a pane its geometry back: the server re-attaches with no --cols/--rows,
+ * so herdr uses the pane's own size again. This is the default state; `match`
+ * exists so a client can UNDO an explicit fit without guessing a number.
+ */
+export function sendMatchGeometry(target: PaneId) {
+  countEvent('matchSent', target)
+  sendControl({ seq: 0, type: 'resize', data: { target, cols: 0, rows: 0, match: true } })
 }
 
 /**

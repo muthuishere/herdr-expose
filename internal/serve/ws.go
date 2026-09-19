@@ -363,6 +363,20 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 			"min_cols": core.MinCols, "min_rows": core.MinRows,
 			"max_write_bytes": core.MaxWriteBytes,
 		},
+		// LOOKING MUST NOT TOUCH. Spelled out on the wire because a client
+		// author cannot infer it, and because getting it wrong moves a real
+		// person's terminal under their hands.
+		"geometry": map[string]any{
+			"frame":            "geometry",
+			"defaults_to_pane": true,
+			"resize_required":  false,
+			// `resize` changes the pane for EVERY client attached to it,
+			// including the owner's own terminal. Confirm before sending it.
+			"resize_mutates_pane": true,
+			// `{"type":"resize","data":{"target":..,"match":true}}` gives it back.
+			"match_supported": true,
+			"sources":         []string{core.GeomPane, core.GeomClient},
+		},
 		// Render modes a client may declare. `transcript` is spelled out here
 		// with its no-geometry contract because it is the one mode where
 		// sending `resize` is a bug rather than an omission.
@@ -506,12 +520,21 @@ func (s *Server) handleControl(ctx context.Context, conn *wsConn, data []byte) {
 		conn.SendJSON("pong", map[string]any{"t": d.T, "server_t": time.Now().UnixMilli()})
 
 	case "resize":
+		// RESIZE IS NOW AN EXPLICIT, MUTATING ACTION, not part of opening a
+		// pane. `{"match":true}` (or a zero size) hands the geometry back to
+		// the pane; anything else imposes this client's size on everybody
+		// looking at that pane, which is why the UI confirms it first.
 		var d struct {
 			Target string `json:"target"`
 			Cols   int    `json:"cols"`
 			Rows   int    `json:"rows"`
+			Match  bool   `json:"match"`
 		}
 		if err := json.Unmarshal(m.Data, &d); err != nil || d.Target == "" {
+			return
+		}
+		if d.Match || d.Cols <= 0 || d.Rows <= 0 {
+			conn.sess.MatchPane(d.Target)
 			return
 		}
 		conn.sess.SetGeometry(d.Target, d.Cols, d.Rows)

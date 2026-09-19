@@ -966,3 +966,87 @@ structure we cannot know. Show the text the agent is displaying, cleanly
 reflowed, with clear separation between the agent's output and our chrome. If
 the buffer is all we have, say what it is rather than implying a transcript we
 did not actually reconstruct.
+
+---
+
+# AMENDMENTS 14 — LOOKING MUST NOT TOUCH (supersedes B2 and J2's defaults)
+
+Owner, working at his laptop with the web UI open on the same session:
+**"you are scrolling actual herdr terminal."** Opening a pane in the browser
+moved the pane he was typing in — reflow, redraw, scroll, under his hands.
+
+## K0. What was actually measured (herdr 0.9.0, throwaway session, `tput` inside the pane as ground truth)
+
+| call | pane before | during | after |
+|---|---|---|---|
+| `terminal session observe <p>` | 120x40 | 120x40 | 120x40 |
+| `terminal session observe <p> --cols 100 --rows 60` | 120x40 | 120x40 | 120x40 |
+| `terminal session control <p> --cols 100 --rows 60 --takeover` | 120x40 | **100x60** | **100x60** |
+| `terminal session control <p> --takeover` (no geometry) | 41x13 | **120x40** | **120x40** |
+| `pane.read` (visible / recent_unwrapped / detection), `agent.read`, `session.snapshot` | — | unchanged | unchanged |
+| `pane.scroll {offset_from_bottom:20}` | offset 0 | **offset 20** | **offset 20** |
+
+`scroll.viewport_rows` tracks the PTY (40 -> 60 with the control resize). Nothing
+in the 0.9.0 API reports a pane's **cols**; the tab layout's `rect.width` is the
+only width anywhere, and an observe attached with **no** `--cols/--rows` reports
+the pane's real size as the first frame's `width`/`height`.
+
+So the mutating paths were: the CONTROL upgrade (which any keystroke triggers)
+and `pane.scroll`. Observing was already harmless — the geometry we sent it was
+simply ignored.
+
+## K1. The law
+
+**Viewing a pane from the web must never mutate the owner's local session.**
+Only an explicit, informed action may.
+
+## K2. Transcript is the default for EVERY pane (supersedes J2)
+
+Agent or plain shell. A shell is output like any other output and renders fine
+as text; "no agent" was never a reason to attach to somebody's terminal. The
+`text`/`term` toggle stays and is still remembered per pane.
+
+## K3. Terminal view is opt-in, once per pane per session
+
+The first tap on `term` states in one line what it costs and waits. Consent
+lives in `sessionStorage` (`hex.termok.<target>`) — that is exactly the lifetime
+of "do not nag again for the session". Declining does not even record the
+preference.
+
+## K4. Match the pane; never impose on it (WITHDRAWS B2)
+
+B2 said "a terminal without a geometry message does not work" and required
+`resize` before the first frame. That is withdrawn — it is what made merely
+opening a pane declare a size for it.
+
+- A LIVE attach passes **no** `--cols/--rows`. Herdr uses the pane's own size and
+  reports it; the server relays it as a new `geometry` control frame
+  (`{target, cols, rows, source:"pane"|"client"}`).
+- The client renders **at** that grid and scales the FONT to fit its box. It
+  never resizes the pane to fit the browser.
+- The observe->control upgrade reuses that same reported size, so taking control
+  is control only.
+- `resize` survives as the **explicit** action ("fit to my window"), is reversible
+  with `{"match":true}`, and is the only thing in the product that changes a
+  pane for everyone attached to it.
+
+## K5. Read paths are read-only, and `seen` stays ours
+
+Summary polls, transcript polls, detection reads, agent reads and snapshot
+requests are all `pane.read` / `agent.read` / `session.snapshot` — measured
+non-mutating. Nothing calls `pane.focus` or `agent.focus`, and nothing may:
+herdr's focus marks panes seen and would wipe the owner's own Done badges.
+`seen` stays per-connection in `core.SeenSet` and never leaves this process.
+
+`pane.scroll` is removed from the observer path entirely. A viewer scrolls their
+own 5000 lines of scrollback; only a controller moves the shared viewport.
+
+## K6. The tree is refreshed while somebody is looking (found during the audit)
+
+`events.subscribe [{"type":"pane.agent_status_changed"}]` is refused on 0.9.0
+with `missing field pane_id`, so there is no session-wide push for the one field
+the whole UI is about. An agent that finished kept its `working` badge until
+some unrelated structural event happened to fire a resync. The hub now re-reads
+the tree every 1.5s **while at least one client is connected**, and not at all
+otherwise — `session.snapshot` is read-only, and an empty room generates no
+upstream traffic.

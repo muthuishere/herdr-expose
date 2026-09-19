@@ -8,9 +8,12 @@
  *      minimumContrastRatio — every SGR/OSC colour reaches the screen exactly
  *      as the host sent it).
  *   2. Attach the renderer via probe-and-degrade.
- *   3. Measure, send `resize` BEFORE declaring the viewport (B2: a terminal
- *      without a geometry message does not work).
- *   4. Declare `viewport: live` — the SERVER decides the real mode.
+ *   3. Declare `viewport: live` and send NO GEOMETRY. B2's "resize before the
+ *      first frame" is withdrawn: herdr gives a pane ONE size shared by every
+ *      client attached to it, so declaring ours resized the owner's laptop.
+ *      The server attaches with no --cols/--rows and reports the pane's own
+ *      size back in a `geometry` frame.
+ *   4. Render AT that size, scaled by font size to whatever box we have.
  *   5. Feed raw Uint8Array straight into write(); never a decoded string.
  *   6. Predictive echo on the input path (SPEC F2.1).
  *
@@ -31,13 +34,13 @@ import type { Terminal as XTerm } from '@xterm/xterm'
 import '@xterm/xterm/css/xterm.css'
 
 import type { PaneId } from '../protocol/types'
+import { useStore } from '../store/store'
 import { onBytes } from '../net/byteBus'
 import { countEvent } from '../net/debugStats'
 import {
   onReconnected,
   sendInput,
   sendRepaint,
-  sendResize,
   sendScrollInput,
   sendSubscribe,
   sendUnsubscribe,
@@ -45,12 +48,14 @@ import {
 import { declareViewport, releaseViewport, resendViewport } from '../net/viewport'
 import { attachRenderer, type RendererKind } from '../terminal/renderer'
 import {
+  MAX_FONT_SIZE,
+  MIN_FONT_SIZE,
   DEFAULT_FONT_SIZE,
   DEFAULT_LINE_HEIGHT,
   FONT_FAMILY,
   cellMetrics,
   fitGeometry,
-  ptyGeometry,
+  fontSizeToFit,
   sameGeometry,
   type Geometry,
 } from '../terminal/fit'
@@ -66,9 +71,17 @@ import { useElementSize } from '../hooks/useViewport'
 
 export interface LiveTerminalProps {
   target: PaneId
-  /** Local-only display size. Never reaches the PTY (B8: zoom must not resize). */
+  /**
+   * Local-only display size, in font-size STEPS applied on top of the fitted
+   * size. Never reaches the PTY (B8: zoom must not resize).
+   */
   fontSize?: number
   onRenderer?: (kind: RendererKind) => void
+  /**
+   * The size we are rendering at, and whether it is the pane's own. Surfaced so
+   * the header can state plainly that looking did not touch anything.
+   */
+  onGeometry?: (g: { cols: number; rows: number; source: 'pane' | 'client' } | null) => void
   /**
    * The render-health watchdog could not repair the view within its budget.
    * Surfaced so the pane can say so honestly instead of sitting there looking
@@ -92,8 +105,24 @@ export interface LiveTerminalProps {
  *   - the first snapshot after a `gap`, where bytes were really dropped.
  * Every other snapshot is just bytes.
  */
-function LiveTerminalImpl({ target, fontSize, onRenderer, onHealth }: LiveTerminalProps) {
+function LiveTerminalImpl({ target, fontSize, onRenderer, onHealth, onGeometry }: LiveTerminalProps) {
+  /**
+   * THE SIZE COMES FROM THE SERVER, WHICH GOT IT FROM THE PANE.
+   *
+   * This is the whole fix in one line of data flow. Previously the browser
+   * measured its own box, computed cols/rows and sent `resize` — and herdr
+   * gives a pane ONE size shared by every attached client, so the owner's
+   * laptop pane was reflowed to fit a phone. Now the server attaches with no
+   * geometry, herdr answers with the pane's own size, and we render to it.
+   */
+  const served = useStore((s) => s.geometry[target])
   const hostRef = useRef<HTMLDivElement>(null)
+  /**
+   * The BOX we have to render in. Measured separately from the host because
+   * the host is now sized by the GRID (the pane's cols x rows at the fitted
+   * font); observing it would feed the fit its own output.
+   */
+  const boxElRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<XTerm | null>(null)
   const geomRef = useRef<Geometry | null>(null)
   const boxRef = useRef<{ width: number; height: number }>({ width: 0, height: 0 })
@@ -107,7 +136,8 @@ function LiveTerminalImpl({ target, fontSize, onRenderer, onHealth }: LiveTermin
   const dogRef = useRef<Watchdog | null>(null)
   const [ready, setReady] = useState(false)
 
-  const localFont = fontSize ?? DEFAULT_FONT_SIZE
+  /** The user's A-/A+ nudge, in font-size steps on top of the fitted size. */
+  const fontStep = fontSize ?? 0
 
   /* --- create ------------------------------------------------------- */
   useEffect(() => {
@@ -203,13 +233,6 @@ function LiveTerminalImpl({ target, fontSize, onRenderer, onHealth }: LiveTermin
     // Recreating per target is intentional: a fresh pane is a fresh terminal.
   }, [target, onRenderer])
 
-  /* --- local font size: display only, never upstream ---------------- */
-  useEffect(() => {
-    const t = termRef.current
-    if (!t) return
-    t.options.fontSize = localFont
-  }, [localFont, ready])
-
   /* --- geometry ----------------------------------------------------- */
   /**
    * Re-measure and re-fit. Returns whether anything ACTUALLY changed — the
@@ -221,28 +244,39 @@ function LiveTerminalImpl({ target, fontSize, onRenderer, onHealth }: LiveTermin
     const box = boxRef.current
     if (!t || box.width < 2 || box.height < 2) return false
 
-    // Local xterm grid: fit the ACTUAL rendered cells so nothing is clipped.
-    const metrics = cellMetrics(t, localFont)
-    const local = fitGeometry(box, metrics)
-    // Upstream PTY grid: reference metrics, so client-local zoom/font never
-    // resizes the remote terminal (B8).
-    const pty = ptyGeometry(box)
+    // THE GRID IS THE PANE'S, NOT THE WINDOW'S. We size the FONT to fit the
+    // pane's cols/rows into our box, rather than sizing the pane to fit our
+    // box. Nothing here talks to the server: this function can no longer
+    // resize anybody's terminal, by construction — there is no send left in it.
+    const wanted: Geometry = served
+      ? { cols: served.cols, rows: served.rows }
+      : // Before the first `geometry` frame we do not know the pane's size, so
+        // we fit locally purely so the emulator is not 80x24 on a 4K screen.
+        // It is never sent anywhere.
+        fitGeometry(box, cellMetrics(t, DEFAULT_FONT_SIZE))
 
     let changed = false
-    if (t.cols !== local.cols || t.rows !== local.rows) {
-      t.resize(local.cols, local.rows)
+    if (t.cols !== wanted.cols || t.rows !== wanted.rows) {
+      t.resize(wanted.cols, wanted.rows)
       changed = true
     }
-    if (!sameGeometry(geomRef.current, pty)) {
-      geomRef.current = pty
-      sendResize(target, pty.cols, pty.rows)
+    if (!sameGeometry(geomRef.current, wanted)) {
+      geomRef.current = wanted
       changed = true
     }
+    // Scale to fit: the largest readable font at which the pane's grid fits our
+    // box, nudged by the user's own A-/A+ steps.
+    const fitted = clampFont(fontSizeToFit(box, wanted.cols, wanted.rows) + fontStep)
+    if (t.options.fontSize !== fitted) {
+      t.options.fontSize = fitted
+      changed = true
+    }
+    const metrics = cellMetrics(t, fitted)
     // Re-baseline only from a REAL measurement. Re-baselining from the 1.30
     // fallback would erase the very drift the watchdog exists to see.
     if (metrics.measured) setBaseline(t, metrics)
     return changed
-  }, [target, localFont])
+  }, [served, fontStep])
 
   const onResize = useCallback(
     (box: { width: number; height: number }) => {
@@ -260,18 +294,25 @@ function LiveTerminalImpl({ target, fontSize, onRenderer, onHealth }: LiveTermin
     },
     [pushGeometry],
   )
-  useElementSize(hostRef, onResize)
+  useElementSize(boxElRef, onResize)
+
+  /* --- the pane's size arrived (or changed): re-fit to it ------------ */
+  useEffect(() => {
+    if (!ready) return
+    pushGeometry()
+    onGeometry?.(served ? { cols: served.cols, rows: served.rows, source: served.source } : null)
+  }, [ready, served, pushGeometry, onGeometry])
+
 
   /* --- subscribe / viewport ----------------------------------------- */
   useEffect(() => {
     if (!ready) return
     const start = () => {
       sendSubscribe([target])
-      // B2: geometry BEFORE the first frame is requested.
-      const g = geomRef.current ?? ptyGeometry(boxRef.current)
-      geomRef.current = g
-      sendResize(target, g.cols, g.rows)
-      // SPEC §3: declare what we RENDER. The server decides the real mode.
+      // NO `resize` HERE. This is the line the owner's complaint was about:
+      // sending geometry on attach declared a size for a pane he was working
+      // in, and herdr applied it to everyone. We declare only what we RENDER
+      // and let the server attach at the pane's own size.
       declareViewport('live', { [target]: 'live' })
     }
     start()
@@ -309,7 +350,7 @@ function LiveTerminalImpl({ target, fontSize, onRenderer, onHealth }: LiveTermin
     const dog = startWatchdog(target, {
       term: () => termRef.current,
       host: () => hostRef.current,
-      fontSize: () => localFont,
+      fontSize: () => termRef.current?.options.fontSize ?? DEFAULT_FONT_SIZE,
       declared: () => geomRef.current,
       box: () => boxRef.current,
       bytesSeen: () => bytesSeenRef.current,
@@ -334,7 +375,7 @@ function LiveTerminalImpl({ target, fontSize, onRenderer, onHealth }: LiveTermin
       dog.dispose()
       onHealth?.(null)
     }
-  }, [target, ready, localFont, pushGeometry, onHealth])
+  }, [target, ready, fontStep, pushGeometry, onHealth])
 
   /**
    * Diagnostic hooks, in the same spirit as __herdrStats / __herdrEcho: SPEC
@@ -394,7 +435,11 @@ function LiveTerminalImpl({ target, fontSize, onRenderer, onHealth }: LiveTermin
     })
   }, [target, ready])
 
-  return <div className="term-host" ref={hostRef} />
+  return (
+    <div className="term-box" ref={boxElRef}>
+      <div className="term-host" ref={hostRef} />
+    </div>
+  )
 }
 
 /**
@@ -404,6 +449,11 @@ function LiveTerminalImpl({ target, fontSize, onRenderer, onHealth }: LiveTermin
  */
 export const LiveTerminal = memo(LiveTerminalImpl)
 LiveTerminal.displayName = 'LiveTerminal'
+
+/** Keep a fitted-plus-user-step font size inside the readable range. */
+function clampFont(size: number): number {
+  return Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, Math.round(size)))
+}
 
 /**
  * Wait for the terminal font, but never block the terminal forever on it — a

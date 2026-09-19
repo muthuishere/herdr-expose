@@ -384,6 +384,33 @@ func (s *Store) resyncLoop(ctx context.Context, w *sessionWorker) {
 	}
 }
 
+// ResyncAll asks every connected session for a fresh snapshot.
+//
+// It exists because herdr's agent-status event is NOT globally subscribable:
+// `events.subscribe [{"type":"pane.agent_status_changed"}]` is rejected with
+// `missing field pane_id` on 0.9.0, so an agent going from working back to idle
+// produces no event we are listening for. Without a nudge the tree keeps
+// showing `working` until something structural happens to fire `pane.updated`
+// — a badge that lies about what an agent is doing, which is most of the reason
+// to look at this product at all.
+//
+// It is a `session.snapshot`, which is read-only: measured on 0.9.0, it moves
+// no pane's rows, scroll or focus.
+func (s *Store) ResyncAll() {
+	s.mu.Lock()
+	workers := make([]*sessionWorker, 0, len(s.workers))
+	for _, w := range s.workers {
+		workers = append(workers, w)
+	}
+	s.mu.Unlock()
+	for _, w := range workers {
+		select {
+		case w.resync <- struct{}{}:
+		default: // one is already queued; it will observe the latest state
+		}
+	}
+}
+
 // Tree returns the current immutable tree.
 func (s *Store) Tree() *Tree { return s.cur.Load() }
 

@@ -43,6 +43,7 @@ export type ServerFrameType =
   | 'result'
   | 'pong'
   | 'transcript'
+  | 'geometry'
 
 export interface Envelope<T extends string, D> {
   seq: number
@@ -243,6 +244,7 @@ export type ServerFrame =
   | Envelope<'closed', ClosedData>
   | Envelope<'agent', AgentData>
   | Envelope<'transcript', TranscriptData>
+  | Envelope<'geometry', GeometryData>
   | Envelope<'result', ResultData>
   | Envelope<'pong', PongData>
 
@@ -280,6 +282,26 @@ export interface ResizeData {
   target: PaneId
   cols: number
   rows: number
+  /**
+   * "Give this pane its geometry back": attach with no --cols/--rows so herdr
+   * uses the pane's own size. This is the DEFAULT for a live attach; `match` is
+   * how a client undoes an explicit fit without having to guess a size.
+   */
+  match?: boolean
+}
+
+/**
+ * The size a live stream is really attached at, straight from herdr.
+ *
+ * `source: 'pane'` means we passed NO geometry, so this is the pane's own size
+ * and nothing of the owner's moved. `source: 'client'` means somebody
+ * explicitly fitted the pane to this window, which resizes it for everyone.
+ */
+export interface GeometryData {
+  target: PaneId
+  cols: number
+  rows: number
+  source: 'pane' | 'client'
 }
 
 export const MIN_COLS = 20

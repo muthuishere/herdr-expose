@@ -128,16 +128,70 @@ type Agent struct {
 
 // Snapshot is the whole session tree, from session.snapshot.
 type Snapshot struct {
-	Version          string            `json:"version"`
-	Protocol         int               `json:"protocol"`
-	FocusedWorkspace string            `json:"focused_workspace_id"`
-	FocusedTabID     string            `json:"focused_tab_id"`
-	FocusedPaneID    string            `json:"focused_pane_id"`
-	Workspaces       []Workspace       `json:"workspaces"`
-	Tabs             []Tab             `json:"tabs"`
-	Panes            []Pane            `json:"panes"`
-	Layouts          []json.RawMessage `json:"layouts"`
-	Agents           []Agent           `json:"agents"`
+	Version          string      `json:"version"`
+	Protocol         int         `json:"protocol"`
+	FocusedWorkspace string      `json:"focused_workspace_id"`
+	FocusedTabID     string      `json:"focused_tab_id"`
+	FocusedPaneID    string      `json:"focused_pane_id"`
+	Workspaces       []Workspace `json:"workspaces"`
+	Tabs             []Tab       `json:"tabs"`
+	Panes            []Pane      `json:"panes"`
+	Layouts          []Layout    `json:"layouts"`
+	Agents           []Agent     `json:"agents"`
+}
+
+// Rect is a cell rectangle in herdr's own layout.
+type Rect struct {
+	X      int `json:"x"`
+	Y      int `json:"y"`
+	Width  int `json:"width"`
+	Height int `json:"height"`
+}
+
+// LayoutPane is one pane's rectangle inside a tab's layout.
+type LayoutPane struct {
+	PaneID  string `json:"pane_id"`
+	Focused bool   `json:"focused"`
+	Rect    Rect   `json:"rect"`
+}
+
+// Layout is one tab's geometry. It is the ONLY place herdr reports a pane's
+// WIDTH in cells (`pane list` carries rows, as scroll.viewport_rows, but no
+// cols), so it is what lets us tell a client the size a pane already is
+// instead of imposing the browser window's size on it.
+type Layout struct {
+	WorkspaceID string       `json:"workspace_id"`
+	TabID       string       `json:"tab_id"`
+	Area        Rect         `json:"area"`
+	Panes       []LayoutPane `json:"panes"`
+	Zoomed      bool         `json:"zoomed"`
+}
+
+// PaneSize is the size herdr says a pane currently is: rows from the pane's own
+// scroll report (authoritative — it tracks the PTY, verified moving 40 -> 60
+// when an external controller resized it), cols from the tab layout.
+//
+// It is advisory, and the client is told so: the exact attached size arrives in
+// a `geometry` frame once a stream is running, because that number comes from
+// herdr itself rather than from us adding two sources together.
+func (s *Snapshot) PaneSize(paneID string) (cols, rows int) {
+	for i := range s.Layouts {
+		for j := range s.Layouts[i].Panes {
+			if s.Layouts[i].Panes[j].PaneID == paneID {
+				cols = s.Layouts[i].Panes[j].Rect.Width
+				break
+			}
+		}
+	}
+	for i := range s.Panes {
+		if s.Panes[i].PaneID == paneID {
+			if sc := s.Panes[i].Scroll; sc != nil {
+				rows = sc.ViewportRows
+			}
+			break
+		}
+	}
+	return cols, rows
 }
 
 type sessionSnapshotResult struct {

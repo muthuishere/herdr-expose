@@ -34,9 +34,17 @@ type PaneView struct {
 	Agent      *AgentView `json:"agent,omitempty"`
 	Mode       string     `json:"mode,omitempty"`
 	Dead       bool       `json:"dead,omitempty"`
-	Cols       int        `json:"cols,omitempty"`
-	Rows       int        `json:"rows,omitempty"`
-	Focused    bool       `json:"focused"`
+	// Cols/Rows are THE PANE'S OWN SIZE as herdr reports it, not the size this
+	// browser would like it to be.
+	//
+	// They used to carry our own requested geometry, which made the tree agree
+	// with us about a number we had no business choosing. A client that wants
+	// to show a terminal renders at THESE, scaled to whatever box it has; only
+	// an explicit, confirmed "fit to my window" sends a `resize`, and only that
+	// changes what the owner sees.
+	Cols    int  `json:"cols,omitempty"`
+	Rows    int  `json:"rows,omitempty"`
+	Focused bool `json:"focused"`
 }
 
 // TabView groups panes.
@@ -163,7 +171,8 @@ func buildWorkspaces(session string, snap *upstream.Snapshot, t *core.Tree, sess
 	panesByTab := map[string][]PaneView{}
 	for i := range snap.Panes {
 		p := &snap.Panes[i]
-		panesByTab[p.TabID] = append(panesByTab[p.TabID], paneView(session, p, t, sess))
+		cols, rows := snap.PaneSize(p.PaneID)
+		panesByTab[p.TabID] = append(panesByTab[p.TabID], paneView(session, p, cols, rows, t, sess))
 	}
 	tabsByWorkspace := map[string][]TabView{}
 	for i := range snap.Tabs {
@@ -194,7 +203,7 @@ func nonNilPanes(p []PaneView) []PaneView {
 	return p
 }
 
-func paneView(session string, p *upstream.Pane, t *core.Tree, sess *core.Session) PaneView {
+func paneView(session string, p *upstream.Pane, cols, rows int, t *core.Tree, sess *core.Session) PaneView {
 	target := core.JoinTarget(session, p.PaneID)
 	// Precedence matters: an explicit `herdr pane rename` must beat a terminal
 	// title, because a title is whatever the shell last wrote to OSC 0/2 and
@@ -215,11 +224,17 @@ func paneView(session string, p *upstream.Pane, t *core.Tree, sess *core.Session
 	if title == "" {
 		title = p.PaneID
 	}
-	g := sess.Geometry(target)
 	pv := PaneView{
 		ID: target, TerminalID: p.TerminalID, Title: title,
 		Cwd: p.ForegroundCwd, Focused: p.Focused,
-		Cols: g.Cols, Rows: g.Rows,
+		Cols: cols, Rows: rows,
+	}
+	// A stream that is actually attached knows better than the snapshot does:
+	// herdr stamps every frame with the size it is rendering at, and for a
+	// pane-matched attach that IS the pane's size, measured rather than
+	// assembled from two different fields.
+	if a := sess.AttachedGeometry(target); a.Valid() {
+		pv.Cols, pv.Rows = a.Cols, a.Rows
 	}
 	if pv.Cwd == "" {
 		pv.Cwd = p.Cwd

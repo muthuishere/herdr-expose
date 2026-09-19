@@ -115,3 +115,39 @@ export function ptyGeometry(box: { width: number; height: number }): Geometry {
 export function sameGeometry(a: Geometry | null, b: Geometry): boolean {
   return !!a && a.cols === b.cols && a.rows === b.rows
 }
+
+/**
+ * SCALE TO THE PANE, DO NOT RESIZE THE PANE.
+ *
+ * The pane already has a size — the owner's size. Rather than telling herdr to
+ * make it ours (which changes it on their laptop, mid-keystroke), we keep the
+ * grid at `cols x rows` and pick the largest font size at which that grid fits
+ * the box we have. On a phone that font is small; a small terminal is a
+ * cosmetic problem, and reflowing somebody's live agent is not.
+ *
+ * Floored at MIN_FONT_SIZE and capped at MAX_FONT_SIZE: past the floor the grid
+ * simply overflows and `.term-wrap` scrolls, which is honest, whereas a 2px
+ * font is a blank rectangle that looks like a bug.
+ */
+export const MIN_FONT_SIZE = 5
+export const MAX_FONT_SIZE = 22
+
+export function fontSizeToFit(
+  box: { width: number; height: number },
+  cols: number,
+  rows: number,
+): number {
+  if (box.width < 2 || box.height < 2 || cols < 1 || rows < 1) return DEFAULT_FONT_SIZE
+  let best = MIN_FONT_SIZE
+  // Integer sizes only: xterm rounds cell metrics, so a fractional size buys
+  // nothing and costs a re-measure.
+  for (let size = MAX_FONT_SIZE; size >= MIN_FONT_SIZE; size--) {
+    const w = measureCharWidth(size) * cols
+    const h = Math.ceil(size * CELL_HEIGHT_FALLBACK_RATIO) * rows
+    if (w <= box.width && h <= box.height) {
+      best = size
+      break
+    }
+  }
+  return best
+}

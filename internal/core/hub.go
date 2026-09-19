@@ -62,7 +62,40 @@ func (h *Hub) Store() *Store { return h.store }
 // the cheaper one pay the other's rate.
 func (h *Hub) Run(ctx context.Context) {
 	go h.transcript.run(ctx)
+	go h.refreshTree(ctx)
 	h.summary.run(ctx)
+}
+
+// TreeRefreshInterval is how often the tree is re-read while somebody is
+// actually looking. See refreshTree.
+const TreeRefreshInterval = 1500 * time.Millisecond
+
+// refreshTree keeps the tree honest about agent state.
+//
+// Herdr pushes `pane.created/updated/closed/...` but NOT agent status: on 0.9.0
+// `events.subscribe [{"type":"pane.agent_status_changed"}]` is refused with
+// `missing field pane_id`, so there is no session-wide push for the one field
+// the whole UI is about. An agent that finished therefore kept its `working`
+// badge until some unrelated structural event happened to fire a resync.
+//
+// So we poll — but ONLY while a client is connected. With nobody looking this
+// loop costs one atomic load every 1.5s and touches no socket, which matters:
+// this daemon sits in front of a machine full of real sessions and must not
+// generate traffic for an empty room. The call itself is `session.snapshot`,
+// which is read-only.
+func (h *Hub) refreshTree(ctx context.Context) {
+	t := time.NewTicker(TreeRefreshInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		if h.clients.Load() > 0 {
+			h.store.ResyncAll()
+		}
+	}
 }
 
 // Upstream supervision (SPEC B7: supervision is a layer, not a hope).
@@ -98,10 +131,18 @@ type Session struct {
 	seq  seqCounter
 	Seen *SeenSet
 
-	mu      sync.Mutex
-	geom    map[string]Geometry
-	modes   map[string]Mode
-	streams map[string]*liveStream
+	mu    sync.Mutex
+	geom  map[string]Geometry
+	modes map[string]Mode
+	// explicit records the targets whose geometry the USER asked for, by
+	// resizing deliberately. Everything else attaches at the PANE'S OWN size
+	// and is never imposed on (see startStream).
+	explicit map[string]bool
+	// attached is the geometry a target's stream is actually running at, as
+	// herdr reported it in the first frame. For a pane-matched attach this is
+	// the pane's real size, learnt without touching it.
+	attached map[string]Geometry
+	streams  map[string]*liveStream
 	// lastLive is the most recent target this connection asked to render live.
 	// It is what a `command` frame with no explicit session defaults to.
 	lastLive string
@@ -141,14 +182,16 @@ type liveStream struct {
 func (h *Hub) NewSession(ctx context.Context, sink ClientSink) *Session {
 	h.clients.Add(1)
 	s := &Session{
-		hub:     h,
-		sink:    sink,
-		log:     h.log,
-		ctx:     ctx,
-		Seen:    NewSeenSet(),
-		geom:    map[string]Geometry{},
-		modes:   map[string]Mode{},
-		streams: map[string]*liveStream{},
+		hub:      h,
+		sink:     sink,
+		log:      h.log,
+		ctx:      ctx,
+		Seen:     NewSeenSet(),
+		geom:     map[string]Geometry{},
+		modes:    map[string]Mode{},
+		explicit: map[string]bool{},
+		attached: map[string]Geometry{},
+		streams:  map[string]*liveStream{},
 	}
 	s.co = newCoalescer(sink)
 	s.co.started = true
@@ -156,8 +199,15 @@ func (h *Hub) NewSession(ctx context.Context, sink ClientSink) *Session {
 	return s
 }
 
-// SetGeometry records this connection's size for a target and resizes an
-// already-running stream. Geometry must be set before the first LIVE frame.
+// SetGeometry is the EXPLICIT resize path: the user has asked us to fit this
+// pane to their browser window, which really does resize it for everyone
+// looking at it, including the owner's laptop.
+//
+// It is no longer on the open-a-pane path. LOOKING MUST NOT TOUCH: a viewer
+// that has not asked for a size gets startStream's pane-matched attach, which
+// passes no --cols/--rows at all and therefore cannot move anything. Only a
+// call to this function marks a target `explicit`, and only an explicit target
+// ever has a geometry imposed on it.
 func (s *Session) SetGeometry(target string, cols, rows int) {
 	// Note what this does NOT do: refuse a resize because the target is
 	// currently a transcript.
@@ -174,12 +224,14 @@ func (s *Session) SetGeometry(target string, cols, rows int) {
 	g := Geometry{Cols: cols, Rows: rows}.Clamp()
 	s.mu.Lock()
 	prev := s.geom[target]
+	wasExplicit := s.explicit[target]
 	s.geom[target] = g
+	s.explicit[target] = true
 	ls := s.streams[target]
 	mode := s.modes[target]
 	s.mu.Unlock()
 
-	if ls == nil || prev == g {
+	if ls == nil || (wasExplicit && prev == g) {
 		return
 	}
 	if ls.mode == upstream.ModeControl {
@@ -204,6 +256,42 @@ func (s *Session) SetGeometry(target string, cols, rows int) {
 			s.log.Warn("resize restart failed", "target", target, "err", err)
 		}
 	}
+}
+
+// MatchPane gives a target's geometry BACK to the pane: the connection stops
+// imposing a size and the stream is restarted with no --cols/--rows, so herdr
+// attaches at whatever the pane is and tells us what that is.
+//
+// It is how a client undoes an explicit fit, and how every LIVE attach starts.
+func (s *Session) MatchPane(target string) {
+	s.mu.Lock()
+	wasExplicit := s.explicit[target]
+	delete(s.explicit, target)
+	delete(s.geom, target)
+	ls := s.streams[target]
+	mode := s.modes[target]
+	s.mu.Unlock()
+	if !wasExplicit || ls == nil || mode != ModeLive {
+		return
+	}
+	s.stopStream(target)
+	s.mu.Lock()
+	closed := s.closed
+	mode = s.modes[target]
+	s.mu.Unlock()
+	if !closed && mode == ModeLive {
+		if _, err := s.startStream(target, upstream.ModeObserve); err != nil {
+			s.log.Warn("match-pane restart failed", "target", target, "err", err)
+		}
+	}
+}
+
+// AttachedGeometry is the size a target's stream is really running at, as herdr
+// reported it. Zero until the first frame has arrived.
+func (s *Session) AttachedGeometry(target string) Geometry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.attached[target]
 }
 
 // Geometry returns the connection's geometry for a target.
@@ -253,10 +341,6 @@ func (s *Session) SetViewport(decl map[string]string) {
 	s.mu.Lock()
 	old := s.modes
 	s.modes = want
-	geoms := make(map[string]Geometry, len(s.geom))
-	for k, v := range s.geom {
-		geoms[k] = v
-	}
 	s.mu.Unlock()
 
 	for target, mode := range want {
@@ -266,14 +350,13 @@ func (s *Session) SetViewport(decl map[string]string) {
 		switch mode {
 		case ModeLive:
 			s.hub.transcript.unsubscribe(target, s)
-			if !geoms[target].Valid() {
-				s.sink.SendJSON("error", map[string]any{
-					"target": target,
-					"code":   "no_geometry",
-					"detail": "send a resize message for this target before requesting live",
-				})
-				continue
-			}
+			// NO geometry requirement any more, and that reversal is the fix.
+			//
+			// B2 said "a terminal without a geometry message does not work", so
+			// every client sent `resize` before `viewport: live` — which meant
+			// merely OPENING a pane declared a size for somebody else's
+			// terminal. A live attach now defaults to the pane's own size, and
+			// a client that wants a different one has to ask for it.
 			s.hub.summary.unsubscribe(target, s)
 			// lastLive is only updated once the target actually attached: it
 			// is what a `command` with no explicit session defaults to, and a
@@ -353,6 +436,12 @@ func (s *Session) Metrics() *Metrics { return s.hub.metrics }
 // Herdr allows one controller and unlimited observers; if the upgrade fails the
 // caller gets the upstream error and the observe stream keeps running, which is
 // exactly the one-controller/many-observer semantics we want to preserve.
+//
+// TAKING CONTROL MUST NOT ALSO RESIZE. `terminal session control --takeover` is
+// the one call in this program that really does change the owner's pane, so the
+// geometry it attaches at matters more here than anywhere else. startStream
+// reuses the size herdr already told us the pane is (Session.attached), so the
+// upgrade is control-only: same cols, same rows, nothing to SIGWINCH.
 func (s *Session) ensureControl(target string) (*liveStream, error) {
 	s.mu.Lock()
 	ls := s.streams[target]
@@ -369,7 +458,25 @@ func (s *Session) ensureControl(target string) (*liveStream, error) {
 	return s.startStream(target, upstream.ModeControl)
 }
 
-// Scroll moves a target's viewport upstream.
+// ErrObserverScroll is returned when a connection that is only WATCHING a pane
+// tries to scroll it upstream.
+var ErrObserverScroll = errors.New(
+	"scrolling a pane you are only watching would move the owner's own scrollback: " +
+		"scroll your local buffer instead, or take control of the pane first")
+
+// Scroll moves a target's viewport upstream. CONTROL ONLY.
+//
+// It used to fall back to `pane.scroll` for an observer, and that was the
+// literal complaint — "you are scrolling actual herdr terminal". `pane.scroll`
+// sets the pane's own `scroll.offset_from_bottom` for EVERYONE looking at it;
+// measured on 0.9.0, `{"pane_id":"w1:p2","offset_from_bottom":20}` moves it and
+// it stays moved. (The old call also passed `delta`, which 0.9.0 rejects with
+// `missing field offset_from_bottom`, so it had never worked — it was a
+// mutation waiting to be fixed into existence.)
+//
+// A viewer scrolls their OWN buffer; the client has 5000 lines of scrollback
+// for exactly that. Only a controller — someone who has explicitly taken the
+// pane — may move the shared viewport.
 func (s *Session) Scroll(target string, delta int) error {
 	s.mu.Lock()
 	ls := s.streams[target]
@@ -378,12 +485,7 @@ func (s *Session) Scroll(target string, delta int) error {
 		return nil
 	}
 	if ls.mode != upstream.ModeControl {
-		_, c, id, err := s.hub.store.Resolve(target)
-		if err != nil {
-			return err
-		}
-		_, err = c.Call(s.ctx, "pane.scroll", map[string]any{"pane_id": id, "delta": delta})
-		return err
+		return ErrObserverScroll
 	}
 	return ls.stream.Scroll(delta)
 }
@@ -427,7 +529,19 @@ func (s *Session) startStream(target string, mode upstream.TerminalMode) (*liveS
 		s.mu.Unlock()
 		return ls, nil
 	}
-	g := s.geom[target].Clamp()
+	// THE GEOMETRY DECISION, and it is a one-liner on purpose.
+	//
+	// Unless the user EXPLICITLY asked us to fit this pane to their window, we
+	// pass no geometry at all. Verified on herdr 0.9.0:
+	//   - `terminal session observe <pane>`            -> attaches at the pane's
+	//     own size, reports it as the first frame's width/height, and leaves the
+	//     PTY alone (tput 120x40 before, during and after).
+	//   - `terminal session control <pane> --cols 100 --rows 60 --takeover`
+	//     -> PERMANENTLY resizes the pane (tput 120x40 -> 100x60,
+	//     scroll.viewport_rows 40 -> 60, and it stays that way after we detach).
+	// So a zero geometry is not a missing value; it is the only value that
+	// cannot disturb the owner's terminal.
+	g := s.geometryFor(target)
 	hdr := HeaderLenFor(target)
 	ls := &liveStream{mode: mode, hdrLen: hdr, target: target, startedAt: time.Now()}
 	// Fresh attachment (or a restart after a takeover): this connection has no
@@ -450,6 +564,23 @@ func (s *Session) startStream(target string, mode upstream.TerminalMode) (*liveS
 		return nil, err
 	}
 	return ls, nil
+}
+
+// geometryFor is the geometry a stream for `target` should attach at. It must
+// be called with s.mu held.
+//
+// Zero means "pass no --cols/--rows at all", and that is the default. See the
+// block comment in startStream for the measurements behind it.
+func (s *Session) geometryFor(target string) Geometry {
+	if s.explicit[target] {
+		return s.geom[target].Clamp()
+	}
+	if a := s.attached[target]; a.Valid() {
+		// A control upgrade on a pane we are already observing REUSES the size
+		// herdr told us the pane is, so taking control is not also a resize.
+		return a
+	}
+	return Geometry{}
 }
 
 func (s *Session) stopStream(target string) {
@@ -540,6 +671,26 @@ func (s *Session) Close() {
 	s.co.close()
 }
 
+// noteAttached records the size a stream is really running at and tells the
+// client, once per change. The `geometry` frame carries `source`, so the UI can
+// state truthfully whether the pane was matched or imposed upon.
+func (s *Session) noteAttached(target string, g Geometry) {
+	s.mu.Lock()
+	if s.closed || s.attached[target] == g {
+		s.mu.Unlock()
+		return
+	}
+	s.attached[target] = g
+	source := GeomPane
+	if s.explicit[target] {
+		source = GeomClient
+	}
+	s.mu.Unlock()
+	s.sink.SendJSON("geometry", map[string]any{
+		"target": target, "cols": g.Cols, "rows": g.Rows, "source": source,
+	})
+}
+
 // clearRestarts forgets a target's restart history after a successful frame.
 func (s *Session) clearRestarts(target string) {
 	s.mu.Lock()
@@ -560,6 +711,13 @@ type streamHandler struct {
 
 func (h *streamHandler) OnFrame(f upstream.TerminalFrame) {
 	t0 := time.Now()
+	// Herdr stamps every frame with the size it is rendering at. When we
+	// attached WITHOUT --cols/--rows that number is the pane's OWN size, learnt
+	// without having touched it — which is exactly what the client needs in
+	// order to scale its rendering to the pane instead of the other way round.
+	if f.Width > 0 && f.Height > 0 {
+		h.sess.noteAttached(h.target, Geometry{Cols: f.Width, Rows: f.Height})
+	}
 	// A stream that has stayed up counts as recovered: forget the backoff
 	// history so a target that dies again hours later restarts promptly. The
 	// check is a wall-clock compare and an atomic load, so it costs nothing on

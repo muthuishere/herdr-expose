@@ -73,6 +73,18 @@ func (g Geometry) Clamp() Geometry {
 // Valid reports whether geometry was ever set.
 func (g Geometry) Valid() bool { return g.Cols > 0 && g.Rows > 0 }
 
+// GeometrySource says where a LIVE stream's size came from. It rides the
+// `geometry` control frame so the UI can tell the user the truth about whether
+// anything of theirs was touched.
+const (
+	// GeomPane means we attached with NO --cols/--rows, so herdr used the
+	// pane's own size and told us what it was. Nothing upstream moved.
+	GeomPane = "pane"
+	// GeomClient means the user explicitly asked us to fit the pane to this
+	// browser window, which DOES resize it for everyone looking at it.
+	GeomClient = "client"
+)
+
 // Output-plane tuning.
 const (
 	// MaxWriteBytes is the hard flush size for one coalesced socket write.

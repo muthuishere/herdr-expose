@@ -30,7 +30,7 @@
  */
 
 import type { Terminal } from '@xterm/xterm'
-import { cellMetrics, fitGeometry, ptyGeometry, type CellMetrics, type Geometry } from './fit'
+import { cellMetrics, fitGeometry, type CellMetrics, type Geometry } from './fit'
 import { countHealth, recordHealth } from '../net/debugStats'
 
 /** How often we re-check while the terminal is visible and live. */
@@ -50,17 +50,19 @@ const SETTLE_MS = 1200
 export type HealthReason =
   | 'geometry-drift'
   | 'cell-metric-drift'
-  | 'container-mismatch'
   | 'void'
   | 'wrap-damage'
 
 export interface HealthReading {
   reasons: HealthReason[]
-  /** What the container can actually fit right now. */
+  /** What the container could fit at the current font — diagnostic only. */
   fit: Geometry
   /** What the emulator currently is. */
   actual: Geometry
-  /** What we last told the server. */
+  /**
+   * What the emulator SHOULD be: the pane's own cols x rows, as the server
+   * reported them. This is the yardstick now, and it is not the container.
+   */
   declared: Geometry | null
   metrics: CellMetrics
 }
@@ -70,7 +72,11 @@ export interface HealthHooks {
   host: () => HTMLElement | null
   /** Local display font size; PTY geometry never uses it (B8). */
   fontSize: () => number
-  /** The last PTY geometry we sent the server, or null. */
+  /**
+   * The grid we are SUPPOSED to be rendering: the pane's own size, as the
+   * server reported it after attaching without geometry. Null until the first
+   * `geometry` frame.
+   */
   declared: () => Geometry | null
   /** Measured container box. */
   box: () => { width: number; height: number }
@@ -118,17 +124,20 @@ export function inspect(h: HealthHooks): HealthReading | null {
   const declared = h.declared()
   const reasons: HealthReason[] = []
 
-  // 1 + 5. The emulator disagrees with what the container can fit. This covers
-  // the container-mismatch case too: the box is the ResizeObserver's own
-  // measurement, so a container that resized without a refit lands here.
-  if (fit.cols !== actual.cols || fit.rows !== actual.rows) reasons.push('geometry-drift')
-
-  // The PTY geometry we told the server disagrees with what this container now
-  // implies. Reported separately because the fix is a `resize`, not a local
-  // term.resize().
-  const pty = ptyGeometry(box)
-  if (declared && (declared.cols !== pty.cols || declared.rows !== pty.rows))
-    reasons.push('container-mismatch')
+  // 1. THE EMULATOR DISAGREES WITH THE PANE.
+  //
+  // The yardstick used to be "what does this container fit", and the repair was
+  // to resize the pane to match the browser — which is the bug the owner felt
+  // as his terminal moving under his hands. The pane has its own size; we
+  // render AT it and scale the font. So drift is the emulator disagreeing with
+  // the PANE, and a container that no longer fits is a font-size question, not
+  // a reason to touch anybody's terminal.
+  //
+  // Before the first `geometry` frame there is no pane size to compare to, so
+  // the local fit stands in — that window is a few hundred milliseconds at
+  // attach and nothing upstream is reachable from it.
+  const expect = declared ?? fit
+  if (expect.cols !== actual.cols || expect.rows !== actual.rows) reasons.push('geometry-drift')
 
   // 2. The cell box moved since the baseline: a webfont finally loaded, or
   // zoom/DPR/rotation changed. Every column is now computed from a stale
