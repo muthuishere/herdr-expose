@@ -22,6 +22,20 @@ type CloudflareOptions struct {
 	TunnelName string // named tunnel to create or reuse
 	Bin        string // optional cloudflared path override
 	StateDir   string // where credentials + config.yml are written (0700)
+
+	// Comment is the DNS record comment used both to TAG a record we create
+	// and to decide whether we are allowed to delete one. Empty means the
+	// permanent tag ("herdr-expose"); a share passes ShareDNSComment so that
+	// its teardown can never touch the permanent record.
+	Comment string
+}
+
+// comment is the DNS tag for this options set.
+func (o CloudflareOptions) comment() string {
+	if c := strings.TrimSpace(o.Comment); c != "" {
+		return c
+	}
+	return dnsComment
 }
 
 func (o CloudflareOptions) service() string {
@@ -193,7 +207,7 @@ func provisionCloudflare(ctx context.Context, opts CloudflareOptions, logf func(
 		logf("cloudflare: updating %s %s -> %s in zone %s", existingRec.Type, opts.Domain, target, zone.Name)
 	}
 	if existingRec == nil || existingRec.Content != target || !existingRec.Proxied {
-		if err := api.upsertCNAME(ctx, zone.ID, opts.Domain, target, existingRec); err != nil {
+		if err := api.upsertCNAME(ctx, zone.ID, opts.Domain, target, opts.comment(), existingRec); err != nil {
 			return rollback(err)
 		}
 	}
@@ -372,7 +386,7 @@ func PlanCloudflare(ctx context.Context, opts CloudflareOptions) ([]PlanStep, er
 	case err != nil:
 		return nil, err
 	case rec == nil:
-		add("create", "CNAME %s -> %s, proxied, comment %q", opts.Domain, target, dnsComment)
+		add("create", "CNAME %s -> %s, proxied, comment %q", opts.Domain, target, opts.comment())
 	case rec.Type == "CNAME" && rec.Content == target && rec.Proxied:
 		add("ok", "CNAME %s already correct", opts.Domain)
 	default:
@@ -412,9 +426,12 @@ func DestroyCloudflare(ctx context.Context, opts CloudflareOptions, logf func(st
 	switch {
 	case rec == nil:
 		logf("cloudflare: no DNS record for %s", opts.Domain)
-	case rec.Comment != dnsComment:
-		// Never delete a record we did not create.
-		logf("cloudflare: leaving %s alone — it was not created by herdr-expose", opts.Domain)
+	case rec.Comment != opts.comment():
+		// Never delete a record we did not create, and never delete one
+		// created under a DIFFERENT tag: this is what keeps a share teardown
+		// away from the permanent deployment's hostname.
+		logf("cloudflare: leaving %s alone — it is tagged %q, not %q",
+			opts.Domain, rec.Comment, opts.comment())
 	default:
 		logf("cloudflare: deleting CNAME %s", opts.Domain)
 		if err := api.deleteRecord(ctx, zone.ID, rec.ID); err != nil {
@@ -431,8 +448,31 @@ func DestroyCloudflare(ctx context.Context, opts CloudflareOptions, logf func(st
 		logf("cloudflare: no tunnel named %q", name)
 		return nil
 	}
-	if err := api.deleteTunnel(ctx, account, tun.ID); err != nil {
-		return err
+	// Cloudflare refuses to delete a tunnel while an edge connection is still
+	// registered, and cloudflared takes a few seconds to deregister after it
+	// is killed. Retry rather than leave an orphan tunnel behind: a share that
+	// deletes its DNS but keeps its tunnel is exactly the half-teardown this
+	// is supposed to prevent.
+	// Measured: cloudflared's connections are marked inactive by the edge up to
+	// ~60s after the process goes away, and the delete is refused until then.
+	// The window is therefore generous on purpose — giving up early is how a
+	// share ends up with its DNS deleted and its tunnel orphaned.
+	var delErr error
+	for attempt := 0; attempt < 20; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(5 * time.Second):
+			}
+		}
+		if delErr = api.deleteTunnel(ctx, account, tun.ID); delErr == nil {
+			break
+		}
+		logf("cloudflare: tunnel %q not deletable yet (%v); retrying", name, delErr)
+	}
+	if delErr != nil {
+		return delErr
 	}
 	logf("cloudflare: deleted tunnel %q (%s)", name, tun.ID)
 	if dir, err := cloudflareStateDir(opts.StateDir); err == nil {
@@ -499,4 +539,90 @@ func minimalEnv() []string {
 		env = append(env, "PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin")
 	}
 	return env
+}
+
+// CheckZoneAccess is the share preflight (G4): prove the token is usable and
+// that the domain's zone is reachable by it BEFORE anything is created.
+//
+// A share that discovers a missing zone halfway through provisioning has
+// already minted a tunnel, so failing early is not politeness, it is what stops
+// orphaned Cloudflare resources. It returns the zone name it matched and
+// whether a record already exists on that exact hostname.
+func CheckZoneAccess(ctx context.Context, domain string) (zoneName string, existing RecordState, err error) {
+	domain = strings.TrimSpace(domain)
+	if domain == "" {
+		return "", existing, fmt.Errorf("--domain is required")
+	}
+	if !strings.Contains(domain, ".") {
+		return "", existing, fmt.Errorf("--domain %q is not a hostname", domain)
+	}
+	red := &redactor{}
+	api, err := newCFAPI(red)
+	if err != nil {
+		return "", existing, err
+	}
+	if err := api.verifyToken(ctx); err != nil {
+		return "", existing, err
+	}
+	if _, err := api.accountID(ctx); err != nil {
+		return "", existing, err
+	}
+	zone, err := api.findZone(ctx, domain)
+	if err != nil {
+		return "", existing, fmt.Errorf("cannot use %s: %w", domain, err)
+	}
+	rec, err := api.findRecord(ctx, zone.ID, domain)
+	if err != nil {
+		return zone.Name, existing, err
+	}
+	if rec != nil {
+		existing = RecordState{Exists: true, Comment: rec.Comment, Content: rec.Content}
+	}
+	return zone.Name, existing, nil
+}
+
+// RecordState is what the Cloudflare API says about one hostname right now.
+type RecordState struct {
+	Exists  bool   `json:"exists"`
+	Comment string `json:"comment,omitempty"`
+	Content string `json:"content,omitempty"`
+}
+
+// VerifyGone re-reads Cloudflare and reports whether the DNS record and the
+// named tunnel are ACTUALLY absent.
+//
+// This exists because a kill switch that reports what it attempted is worse
+// than none: teardown must be confirmed against the source of truth, not
+// inferred from an API call that returned 200. `dnsGone` is false only when a
+// record with OUR comment tag still exists — a record someone else owns on the
+// same name was never ours to remove and is reported separately.
+func VerifyGone(ctx context.Context, opts CloudflareOptions) (dnsGone, tunnelGone bool, rec RecordState, err error) {
+	red := &redactor{}
+	api, err := newCFAPI(red)
+	if err != nil {
+		return false, false, rec, err
+	}
+	account, err := api.accountID(ctx)
+	if err != nil {
+		return false, false, rec, err
+	}
+	zone, err := api.findZone(ctx, opts.Domain)
+	if err != nil {
+		return false, false, rec, err
+	}
+	found, err := api.findRecord(ctx, zone.ID, opts.Domain)
+	if err != nil {
+		return false, false, rec, err
+	}
+	if found != nil {
+		rec = RecordState{Exists: true, Comment: found.Comment, Content: found.Content}
+	}
+	dnsGone = found == nil || found.Comment != opts.comment()
+
+	tun, err := api.findTunnel(ctx, account, opts.tunnelName())
+	if err != nil {
+		return dnsGone, false, rec, err
+	}
+	tunnelGone = tun == nil
+	return dnsGone, tunnelGone, rec, nil
 }

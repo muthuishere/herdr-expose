@@ -34,6 +34,10 @@ type Options struct {
 	// config.yml are written. Empty => $HERDR_PLUGIN_STATE_DIR, else
 	// ~/.local/state/herdr-expose.
 	StateDir string
+	// DNSComment overrides the DNS record comment tag. Empty means the
+	// permanent tag; a share passes expose.ShareDNSComment so that its
+	// ephemeral teardown can never delete the permanent deployment's record.
+	DNSComment string
 	// Logf receives already-scrubbed log lines. Optional.
 	Logf func(format string, args ...any)
 }
@@ -184,6 +188,7 @@ func (m *Manager) build(opts Options) (tunnel, error) {
 			Domain:     opts.Expose.Domain,
 			TunnelName: opts.Expose.TunnelID(),
 			StateDir:   opts.StateDir,
+			Comment:    opts.DNSComment,
 		}, opts.Logf, m.red)
 
 	case config.ProviderNgrok:
@@ -291,12 +296,7 @@ func (m *Manager) Plan(ctx context.Context) ([]PlanStep, error) {
 	if opts.Expose.Provider() != config.ProviderCloudflare {
 		return nil, fmt.Errorf("plan is only implemented for the built-in Cloudflare provider")
 	}
-	return PlanCloudflare(ctx, CloudflareOptions{
-		Port:       opts.Port,
-		Domain:     opts.Expose.Domain,
-		TunnelName: opts.Expose.TunnelID(),
-		StateDir:   opts.StateDir,
-	})
+	return PlanCloudflare(ctx, m.CloudflareOptions())
 }
 
 // Destroy removes the provisioned Cloudflare resources: the DNS record (only
@@ -313,10 +313,21 @@ func (m *Manager) Destroy(ctx context.Context) error {
 	if opts.Expose.Provider() != config.ProviderCloudflare {
 		return fmt.Errorf("destroy is only implemented for the built-in Cloudflare provider")
 	}
-	return DestroyCloudflare(ctx, CloudflareOptions{
+	return DestroyCloudflare(ctx, m.CloudflareOptions(), opts.Logf)
+}
+
+// CloudflareOptions is the provider view of this manager's configuration, so
+// that plan / destroy / verify all resolve the same hostname, tunnel name,
+// state dir and DNS tag BY CONSTRUCTION rather than from a caller's argument.
+func (m *Manager) CloudflareOptions() CloudflareOptions {
+	m.mu.Lock()
+	opts := m.opts
+	m.mu.Unlock()
+	return CloudflareOptions{
 		Port:       opts.Port,
 		Domain:     opts.Expose.Domain,
 		TunnelName: opts.Expose.TunnelID(),
 		StateDir:   opts.StateDir,
-	}, opts.Logf)
+		Comment:    opts.DNSComment,
+	}
 }

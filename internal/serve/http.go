@@ -268,6 +268,9 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 	out["mode"] = s.cfg.Mode()
+	if sc := s.hub.Store().Scope(); sc.Active() {
+		out["scope"] = sc.String()
+	}
 
 	// Auth discovery. A browser CANNOT read the status of a failed WebSocket
 	// handshake — the WebSocket API surfaces no close code when the upgrade is

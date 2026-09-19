@@ -174,11 +174,16 @@ func (s *Session) SetViewport(decl map[string]string) {
 				})
 				continue
 			}
-			s.mu.Lock()
-			s.lastLive = target
-			s.mu.Unlock()
 			s.hub.summary.unsubscribe(target, s)
-			s.startStream(target, upstream.ModeObserve)
+			// lastLive is only updated once the target actually attached: it
+			// is what a `command` with no explicit session defaults to, and a
+			// REFUSED target (out of scope, or gone) must not become this
+			// connection's implicit session.
+			if _, err := s.startStream(target, upstream.ModeObserve); err == nil {
+				s.mu.Lock()
+				s.lastLive = target
+				s.mu.Unlock()
+			}
 		case ModeSummary:
 			s.stopStream(target)
 			s.hub.summary.subscribe(target, s)

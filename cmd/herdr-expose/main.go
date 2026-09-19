@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -38,7 +39,7 @@ func main() {
 	var err error
 	switch os.Args[1] {
 	case "serve":
-		err = cmdServe()
+		err = cmdServe(os.Args[2:])
 	case "daemon":
 		err = cmdDaemon()
 	case "status":
@@ -59,6 +60,10 @@ func main() {
 		err = cmdService(os.Args[2:])
 	case "expose":
 		err = cmdExpose(os.Args[2:])
+	case "share":
+		err = cmdShare(os.Args[2:])
+	case "panic":
+		err = cmdPanic(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Println("herdr-expose", version)
 	case "help", "--help", "-h":
@@ -90,6 +95,14 @@ func usage() {
                         install a supervised unit (launchd / systemd --user)
   expose start|stop|status|plan|destroy
                         tunnel control
+  share --domain X [--session NAME] [--pane TARGET] [--hours N|--days N]
+                        expose ONE herdr session on X, time-boxed, self-destructing
+  share list|extend <id>|revoke <id>|revoke --all
+                        manage shares (every verb takes --json)
+  panic                 revoke every share AND stop the main tunnel
+
+  serve also accepts --only <session> / --only-target <session>/<pane> to pin
+  an instance to one scope; the scope is enforced in the store, not the client.
 `)
 }
 
@@ -143,8 +156,16 @@ func (e exposeAdapter) Status() (string, bool) {
 	return e.mgr.URL(), st.Healthy
 }
 
-func cmdServe() error {
+func cmdServe(args []string) error {
 	log := newLogger()
+
+	// G2: an instance may be pinned to ONE session (or specific panes) at
+	// startup. The scope lives in the store, so an out-of-scope pane is absent
+	// from the tree rather than hidden by the client.
+	scope, err := parseScopeFlags(args)
+	if err != nil {
+		return err
+	}
 
 	store, err := config.Open()
 	if err != nil {
@@ -249,17 +270,36 @@ func cmdServe() error {
 	// one client per session. $HERDR_SOCKET_PATH is just the session we were
 	// launched from, and gets no special treatment beyond an `origin` label.
 	st := core.NewStore(log)
+	st.SetScope(scope)
 	go st.Run(ctx)
 	hub := core.NewHub(st, log)
 	go hub.Run(ctx)
 
-	// In lan/local there is nothing to start — the listener IS the exposure.
-	if cfg.Expose.ShouldAutostart() || res.Remote {
+	// Shares are separate processes with their own ports and state dirs, but the
+	// MAIN daemon owns their crash safety (G5.3 + AMENDMENTS 10): on startup it
+	// reaps any whose deadline passed and respawns any that are still in date
+	// with their ORIGINAL deadline, then sweeps on a timer forever. A share
+	// whose process died must never leave a live DNS record pointing nowhere,
+	// and must never come back with a fresh clock.
+	if !scope.Active() {
 		go func() {
-			if _, err := mgr.Start(ctx); err != nil {
-				log.Warn("exposure did not start", "err", err)
+			restoreShares(log)
+			t := time.NewTicker(time.Minute)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					sweepShares(log)
+				}
 			}
 		}()
+	}
+
+	// In lan/local there is nothing to start — the listener IS the exposure.
+	if cfg.Expose.ShouldAutostart() || res.Remote {
+		go superviseExposure(ctx, mgr, state, log)
 	}
 
 	srv, err := serve.New(serve.Options{
@@ -617,8 +657,17 @@ func cmdExpose(args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
+	state, err := StateDir()
+	if err != nil {
+		return err
+	}
 	switch sub {
 	case "start":
+		// Clear the halt flag first: the running daemon is what actually owns
+		// the tunnel process, and it re-arms within seconds of the flag going.
+		if err := os.Remove(haltFilePath(state)); err == nil {
+			fmt.Println("cleared the exposure halt flag; the daemon re-arms the tunnel within ~5s")
+		}
 		st, err := mgr.Start(ctx)
 		if err != nil {
 			return err
@@ -626,6 +675,16 @@ func cmdExpose(args []string) error {
 		printJSON(st)
 		return nil
 	case "stop":
+		// Raise the halt flag BEFORE killing anything, or the daemon's
+		// supervisor simply restarts cloudflared a second later.
+		if err := os.WriteFile(haltFilePath(state), []byte(time.Now().Format(time.RFC3339)+"\n"), 0o600); err != nil {
+			return err
+		}
+		killStrayCloudflared(filepath.Join(state, "cloudflare", "config.yml"))
+		if !waitForNoCloudflared(filepath.Join(state, "cloudflare", "config.yml"), 20*time.Second) {
+			return errors.New("cloudflared is STILL running for the main tunnel")
+		}
+		fmt.Println("main tunnel stopped (DNS record and tunnel left in place — static domain)")
 		return mgr.Stop()
 	case "status":
 		printJSON(mgr.Status())
@@ -657,4 +716,66 @@ func printQR(url string) {
 		return
 	}
 	fmt.Print(q.ToSmallString(false))
+}
+
+// parseScopeFlags reads `--only` / `--only-target` off a subcommand's args.
+func parseScopeFlags(args []string) (*core.Scope, error) {
+	only := ""
+	var targets []string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--only":
+			if i+1 >= len(args) {
+				return nil, errors.New("--only needs a session name")
+			}
+			i++
+			only = args[i]
+		case "--only-target":
+			if i+1 >= len(args) {
+				return nil, errors.New("--only-target needs <session>/<pane>")
+			}
+			i++
+			targets = append(targets, args[i])
+		}
+	}
+	return core.ParseScope(only, targets)
+}
+
+// superviseExposure owns the main tunnel's up/down state for the life of the
+// daemon, driven by a HALT FLAG FILE in the state dir.
+//
+// The flag exists because `expose stop` and `panic` run in a DIFFERENT process
+// from the daemon that supervises cloudflared: killing the child from outside
+// just makes the supervisor restart it, and an in-process Stop() on a fresh
+// Manager is a no-op that only looks like it worked. The flag is resolved from
+// the state dir by construction, the running daemon is the thing that reads it,
+// and the daemon reports the result — which is the whole lesson of a halt that
+// writes where nothing reads.
+func superviseExposure(ctx context.Context, mgr *expose.Manager, state string, log *slog.Logger) {
+	halt := haltFilePath(state)
+	halted := true // force the first evaluation to act
+	first := true
+	t := time.NewTicker(5 * time.Second)
+	defer t.Stop()
+	for {
+		_, err := os.Stat(halt)
+		present := err == nil
+		switch {
+		case present && (!halted || first):
+			log.Warn("exposure halt flag present; stopping the tunnel", "flag", halt)
+			_ = mgr.Stop()
+			halted = true
+		case !present && (halted || first):
+			if _, err := mgr.Start(ctx); err != nil {
+				log.Warn("exposure did not start", "err", err)
+			}
+			halted = false
+		}
+		first = false
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
 }

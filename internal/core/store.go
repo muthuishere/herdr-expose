@@ -92,6 +92,11 @@ type Store struct {
 
 	reg *upstream.Registry
 
+	// scope, when active, pins this whole instance to ONE Herdr session (and
+	// optionally to specific panes). Out-of-scope sessions are never attached
+	// to, never appear in the tree, and never resolve. See scope.go.
+	scope *Scope
+
 	// mu guards workers, which is read from every connection goroutine to route
 	// a target to its session's client.
 	mu      sync.Mutex
@@ -135,6 +140,21 @@ func NewStore(log *slog.Logger) *Store {
 	s.reg = upstream.NewRegistry(log, s.onDiscovery)
 	return s
 }
+
+// SetScope pins the store to one session/pane set. It must be called BEFORE
+// Run: the scope decides which upstream sockets are ever attached to, so
+// applying it later would mean a window in which the instance held a client
+// for a session the share may not see.
+func (s *Store) SetScope(sc *Scope) {
+	if !sc.Active() {
+		return
+	}
+	s.scope = sc
+	s.log.Info("store: scope pinned", "scope", sc.String())
+}
+
+// Scope returns the active scope (nil when unrestricted).
+func (s *Store) Scope() *Scope { return s.scope }
 
 // Run starts the single writer goroutine and the session registry.
 // It blocks until ctx is cancelled.
@@ -190,6 +210,11 @@ func (s *Store) SetRegistryInterval(d time.Duration) {
 func (s *Store) reconcile(ctx context.Context, m *mutable, list []upstream.Session) {
 	seen := map[string]bool{}
 	for _, info := range list {
+		if !s.scope.AllowsSession(info.Name) {
+			// Not "hidden": never attached to at all. There is no client for
+			// it, so nothing downstream can route to it even by accident.
+			continue
+		}
 		seen[info.Name] = true
 		st := m.sessions[info.Name]
 		if st == nil {
@@ -367,6 +392,9 @@ func (s *Store) Client(session string) *upstream.Client {
 	if session == "" {
 		session = s.DefaultSession()
 	}
+	if !s.scope.AllowsSession(session) {
+		return nil
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if w := s.workers[session]; w != nil {
@@ -389,6 +417,13 @@ func (s *Store) Socket(session string) string {
 // client and the bare Herdr id to send upstream. This is the ONE place a
 // `<session>/<pane>` target is taken apart.
 func (s *Store) Resolve(target string) (session string, c *upstream.Client, id string, err error) {
+	// Scope is checked FIRST, before anything is looked up: every live path
+	// (subscribe, summary poll, repaint, scroll, agent detection read and the
+	// command pass-through) funnels through here, so this one check is what
+	// makes an out-of-scope target unreachable rather than merely unlisted.
+	if !s.scope.AllowsTarget(target) {
+		return "", nil, "", ErrOutOfScope(target)
+	}
 	session, id = SplitTarget(target)
 	if session == "" {
 		session = s.DefaultSession()
@@ -498,6 +533,7 @@ func (s *Store) applySnapshot(m *mutable, session string, snap *upstream.Snapsho
 	if st == nil {
 		return
 	}
+	snap = s.scope.filterSnapshot(snap)
 	st.Snapshot = snap
 	live := make(map[string]struct{}, len(snap.Panes))
 	for i := range snap.Panes {

@@ -293,14 +293,27 @@ func (c *cfAPI) findRecord(ctx context.Context, zoneID, name string) (*cfDNSReco
 // removes its own.
 const dnsComment = "herdr-expose"
 
-func (c *cfAPI) upsertCNAME(ctx context.Context, zoneID, name, content string, existing *cfDNSRecord) error {
+// ShareDNSComment tags the records a `herdr-expose share` creates.
+//
+// It is DELIBERATELY a different string from dnsComment. A share is the one
+// thing in this binary that deletes DNS (SPEC AMENDMENTS 9, G4), and the
+// permanent deployment's record is tagged dnsComment — so no share teardown,
+// no sweep and no `share revoke --all` can ever reach the permanent hostname,
+// whatever id or domain it is handed. The separation is the safety mechanism,
+// not a label.
+const ShareDNSComment = "herdr-expose-share"
+
+func (c *cfAPI) upsertCNAME(ctx context.Context, zoneID, name, content, comment string, existing *cfDNSRecord) error {
+	if comment == "" {
+		comment = dnsComment
+	}
 	body := map[string]any{
 		"type":    "CNAME",
 		"name":    name,
 		"content": content,
 		"proxied": true,
 		"ttl":     1,
-		"comment": dnsComment,
+		"comment": comment,
 	}
 	var err error
 	if existing == nil {

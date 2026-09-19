@@ -37,6 +37,14 @@ type Auth struct {
 	limiter *rateLimiter
 
 	origins map[string]struct{}
+
+	// deadline, when non-zero, is a HARD ceiling on every credential this
+	// instance issues or accepts (SPEC AMENDMENTS 9, G5.2). A share sets it to
+	// the share's expiry, so a device token cannot outlive the share even if
+	// teardown fails and the tunnel somehow survives. It is belt to the
+	// in-process timer's braces, and it is enforced on every authentication,
+	// not only at issue time.
+	deadline time.Time
 }
 
 type authState struct {
@@ -61,6 +69,9 @@ type DeviceRecord struct {
 	LastSeen  time.Time `json:"last_seen"`
 	LastIP    string    `json:"last_ip"`
 	UserAgent string    `json:"user_agent"`
+	// ExpiresAt is an absolute expiry that overrides the sliding DeviceTTL
+	// when it is sooner. Zero means "sliding TTL only" (the normal server).
+	ExpiresAt time.Time `json:"expires_at,omitempty"`
 }
 
 // Public is the safe projection of a device, for status output and /v1/config.
@@ -71,6 +82,7 @@ type Public struct {
 	LastSeen  time.Time `json:"last_seen"`
 	LastIP    string    `json:"last_ip"`
 	UserAgent string    `json:"user_agent"`
+	ExpiresAt time.Time `json:"expires_at,omitempty"`
 }
 
 // pairingRecord is one outstanding pairing code.
@@ -194,6 +206,47 @@ func (a *Auth) ResetServerToken() (string, error) {
 	return tok, nil
 }
 
+// SetDeadline pins an absolute expiry on every credential this Auth issues or
+// accepts, and clamps the ones already on disk to it. Used by `share`: a share
+// that is gone must leave nothing behind that still opens the door.
+//
+// It only ever moves an existing device expiry when the deadline moves —
+// `share extend` pushes tokens out with the share (otherwise they would expire
+// underneath a share that is still running), and a shortened deadline pulls
+// them all in.
+func (a *Auth) SetDeadline(t time.Time) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.deadline = t
+	if t.IsZero() {
+		return nil
+	}
+	changed := false
+	for _, d := range a.state.Devices {
+		if !d.ExpiresAt.Equal(t) {
+			d.ExpiresAt = t
+			changed = true
+		}
+	}
+	for _, p := range a.state.Pairing {
+		if p.Expires.After(t) {
+			p.Expires = t
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return a.save()
+}
+
+// Deadline is the absolute credential ceiling, zero when there is none.
+func (a *Auth) Deadline() time.Time {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.deadline
+}
+
 // Identity is who a request turned out to be.
 type Identity struct {
 	Kind     string // "server" or "device"
@@ -219,6 +272,13 @@ func (a *Auth) Authenticate(token, remoteIP, userAgent string) (Identity, error)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	// Past the instance deadline NOTHING authenticates, including the server
+	// token. A share whose process is still up but whose time is over is shut,
+	// not merely scheduled to be shut.
+	if !a.deadline.IsZero() && time.Now().After(a.deadline) {
+		return Identity{}, ErrUnauthorized
+	}
+
 	matched := false
 	if a.state.ServerTokenSHA != "" &&
 		subtle.ConstantTimeCompare([]byte(sum), []byte(a.state.ServerTokenSHA)) == 1 {
@@ -236,6 +296,11 @@ func (a *Auth) Authenticate(token, remoteIP, userAgent string) (Identity, error)
 		}
 	}
 	if found == nil {
+		return Identity{}, ErrUnauthorized
+	}
+	if !found.ExpiresAt.IsZero() && now.After(found.ExpiresAt) {
+		a.removeDeviceLocked(found.ID)
+		_ = a.save()
 		return Identity{}, ErrUnauthorized
 	}
 	if now.Sub(found.LastSeen) > DeviceTTL {
@@ -269,6 +334,9 @@ func (a *Auth) NewPairingCode(name string) (string, time.Time, error) {
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if !a.deadline.IsZero() && exp.After(a.deadline) {
+		exp = a.deadline
+	}
 	a.reloadLocked()
 	a.gcPairingLocked()
 	a.state.Pairing = append(a.state.Pairing,
@@ -356,6 +424,7 @@ func (a *Auth) RedeemPairing(code, name, remoteIP, userAgent string) (token stri
 		LastSeen:  now,
 		LastIP:    remoteIP,
 		UserAgent: userAgent,
+		ExpiresAt: a.deadline,
 	}
 	a.state.Devices = append(a.state.Devices, rec)
 	a.evictLocked()
@@ -382,7 +451,8 @@ func (a *Auth) evictLocked() {
 
 func publicOf(d *DeviceRecord) Public {
 	return Public{ID: d.ID, Name: d.Name, CreatedAt: d.CreatedAt,
-		LastSeen: d.LastSeen, LastIP: d.LastIP, UserAgent: d.UserAgent}
+		LastSeen: d.LastSeen, LastIP: d.LastIP, UserAgent: d.UserAgent,
+		ExpiresAt: d.ExpiresAt}
 }
 
 // Devices lists paired devices, hashes excluded.

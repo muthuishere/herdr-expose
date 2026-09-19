@@ -698,3 +698,94 @@ Every action, pane and link-handler id is therefore prefixed `hex:`
 - **`.` in an id is REJECTED** (`invalid_plugin_action_id`) — so `hex.open` does
   not work. `-` and `_` are also accepted.
 - A `[[link_handlers]]` `action` field must reference the PREFIXED action id.
+
+---
+
+# AMENDMENTS 9 — `share`: one scoped, time-boxed, self-destructing tunnel
+
+Owner's ask: from inside an agent session, say "expose this agent session on
+myxxx.yy.com" and get back a URL — only that session, default 1 hour, gone after.
+
+## G1. The command
+
+```
+herdr-expose share --domain agent1.deemwar.com [--session NAME] [--pane TARGET] [--hours 1]
+```
+Defaults: `--session` = the session the command runs in (`$HERDR_SESSION`, else
+resolved from `$HERDR_SOCKET_PATH`), `--hours` = 1.
+Prints: the URL, a pairing code, and the exact expiry time.
+
+## G2. Scope is enforced in the SERVER, not the UI
+
+New flag `--only <session>` / `--only-target <session>/<pane>`. The scope filter
+applies in the store/view layer, so a scoped instance's tree CONTAINS only what
+is shared. Everything else does not exist to that instance: not hidden in the
+client, absent from the tree, absent from subscribe, and rejected at the hub if
+a target outside scope is requested. A scoped share must never be one client
+bug away from exposing the other sessions.
+
+Command pass-through is also narrowed for a scoped instance: prompt / send-keys
+/ read / scroll / resize on in-scope targets only. No `pane.run`, no session
+enumeration, no plugin methods.
+
+## G3. Ephemeral instance, not the main daemon
+
+`share` spawns a SEPARATE detached herdr-expose on its own free port, with its
+own state dir under `<state>/shares/<id>/`, its own auth store, and `--only`
+set. The long-lived daemon on 21118 is untouched and keeps serving everything.
+One share = one process = one port = one domain = one scope. Killing a share
+cannot affect the main instance or another share.
+
+## G4. Ephemeral DNS — this is the ONE exception to AMENDMENTS 3
+
+C1 said tunnels are static and `stop` never removes DNS. That rule exists so a
+PERMANENT endpoint keeps a stable hostname. A share is the opposite: it is
+disposable by construction, so at expiry it MUST `destroy` — stop cloudflared,
+delete the DNS record (only if tagged `herdr-expose-share`), delete the tunnel,
+wipe the share state dir including its tokens. Leaving a dead hostname resolving
+to a tunnel that no longer exists is worse than no record.
+
+The domain's zone must be in the account the token can reach; fail early and
+clearly if not (`herdr-expose share` checks zone access before creating anything).
+
+## G5. Expiry is enforced three ways, because one is not enough
+
+1. In-process timer: at TTL, the instance destroys its tunnel+DNS and exits.
+2. Every issued device token carries `expires_at` <= the share's expiry, so a
+   token cannot outlive the share even if teardown fails.
+3. A `share.json` in the share dir records the deadline, and both
+   `herdr-expose share list` and the MAIN daemon's periodic sweep reap shares
+   whose deadline has passed and whose process is gone (crash-safe cleanup).
+
+`share list` / `share extend <id> --hours N` / `share revoke <id>` complete it.
+Revoke is immediate and idempotent.
+
+## G6. Pairing still applies
+
+A share is on the public internet, so it is NOT open. It mints a pairing code at
+start, printed locally alongside the URL and the QR. Same rules as everywhere:
+codes are displayed only on the machine, no endpoint mints one, tokens are
+hashed at rest, and here they additionally expire with the share.
+
+---
+
+# AMENDMENTS 10 — every share is time-based. No exceptions.
+
+Owner: "all are time based." There is NO permanent/unlimited share mode.
+A long-lived share is a long TTL — `--days 30`, not a different code path.
+`--hours 1` stays the default; `--days N` is sugar for hours.
+
+Why this matters more than it looks: a single code path means there is no
+branch where a share outlives its token, escapes the sweep, or skips teardown.
+G5's three-way enforcement and G4's destroy-on-expiry apply universally.
+
+**Restore across restarts.** A long share outlives a reboot, so the main daemon
+restores running shares from `share.json` at startup — respawned with their
+ORIGINAL deadline, never a refreshed one. A share whose deadline already passed
+is reaped instead (tunnel + DNS + state destroyed), so a dead process can never
+leave a live hostname resolving to nothing, and can never come back with a fresh
+clock.
+
+**Extending** is an explicit, logged, revocable act: `share extend <id>
+--hours N | --days N` pushes the deadline on `share.json` AND on the
+already-issued device tokens, or the tokens expire underneath a live share.

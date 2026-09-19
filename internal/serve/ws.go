@@ -3,6 +3,7 @@ package serve
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -286,6 +287,9 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 			"min_cols": core.MinCols, "min_rows": core.MinRows,
 			"max_write_bytes": core.MaxWriteBytes,
 		},
+		// A scoped instance says so: the client renders one session and knows
+		// the rest of the machine is not merely hidden but absent.
+		"scope": s.hub.Store().Scope().String(),
 		// Targets are session-qualified on this wire. Spelled out here so a
 		// hand-written client does not have to infer it from the tree.
 		"targets": map[string]any{
@@ -479,11 +483,22 @@ func (s *Server) runCommand(ctx context.Context, conn *wsConn, id, session, meth
 			// through untouched against the resolved session.
 			var raw any
 			_ = json.Unmarshal(params, &raw)
-			s.dispatch(cctx, conn, id, s.resolveCommandSession(conn, session, nil), method, raw)
+			name := s.resolveCommandSession(conn, session, nil)
+			if err := s.scopeAllows(method, name, nil); err != nil {
+				conn.SendJSON("result", map[string]any{
+					"id": id, "session": name, "ok": false, "error": err.Error()})
+				return
+			}
+			s.dispatch(cctx, conn, id, name, method, raw)
 			return
 		}
 	}
 	sessionName := s.resolveCommandSession(conn, session, p)
+	if err := s.scopeAllows(method, sessionName, p); err != nil {
+		conn.SendJSON("result", map[string]any{
+			"id": id, "session": sessionName, "ok": false, "error": err.Error()})
+		return
+	}
 	for _, k := range targetParamKeys {
 		if v, ok := p[k].(string); ok {
 			p[k] = core.StripSession(sessionName, v)
@@ -514,6 +529,51 @@ func (s *Server) resolveCommandSession(conn *wsConn, explicit string, params map
 	}
 	// The session of whatever this connection is looking at.
 	return conn.sess.FocusedSession()
+}
+
+// scopeAllows is the command pass-through gate for a SCOPED instance (G2).
+//
+// An unscoped server passes every Herdr method through untouched — that is the
+// product. A share cannot: it is an arbitrary-command endpoint on the public
+// internet, pinned to one agent session. So a scoped instance accepts only
+// prompt / send-keys / read / scroll / resize (core.ScopedCommands), refuses
+// every enumeration, mutation and plugin method, and additionally requires
+// that whatever target the call names is inside the scope. Both halves matter:
+// the allowlist stops `pane.split`, the target check stops an allowed method
+// being aimed at somebody else's pane.
+func (s *Server) scopeAllows(method, session string, params map[string]any) error {
+	sc := s.hub.Store().Scope()
+	if !sc.Active() {
+		return nil
+	}
+	if !sc.CommandAllowed(method) {
+		return fmt.Errorf("method %q is not available on a scoped share (allowed: prompt, send-keys, read, scroll, resize)", method)
+	}
+	if session != "" && !sc.AllowsSession(session) {
+		return core.ErrOutOfScope(session)
+	}
+	named := false
+	for _, k := range targetParamKeys {
+		v, ok := params[k].(string)
+		if !ok || v == "" {
+			continue
+		}
+		target := v
+		if core.SessionOf(v) == "" {
+			target = core.JoinTarget(session, v)
+		}
+		if !sc.AllowsTarget(target) {
+			return core.ErrOutOfScope(target)
+		}
+		named = true
+	}
+	if !named && len(sc.Panes) > 0 {
+		// A pane-scoped share must not accept a call that leaves the pane
+		// implicit — Herdr would resolve it to the focused pane, which is not
+		// necessarily the shared one.
+		return fmt.Errorf("this share is scoped to specific panes; name one with pane_id")
+	}
+	return nil
 }
 
 func (s *Server) dispatch(ctx context.Context, conn *wsConn, id, session, method string, params any) {
