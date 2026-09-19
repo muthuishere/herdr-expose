@@ -31,15 +31,31 @@ herdr-expose status --json | jq -r '.mode, .listen'
 ## Create a share
 
 ```bash
-# This session, one hour (the default). Most common case.
+# On this network, one hour. No domain, no DNS, no tunnel — works offline.
+herdr-expose share --lan --json
+
+# Public, on a hostname in a zone the Cloudflare token reaches.
 herdr-expose share --domain agent1.deemwar.com --json
+
+# Neither flag = auto: public if a usable domain is configured AND cloudflared
+# resolves, otherwise LAN. It prints one line saying which it chose and why.
+herdr-expose share --json
 
 # A specific session, or a single pane, for longer.
 herdr-expose share --domain review.deemwar.com --session crypto-desk --days 7 --json
 herdr-expose share --domain pair.deemwar.com --pane herdr-plugins/w2:p1 --hours 4 --json
 ```
 
-Defaults: the session you are running in, and `--hours 1`.
+Defaults: the session you are running in, and `--hours 1`. `--lan` and
+`--domain` are mutually exclusive.
+
+**A public share needs an explicit `--domain`.** Auto mode will not reuse the
+permanent deployment's hostname — taking it would hijack the daemon's own URL,
+and a share may only ever create or delete records tagged
+`herdr-expose-share`. So on this machine auto resolves to LAN. If the owner
+asked for something reachable from outside the house, pass `--domain` with a
+different hostname; a failure there is a hard error rather than a silent
+downgrade to LAN.
 
 Returns the URL, a **pairing code**, a QR, and the exact expiry. Give the person
 the URL and the code through whatever channel you are already talking to them
@@ -103,6 +119,16 @@ The owner's permanent deployment keeps running untouched.
 - **A share is pairing-gated**, never open, because it is on the public
   internet and drives a real agent. No endpoint mints a pairing code — it is
   shown only on this machine.
+- **A LAN share is not "trusted because it is local".** Coffee-shop wifi is a
+  LAN. Pairing is required there exactly as it is on a public URL, and scope is
+  enforced identically. There is no LAN bypass and you should not ask for one.
+- **No PWA install on a LAN share.** Plain HTTP on an IP is not a secure
+  context (`localhost` is exempt, `192.168.x.x` is not), so no service worker
+  and no Add to Home Screen — `secure_context:false` in the JSON. Say so when
+  handing over the URL. Only the `--domain` path gives an installable app.
+- **A LAN share's IP can move under DHCP**, which silently invalidates a printed
+  QR. `share list` re-resolves, and `share pair <id>` re-issues at the current
+  address. Prefer re-pairing over resending an old link.
 - **Expiry destroys DNS.** Unlike the permanent deployment, a share deletes its
   record and tunnel when it ends. That is deliberate: a hostname resolving to a
   tunnel that no longer exists is worse than no record.

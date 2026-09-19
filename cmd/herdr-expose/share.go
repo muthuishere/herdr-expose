@@ -52,8 +52,18 @@ import (
 // (G5.3) plus everything needed to tear the share down from OUTSIDE, without
 // the share's own process being alive to ask.
 type shareRecord struct {
-	ID         string    `json:"id"`
-	Domain     string    `json:"domain"`
+	ID string `json:"id"`
+	// Mode is the exposure mode this share resolved to, and it decides
+	// everything downstream: the bind address, the URL, and whether there is
+	// any Cloudflare teardown to do at all. It comes from expose.Resolve —
+	// the SAME resolver the main daemon uses (AMENDMENTS 5 / E1), not a
+	// second copy of the rules.
+	Mode          string `json:"mode"` // cloudflare | lan
+	Bind          string `json:"bind"`
+	SecureContext bool   `json:"secure_context"`
+	FellBack      string `json:"fell_back,omitempty"`
+
+	Domain     string    `json:"domain,omitempty"`
 	TunnelName string    `json:"tunnel_name"`
 	Port       int       `json:"port"`
 	Session    string    `json:"session"`
@@ -70,20 +80,27 @@ type shareRecord struct {
 // shareView is the stable `--json` projection. Field names here are an API:
 // an agent skill wraps every verb and parses this, so they do not churn.
 type shareView struct {
-	ID        string    `json:"id"`
-	Scope     string    `json:"scope"`
-	Session   string    `json:"session"`
-	Domain    string    `json:"domain"`
-	URL       string    `json:"url"`
-	State     string    `json:"state"`
-	CreatedAt time.Time `json:"created_at"`
-	ExpiresAt time.Time `json:"expires_at"`
-	Remaining string    `json:"remaining"`
-	Seconds   int64     `json:"remaining_seconds"`
-	PID       int       `json:"pid"`
-	Alive     bool      `json:"alive"`
-	Expired   bool      `json:"expired"`
-	Error     string    `json:"error,omitempty"`
+	ID      string `json:"id"`
+	Mode    string `json:"mode"`
+	Scope   string `json:"scope"`
+	Session string `json:"session"`
+	Domain  string `json:"domain"`
+	URL     string `json:"url"`
+	// SecureContext is false for a LAN share: plain HTTP on 192.168.x.x is not
+	// a secure context (localhost is exempt, a LAN IP is not), so the browser
+	// grants no service worker and no PWA install there. Surfaced because the
+	// person who receives the URL will otherwise wonder why it will not install.
+	SecureContext bool      `json:"secure_context"`
+	FellBack      string    `json:"fell_back,omitempty"`
+	State         string    `json:"state"`
+	CreatedAt     time.Time `json:"created_at"`
+	ExpiresAt     time.Time `json:"expires_at"`
+	Remaining     string    `json:"remaining"`
+	Seconds       int64     `json:"remaining_seconds"`
+	PID           int       `json:"pid"`
+	Alive         bool      `json:"alive"`
+	Expired       bool      `json:"expired"`
+	Error         string    `json:"error,omitempty"`
 }
 
 func (r *shareRecord) view() shareView {
@@ -92,12 +109,39 @@ func (r *shareRecord) view() shareView {
 		left = 0
 	}
 	return shareView{
-		ID: r.ID, Scope: r.Scope, Session: r.Session, Domain: r.Domain,
-		URL: r.URL, State: r.State, CreatedAt: r.CreatedAt, ExpiresAt: r.ExpiresAt,
+		ID: r.ID, Mode: r.mode(), Scope: r.Scope, Session: r.Session, Domain: r.Domain,
+		URL: r.CurrentURL(), SecureContext: r.SecureContext, FellBack: r.FellBack,
+		State: r.State, CreatedAt: r.CreatedAt, ExpiresAt: r.ExpiresAt,
 		Remaining: left.Round(time.Second).String(), Seconds: int64(left.Seconds()),
 		PID: r.PID, Alive: pidAlive(r.PID), Expired: time.Now().After(r.ExpiresAt),
 		Error: r.Error,
 	}
+}
+
+// mode defaults an old record (written before LAN shares existed) to cloudflare.
+func (r *shareRecord) mode() string {
+	if r.Mode == "" {
+		return string(config.ModeCloudflare)
+	}
+	return r.Mode
+}
+
+// isLAN reports whether this share has no tunnel and no DNS to tear down.
+func (r *shareRecord) isLAN() bool { return r.mode() == string(config.ModeLAN) }
+
+// CurrentURL re-resolves a LAN share's address every time it is asked for.
+//
+// The LAN IP moves under a DHCP lease, and a URL that was true at mint time is
+// worse than no URL — the daemon already re-resolves the main listener every
+// 30s, so `share list` does the same rather than printing history.
+func (r *shareRecord) CurrentURL() string {
+	if !r.isLAN() {
+		return r.URL
+	}
+	if ip := expose.PrimaryLANIP(); ip != "" {
+		return fmt.Sprintf("http://%s:%d", ip, r.Port)
+	}
+	return fmt.Sprintf("http://127.0.0.1:%d", r.Port)
 }
 
 // --- paths, all derived, none accepted from a caller ------------------------
@@ -282,8 +326,12 @@ func cmdShare(args []string) error {
 func shareUsage() {
 	fmt.Fprint(os.Stderr, `herdr-expose share — one scoped, time-boxed, self-destructing tunnel
 
-  share --domain X [--session NAME] [--pane TARGET] [--hours N] [--days N] [--json]
-        expose ONE herdr session (default: this one) on X for N hours (default 1)
+  share [--domain X | --lan] [--session NAME] [--pane TARGET] [--hours N] [--days N] [--json]
+        expose ONE herdr session (default: this one) for N hours (default 1)
+          --domain X  public https on X through a Cloudflare named tunnel
+          --lan       http://<lan-ip>:<port>, no DNS and no tunnel
+          neither     auto: cloudflare when a usable domain is configured and
+                      cloudflared resolves, else LAN — the reason is printed
   share list [--json]              list shares; reaps any whose deadline passed
   share extend <id> --hours N|--days N [--json]
   share pair <id> [--name NAME] [--json]
@@ -301,6 +349,7 @@ Every share expires. There is no permanent share: a long one is --days 30.
 // --- create -----------------------------------------------------------------
 
 type shareFlags struct {
+	lan     bool
 	domain  string
 	session string
 	panes   []string
@@ -349,6 +398,8 @@ func parseShareFlags(args []string) (shareFlags, error) {
 			}
 		case "--name":
 			f.name, err = next()
+		case "--lan":
+			f.lan = true
 		case "--json":
 			f.asJSON = true
 		default:
@@ -388,14 +439,80 @@ func defaultSessionName() string {
 	return ""
 }
 
+// resolveShareMode decides cloudflare vs lan through expose.Resolve — the same
+// three-mode resolver the main daemon uses (E1). There is deliberately no
+// second set of rules here: this function only chooses which [expose] table to
+// hand it, and explains the choice.
+//
+// Auto mode will NOT reuse the configured domain when that hostname already
+// belongs to something else — in practice the permanent deployment, whose
+// record is tagged `herdr-expose`. A share may only ever create and delete
+// records tagged `herdr-expose-share`, so taking the daemon's hostname is not
+// on the table; it falls back to LAN and says why.
+func resolveShareMode(ctx context.Context, f shareFlags, port int, tunnelName string) (expose.Resolution, config.Expose, error) {
+	var none config.Expose
+	if f.lan && strings.TrimSpace(f.domain) != "" {
+		return expose.Resolution{}, none, errors.New("--lan and --domain are mutually exclusive: pick a LAN address or a public hostname")
+	}
+
+	if f.lan {
+		e := config.Expose{LAN: true}
+		return expose.Resolve(e, port, nil), e, nil
+	}
+
+	// Explicit --domain: a failure here is a hard error, never a silent
+	// downgrade. The person asked for a public hostname.
+	if d := strings.TrimSpace(f.domain); d != "" {
+		if _, rec, err := expose.CheckZoneAccess(ctx, d); err != nil {
+			return expose.Resolution{}, none, err
+		} else if rec.Exists && rec.Comment != expose.ShareDNSComment {
+			return expose.Resolution{}, none, fmt.Errorf("%s already has a DNS record tagged %q — a share only ever creates and deletes "+
+				"records tagged %q, so it will not take this hostname over. Pick another hostname",
+				d, rec.Comment, expose.ShareDNSComment)
+		}
+		e := config.Expose{Cloudflare: true, Domain: d, TunnelName: tunnelName}
+		res := expose.Resolve(e, port, nil)
+		if res.Mode != config.ModeCloudflare {
+			return expose.Resolution{}, none, fmt.Errorf("cannot share on %s: %s (pass --lan to expose on this network instead)",
+				d, res.FellBack)
+		}
+		return res, e, nil
+	}
+
+	// Auto.
+	lan := config.Expose{LAN: true}
+	fallback := func(why string) (expose.Resolution, config.Expose, error) {
+		r := expose.Resolve(lan, port, nil)
+		r.FellBack = why
+		return r, lan, nil
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return fallback("could not read the config, so no public domain is known")
+	}
+	domain := strings.TrimSpace(cfg.Expose.Domain)
+	if domain == "" {
+		return fallback("no domain is configured under [expose], so there is no public hostname to put a share on")
+	}
+	if res := expose.Resolve(config.Expose{Cloudflare: true, Domain: domain}, port, nil); res.Mode != config.ModeCloudflare {
+		return fallback(res.FellBack)
+	}
+	_, rec, err := expose.CheckZoneAccess(ctx, domain)
+	if err != nil {
+		return fallback(fmt.Sprintf("the zone for %s is not reachable with the configured Cloudflare token (%v)", domain, err))
+	}
+	if rec.Exists && rec.Comment != expose.ShareDNSComment {
+		return fallback(fmt.Sprintf("%s is the permanent deployment's hostname (record tagged %q), which a share must never take over; "+
+			"pass --domain <other-host> for a public share", domain, rec.Comment))
+	}
+	e := config.Expose{Cloudflare: true, Domain: domain, TunnelName: tunnelName}
+	return expose.Resolve(e, port, nil), e, nil
+}
+
 func cmdShareCreate(args []string) error {
 	f, err := parseShareFlags(args)
 	if err != nil {
 		return err
-	}
-	if strings.TrimSpace(f.domain) == "" {
-		shareUsage()
-		return errors.New("--domain is required: a share lives on a hostname in a zone your Cloudflare token can reach")
 	}
 	ttl, err := f.ttl()
 	if err != nil {
@@ -445,24 +562,23 @@ func cmdShareCreate(args []string) error {
 		}
 	}
 
-	// G4 preflight: prove the zone is reachable BEFORE creating anything, and
-	// refuse a hostname that already carries someone else's record — most
-	// importantly the PERMANENT deployment's, which is tagged `herdr-expose`.
-	zone, rec, err := expose.CheckZoneAccess(ctx, f.domain)
-	if err != nil {
-		return err
-	}
-	if rec.Exists && rec.Comment != expose.ShareDNSComment {
-		return fmt.Errorf("%s already has a DNS record tagged %q — a share only ever creates and deletes "+
-			"records tagged %q, so it will not take this hostname over. Pick another hostname",
-			f.domain, rec.Comment, expose.ShareDNSComment)
-	}
-
+	// Each share gets its own ephemeral port whatever the mode; the bind
+	// address is then decided by the RESOLVED mode, never by a flag.
 	port, err := freeLoopbackPort()
 	if err != nil {
 		return err
 	}
 	id := newShareID()
+	res, _, err := resolveShareMode(ctx, f, port, shareTunnelName(id))
+	if err != nil {
+		return err
+	}
+	if res.FellBack != "" {
+		// ONE clear line. The owner must never have to guess whether he got a
+		// public URL or a LAN one.
+		fmt.Fprintf(os.Stderr, "\n  NOTE: no public tunnel — %s\n        exposing on this network instead.\n\n", res.FellBack)
+	}
+
 	dir, err := shareDirFor(id)
 	if err != nil {
 		return err
@@ -473,9 +589,13 @@ func cmdShareCreate(args []string) error {
 
 	now := time.Now()
 	share := &shareRecord{
-		ID: id, Domain: f.domain, TunnelName: shareTunnelName(id), Port: port,
-		Session: f.session, Panes: scope.Panes, Scope: scope.String(),
+		ID: id, Mode: string(res.Mode), Bind: res.Bind,
+		SecureContext: res.SecureContext, FellBack: res.FellBack,
+		Port: port, Session: f.session, Panes: scope.Panes, Scope: scope.String(),
 		CreatedAt: now, ExpiresAt: now.Add(ttl), State: "starting",
+	}
+	if res.Mode == config.ModeCloudflare {
+		share.Domain, share.TunnelName = strings.TrimSuffix(strings.TrimPrefix(res.URL, "https://"), "/"), shareTunnelName(id)
 	}
 	if err := writeShareFile(dir, share); err != nil {
 		return err
@@ -484,6 +604,9 @@ func cmdShareCreate(args []string) error {
 	// Pairing is minted HERE, in the local process, before the server exists —
 	// exactly as `herdr-expose pair` does. No endpoint mints one, the code is
 	// shown only on this machine, and it cannot outlive the share.
+	//
+	// It applies to a LAN share exactly as it does to a tunnel: coffee-shop
+	// wifi is a LAN, and "on our network" is not an identity.
 	auth, err := serve.NewAuth(dir, newLogger(), nil)
 	if err != nil {
 		return err
@@ -516,25 +639,31 @@ func cmdShareCreate(args []string) error {
 		return fmt.Errorf("share %s failed to start: %s", id, final.Error)
 	}
 
-	url := final.URL
-	if url == "" {
-		url = "https://" + f.domain
-	}
+	url := final.CurrentURL()
 	if f.asJSON {
-		v := final.view()
 		printJSON(map[string]any{
-			"share": v, "pairing_code": code, "pairing_expires_at": codeExp,
-			"pair_url": url + "/?pair=" + code, "zone": zone,
+			"share": final.view(), "pairing_code": code, "pairing_expires_at": codeExp,
+			"pair_url": url + "/?pair=" + code,
 		})
 		return nil
 	}
 	fmt.Printf("\n  shared %s on %s\n\n", scope.String(), url)
 	printQR(url + "/?pair=" + code)
-	fmt.Printf("\n  url:           %s\n  pairing code:  %s  (valid until %s)\n",
-		url, code, codeExp.Format(time.Kitchen))
+	fmt.Printf("\n  url:           %s\n  mode:          %s\n  pairing code:  %s  (valid until %s)\n",
+		url, final.mode(), code, codeExp.Format(time.Kitchen))
 	fmt.Printf("  scope:         %s  (nothing else on this machine is in this instance's tree)\n", scope.String())
-	fmt.Printf("  expires:       %s  (in %s) — DNS record and tunnel are deleted then\n",
-		final.ExpiresAt.Format(time.RFC1123), time.Until(final.ExpiresAt).Round(time.Minute))
+	if final.isLAN() {
+		fmt.Printf("  expires:       %s  (in %s) — the instance exits and its state is wiped then\n",
+			final.ExpiresAt.Format(time.RFC1123), time.Until(final.ExpiresAt).Round(time.Minute))
+		fmt.Printf("  reachable by:  anyone on this network who ALSO has the pairing code above\n")
+		fmt.Printf("  not installable: plain HTTP on a LAN IP is not a secure context, so no PWA install\n" +
+			"                   and no service worker (that is the mode, not a bug)\n")
+		fmt.Printf("  note:          this QR goes stale if the DHCP lease changes the LAN IP —\n"+
+			"                 `herdr-expose share pair %s` re-issues one at the current address\n", id)
+	} else {
+		fmt.Printf("  expires:       %s  (in %s) — DNS record and tunnel are deleted then\n",
+			final.ExpiresAt.Format(time.RFC1123), time.Until(final.ExpiresAt).Round(time.Minute))
+	}
 	fmt.Printf("  share id:      %s   (herdr-expose share extend %s --hours 1 | share revoke %s)\n\n",
 		id, id, id)
 	return nil
@@ -580,7 +709,11 @@ func spawnShare(id, dir string) error {
 // waitForShare blocks until the child publishes a verified URL or fails.
 func waitForShare(id string, timeout time.Duration) (*shareRecord, error) {
 	deadline := time.Now().Add(timeout)
-	fmt.Fprintf(os.Stderr, "  provisioning tunnel and waiting for the hostname to answer…\n")
+	if rec, err := loadShare(id); err == nil && rec.isLAN() {
+		fmt.Fprintf(os.Stderr, "  starting the scoped instance on %s…\n", rec.CurrentURL())
+	} else {
+		fmt.Fprintf(os.Stderr, "  provisioning tunnel and waiting for the hostname to answer…\n")
+	}
 	for time.Now().Before(deadline) {
 		rec, err := loadShare(id)
 		if err == nil && (rec.State == "ready" || rec.State == "failed") {
@@ -618,14 +751,23 @@ func cmdShareList(args []string) error {
 		fmt.Println("no shares")
 		return nil
 	}
-	fmt.Printf("%-10s %-28s %-22s %-9s %-8s %s\n", "ID", "SCOPE", "DOMAIN", "STATE", "PID", "EXPIRES IN")
+	fmt.Printf("%-10s %-11s %-26s %-30s %-9s %-7s %s\n",
+		"ID", "MODE", "SCOPE", "URL", "STATE", "PID", "EXPIRES IN")
 	for _, r := range recs {
 		v := r.view()
 		state := v.State
 		if !v.Alive {
 			state += "(dead)"
 		}
-		fmt.Printf("%-10s %-28s %-22s %-9s %-8d %s\n", v.ID, v.Scope, v.Domain, state, v.PID, v.Remaining)
+		fmt.Printf("%-10s %-11s %-26s %-30s %-9s %-7d %s\n",
+			v.ID, v.Mode, v.Scope, v.URL, state, v.PID, v.Remaining)
+	}
+	for _, r := range recs {
+		if v := r.view(); !v.SecureContext {
+			fmt.Printf("\nnote: %s is plain HTTP on a LAN IP — not a secure context, so no PWA install\n"+
+				"      and no service worker there. The URL is re-resolved on every listing, so it\n"+
+				"      follows a DHCP lease change; a printed QR does not.\n", v.ID)
+		}
 	}
 	return nil
 }
@@ -748,7 +890,10 @@ func cmdSharePair(args []string) error {
 	if err != nil {
 		return err
 	}
-	url := rec.URL
+	// Re-issued at the CURRENT address: a LAN share's IP moves with the lease,
+	// and the whole point of minting a new code is to hand someone a QR that
+	// works now.
+	url := rec.CurrentURL()
 	if url == "" {
 		url = "https://" + rec.Domain
 	}
@@ -769,6 +914,7 @@ func cmdSharePair(args []string) error {
 // teardownResult is one share's verified teardown outcome.
 type teardownResult struct {
 	ID          string `json:"id"`
+	Mode        string `json:"mode"`
 	Domain      string `json:"domain"`
 	ProcessGone bool   `json:"process_gone"`
 	DNSGone     bool   `json:"dns_gone"`
@@ -851,10 +997,18 @@ func printTeardown(r teardownResult) {
 		}
 		return "STILL THERE"
 	}
-	fmt.Printf("share %s (%s)\n", r.ID, r.Domain)
+	where := r.Domain
+	if where == "" {
+		where = "lan"
+	}
+	fmt.Printf("share %s (%s, %s)\n", r.ID, r.Mode, where)
 	fmt.Printf("  process      %s\n", mark(r.ProcessGone))
-	fmt.Printf("  dns record   %s\n", mark(r.DNSGone))
-	fmt.Printf("  tunnel       %s\n", mark(r.TunnelGone))
+	if r.Mode == string(config.ModeLAN) {
+		fmt.Printf("  dns/tunnel   n/a (LAN share: nothing was ever created)\n")
+	} else {
+		fmt.Printf("  dns record   %s\n", mark(r.DNSGone))
+		fmt.Printf("  tunnel       %s\n", mark(r.TunnelGone))
+	}
 	fmt.Printf("  port         %s\n", map[bool]string{true: "released", false: "STILL BOUND"}[r.PortFree])
 	fmt.Printf("  state dir    %s\n", map[bool]string{true: "wiped", false: "STILL THERE"}[r.StateWiped])
 	if r.Error != "" {
@@ -883,7 +1037,7 @@ func revokeShare(id string) error {
 // because a teardown that reports its own intentions is how you end up with a
 // hostname that still resolves.
 func revokeShareRecord(rec *shareRecord) teardownResult {
-	res := teardownResult{ID: rec.ID, Domain: rec.Domain}
+	res := teardownResult{ID: rec.ID, Mode: rec.mode(), Domain: rec.Domain}
 	dir, err := shareDirFor(rec.ID)
 	if err != nil {
 		res.Error = err.Error()
@@ -892,6 +1046,22 @@ func revokeShareRecord(rec *shareRecord) teardownResult {
 
 	// 1. the process
 	res.ProcessGone = killShareProcess(rec.PID)
+
+	// A LAN share has no DNS and no tunnel, so the Cloudflare path is SKIPPED
+	// rather than run and no-opped: no API call, no token read, nothing to
+	// fail. Teardown is exactly "process gone, port free, state wiped" — and
+	// `revoke --all` / `panic` therefore handle a mix of LAN and tunnel shares
+	// without either kind failing the other.
+	if rec.isLAN() {
+		res.DNSGone, res.TunnelGone = true, true
+		res.PortFree = rec.Port == 0 || portFree(fmt.Sprintf("0.0.0.0:%d", rec.Port))
+		if err := os.RemoveAll(dir); err != nil {
+			res.Error = err.Error()
+		}
+		_, statErr := os.Stat(dir)
+		res.StateWiped = os.IsNotExist(statErr)
+		return res
+	}
 
 	// 2. cloudflared, DNS and the tunnel — tagged `herdr-expose-share` only, so
 	//    this can never reach the permanent deployment's record.
@@ -1103,6 +1273,10 @@ func restoreShares(log *slog.Logger) {
 func cmdShareRestore(args []string) error {
 	log := newLogger()
 	restoreShares(log)
+	// A respawned instance records its new pid a moment after it starts; give
+	// it that moment so the listing reports the live process rather than the
+	// dead one it just replaced.
+	time.Sleep(2 * time.Second)
 	recs, err := listShareRecords()
 	if err != nil {
 		return err
@@ -1130,20 +1304,17 @@ func cmdShareRestore(args []string) error {
 // record, not from ~/.config/herdr-expose/config.toml: a share must not be able
 // to pick up the daemon's port, and a change to the daemon's config must not
 // re-point a running share.
-type shareServeConfig struct {
-	port   int
-	domain string
-}
+// It is derived ENTIRELY from the share's expose.Manager, so the bind address,
+// the mode and the Origin allowlist come from the same Resolution the main
+// daemon uses — including the LAN origin, which the browser must see in the
+// allowlist or it refuses the WebSocket, and which moves with the DHCP lease.
+type shareServeConfig struct{ mgr *expose.Manager }
 
-func (c shareServeConfig) Port() int    { return c.port }
-func (c shareServeConfig) Bind() string { return "127.0.0.1" }
-func (c shareServeConfig) Mode() string { return string(config.ModeCloudflare) }
+func (c shareServeConfig) Port() int    { return c.mgr.Resolution().Port }
+func (c shareServeConfig) Bind() string { return c.mgr.Resolution().Bind }
+func (c shareServeConfig) Mode() string { return string(c.mgr.Resolution().Mode) }
 func (c shareServeConfig) AllowedOrigins() []string {
-	return []string{
-		"https://" + c.domain,
-		fmt.Sprintf("http://127.0.0.1:%d", c.port),
-		fmt.Sprintf("http://localhost:%d", c.port),
-	}
+	return c.mgr.AllowedOrigins(nil)
 }
 func (c shareServeConfig) UI() map[string]any {
 	return map[string]any{"theme": "auto", "default_view": "focus"}
@@ -1178,18 +1349,24 @@ func cmdShareRun(args []string) error {
 		return err
 	}
 
-	cfg := shareServeConfig{port: rec.Port, domain: rec.Domain}
+	// The [expose] table is rebuilt from the RECORD, so the instance resolves
+	// the same mode it was created with — a LAN share never tries a tunnel and
+	// a tunnel share never silently degrades to LAN on restart.
+	exp := config.Expose{LAN: true}
+	if !rec.isLAN() {
+		exp = config.Expose{Cloudflare: true, Domain: rec.Domain, TunnelName: rec.TunnelName}
+	}
 	mgr := expose.New(expose.Options{
-		Port: rec.Port,
-		Expose: config.Expose{
-			Cloudflare: true,
-			Domain:     rec.Domain,
-			TunnelName: rec.TunnelName,
-		},
+		Port:       rec.Port,
+		Expose:     exp,
 		StateDir:   dir,
 		DNSComment: expose.ShareDNSComment,
 		Logf:       func(f string, a ...any) { log.Info(fmt.Sprintf(f, a...)) },
 	})
+	cfg := shareServeConfig{mgr: mgr}
+	res := mgr.Resolution()
+	log.Info("share exposure resolved", "mode", res.Mode, "bind", res.Bind,
+		"url", res.URL, "secure_context", res.SecureContext)
 
 	auth, err := serve.NewAuth(dir, log, cfg.AllowedOrigins())
 	if err != nil {
@@ -1217,8 +1394,10 @@ func cmdShareRun(args []string) error {
 		log.Warn("could not record pid", "err", err)
 	}
 
-	// Bring the tunnel up, then publish the URL. procTunnel only reports the
-	// URL once https://<domain>/healthz actually answers (C2 step 7).
+	// Bring the exposure up, then publish the URL. In cloudflare mode
+	// procTunnel only reports the URL once https://<domain>/healthz actually
+	// answers (C2 step 7); in LAN mode there is nothing to start — the
+	// listener IS the exposure — and Start says so and returns.
 	go func() {
 		sctx, scancel := context.WithTimeout(ctx, 2*time.Minute)
 		defer scancel()
@@ -1233,6 +1412,8 @@ func cmdShareRun(args []string) error {
 		url := mgr.URL()
 		_, _ = updateShare(id, func(r *shareRecord) {
 			r.State, r.URL, r.Error = "ready", url, ""
+			// A LAN share's URL is re-resolved on every read (the lease can
+			// move), so what is stored here is only the last known value.
 		})
 		log.Info("share is live", "url", url, "scope", scope.String(), "expires_at", rec.ExpiresAt)
 	}()

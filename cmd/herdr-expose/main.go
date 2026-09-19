@@ -95,9 +95,12 @@ func usage() {
                         install a supervised unit (launchd / systemd --user)
   expose start|stop|status|plan|destroy
                         tunnel control
-  share --domain X [--session NAME] [--pane TARGET] [--hours N|--days N]
-                        expose ONE herdr session on X, time-boxed, self-destructing
-  share list|extend <id>|revoke <id>|revoke --all
+  share [--domain X | --lan] [--session NAME] [--pane TARGET] [--hours N|--days N]
+                        expose ONE herdr session, time-boxed, self-destructing.
+                        --domain = public https via a Cloudflare tunnel,
+                        --lan = http://<lan-ip>:<port>, neither = auto (cloudflare
+                        if a usable domain is configured, else LAN, reason printed)
+  share list|extend <id>|pair <id>|revoke <id>|revoke --all|restore
                         manage shares (every verb takes --json)
   panic                 revoke every share AND stop the main tunnel
 
