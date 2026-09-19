@@ -357,11 +357,14 @@ type shareFlags struct {
 	days    float64
 	name    string
 	asJSON  bool
+
+	// hoursSet records that --hours was passed explicitly, so that the
+	// [share] default does not overwrite it.
+	hoursSet bool
 }
 
 func parseShareFlags(args []string) (shareFlags, error) {
 	f := shareFlags{name: "share"}
-	hoursSet := false
 	for i := 0; i < len(args); i++ {
 		next := func() (string, error) {
 			if i+1 >= len(args) {
@@ -387,7 +390,7 @@ func parseShareFlags(args []string) (shareFlags, error) {
 				if _, e := fmt.Sscanf(v, "%f", &f.hours); e != nil {
 					err = fmt.Errorf("--hours %q is not a number", v)
 				}
-				hoursSet = true
+				f.hoursSet = true
 			}
 		case "--days":
 			var v string
@@ -409,7 +412,7 @@ func parseShareFlags(args []string) (shareFlags, error) {
 			return f, err
 		}
 	}
-	if !hoursSet && f.days == 0 {
+	if !f.hoursSet && f.days == 0 {
 		f.hours = 1 // G1 default
 	}
 	return f, nil
@@ -425,6 +428,41 @@ func (f shareFlags) ttl() (time.Duration, error) {
 		return 0, errors.New("the share TTL must be under a year; a share is time-boxed by design")
 	}
 	return d, nil
+}
+
+// applyConfigDefaults fills the flags the user did not pass from the [share]
+// table, and enforces max_concurrent.
+//
+// The hours default lives here rather than in parseShareFlags so that the
+// parser stays a pure function of its arguments and remains testable without a
+// config file on disk.
+func (f *shareFlags) applyConfigDefaults() error {
+	cfg, err := config.Load()
+	if err != nil {
+		// A share must still work when the config is unreadable; the built-in
+		// one-hour default already applied in parseShareFlags.
+		return nil
+	}
+	if !f.hoursSet && f.days == 0 && cfg.Share.DefaultHours > 0 {
+		f.hours = cfg.Share.DefaultHours
+	}
+	// `share --name review` with a configured suffix means review.<suffix>.
+	if strings.TrimSpace(f.domain) == "" && !f.lan {
+		if suffix := strings.TrimSpace(cfg.Share.DomainSuffix); suffix != "" && f.name != "" && f.name != "share" {
+			f.domain = f.name + "." + suffix
+		}
+	}
+	if strings.TrimSpace(f.domain) == "" && !f.lan && cfg.Share.DefaultMode == "lan" {
+		f.lan = true
+	}
+	if n := cfg.Share.MaxConcurrent; n > 0 {
+		if recs, err := listShareRecords(); err == nil && len(recs) >= n {
+			return fmt.Errorf("%d shares are already live and share.max_concurrent is %d; "+
+				"revoke one with `herdr-expose share revoke <id>` or raise the limit under [share]",
+				len(recs), n)
+		}
+	}
+	return nil
 }
 
 // defaultSessionName is the session the command is RUNNING IN: $HERDR_SESSION,
@@ -509,9 +547,15 @@ func resolveShareMode(ctx context.Context, f shareFlags, port int, tunnelName st
 	return expose.Resolve(e, port, nil), e, nil
 }
 
-func cmdShareCreate(args []string) error {
+func cmdShareCreate(args []string) (err error) {
 	f, err := parseShareFlags(args)
 	if err != nil {
+		return err
+	}
+	// [share] supplies the defaults for anything not passed on the flags.
+	// They are DEFAULTS, never an escape from time-boxing: every path still
+	// goes through ttl(), which refuses a non-positive or unbounded lifetime.
+	if err := f.applyConfigDefaults(); err != nil {
 		return err
 	}
 	ttl, err := f.ttl()
@@ -622,7 +666,17 @@ func cmdShareCreate(args []string) error {
 		return err
 	}
 
+	audit, auditClose := auditLogger()
+	if auditClose != nil {
+		defer auditClose.Close()
+	}
+	audit.Info("share created", "share", id, "session", f.session, "scope", scope.String(),
+		"mode", string(res.Mode), "domain", share.Domain, "port", port,
+		"expires_at", share.ExpiresAt, "ttl", ttl.String(), "log", shareLogPath(dir))
+	_ = codeExp
+
 	if err := spawnShare(id, dir); err != nil {
+		audit.Warn("share failed to spawn", "share", id, "err", err)
 		_ = os.RemoveAll(dir)
 		return err
 	}
@@ -635,9 +689,11 @@ func cmdShareCreate(args []string) error {
 		return err
 	}
 	if final.State == "failed" {
+		audit.Warn("share failed to start, tearing down", "share", id, "err", final.Error)
 		_ = revokeShare(id)
 		return fmt.Errorf("share %s failed to start: %s", id, final.Error)
 	}
+	audit.Info("share live", "share", id, "url", final.CurrentURL(), "expires_at", final.ExpiresAt)
 
 	url := final.CurrentURL()
 	if f.asJSON {
@@ -821,6 +877,13 @@ func cmdShareExtend(args []string) error {
 	dir, _ := shareDirFor(id)
 	if auth, err := serve.NewAuth(dir, newLogger(), nil); err == nil {
 		_ = auth.SetDeadline(rec.ExpiresAt)
+	}
+	// Extending is an explicit, LOGGED, revocable act (AMENDMENTS 10).
+	if audit, closer := auditLogger(); audit != nil {
+		audit.Info("share extended", "share", id, "expires_at", rec.ExpiresAt)
+		if closer != nil {
+			closer.Close()
+		}
 	}
 	if f.asJSON {
 		printJSON(rec.view())
@@ -1037,6 +1100,15 @@ func revokeShare(id string) error {
 // because a teardown that reports its own intentions is how you end up with a
 // hostname that still resolves.
 func revokeShareRecord(rec *shareRecord) teardownResult {
+	if audit, closer := auditLogger(); audit != nil {
+		audit.Info("share revoked", "share", rec.ID, "mode", rec.mode(),
+			"domain", rec.Domain, "expires_at", rec.ExpiresAt,
+			"expired", time.Now().After(rec.ExpiresAt))
+		if closer != nil {
+			defer closer.Close()
+		}
+	}
+
 	res := teardownResult{ID: rec.ID, Mode: rec.mode(), Domain: rec.Domain}
 	dir, err := shareDirFor(rec.ID)
 	if err != nil {
@@ -1336,7 +1408,15 @@ func cmdShareRun(args []string) error {
 	if err != nil {
 		return err
 	}
-	log := newLogger().With("share", id)
+	// A share logs to its OWN file inside its own state dir, so revoking the
+	// share takes the log with it.
+	log, logCloser := shareLogger(dir, id)
+	if logCloser != nil {
+		defer logCloser.Close()
+	}
+	log.Info("share starting", "session", rec.Session, "mode", rec.mode(),
+		"port", rec.Port, "domain", rec.Domain, "expires_at", rec.ExpiresAt,
+		"log", shareLogPath(dir))
 
 	if time.Now().After(rec.ExpiresAt) {
 		log.Warn("share is already past its deadline; destroying instead of starting")

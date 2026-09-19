@@ -27,7 +27,14 @@ type Hub struct {
 	log     *slog.Logger
 	summary *summaryPoller
 	metrics *Metrics
+
+	// clients counts live websocket connections, for /v1/metrics and for the
+	// "clients" line in the log on connect/disconnect.
+	clients atomic.Int64
 }
+
+// ConnectedClients is the number of live client connections.
+func (h *Hub) ConnectedClients() int64 { return h.clients.Load() }
 
 // NewHub builds a hub over a store.
 func NewHub(store *Store, log *slog.Logger) *Hub {
@@ -85,6 +92,7 @@ type liveStream struct {
 
 // NewSession creates a per-connection session.
 func (h *Hub) NewSession(ctx context.Context, sink ClientSink) *Session {
+	h.clients.Add(1)
 	s := &Session{
 		hub:     h,
 		sink:    sink,
@@ -346,6 +354,7 @@ func (s *Session) Close() {
 		return
 	}
 	s.closed = true
+	s.hub.clients.Add(-1)
 	streams := s.streams
 	s.streams = map[string]*liveStream{}
 	s.mu.Unlock()

@@ -261,10 +261,15 @@ var ErrUnauthorized = errors.New("unauthorized")
 // Authenticate validates a bearer token against the server token and every
 // device token, in constant time, and refreshes the device's sliding TTL.
 func (a *Auth) Authenticate(token, remoteIP, userAgent string) (Identity, error) {
+	// Every rejection is logged with its REASON and never with the token: an
+	// after-the-fact "why could my phone not connect" is answerable only if the
+	// reason was recorded, and "unauthorized" on its own answers nothing.
 	if token == "" {
+		a.reject(remoteIP, "no token presented")
 		return Identity{}, ErrUnauthorized
 	}
 	if !a.limiter.allow("auth:" + remoteIP) {
+		a.reject(remoteIP, "rate limited")
 		return Identity{}, ErrUnauthorized
 	}
 	sum := sha256hex(token)
@@ -276,6 +281,7 @@ func (a *Auth) Authenticate(token, remoteIP, userAgent string) (Identity, error)
 	// token. A share whose process is still up but whose time is over is shut,
 	// not merely scheduled to be shut.
 	if !a.deadline.IsZero() && time.Now().After(a.deadline) {
+		a.reject(remoteIP, "instance deadline passed")
 		return Identity{}, ErrUnauthorized
 	}
 
@@ -296,14 +302,17 @@ func (a *Auth) Authenticate(token, remoteIP, userAgent string) (Identity, error)
 		}
 	}
 	if found == nil {
+		a.reject(remoteIP, "no device matches that token")
 		return Identity{}, ErrUnauthorized
 	}
 	if !found.ExpiresAt.IsZero() && now.After(found.ExpiresAt) {
+		a.log.Info("auth: device token expired, revoking", "device", found.ID, "ip", remoteIP)
 		a.removeDeviceLocked(found.ID)
 		_ = a.save()
 		return Identity{}, ErrUnauthorized
 	}
 	if now.Sub(found.LastSeen) > DeviceTTL {
+		a.log.Info("auth: device idle past its TTL, revoking", "device", found.ID, "ip", remoteIP)
 		a.removeDeviceLocked(found.ID)
 		_ = a.save()
 		return Identity{}, ErrUnauthorized
@@ -344,6 +353,9 @@ func (a *Auth) NewPairingCode(name string) (string, time.Time, error) {
 	if err := a.save(); err != nil {
 		return "", time.Time{}, err
 	}
+	// The CODE itself is never logged — only that one was issued, for whom and
+	// until when. It is displayed on this machine's screen and nowhere else.
+	a.log.Info("pairing code issued", "name", name, "expires_at", exp)
 	return code, exp, nil
 }
 
@@ -383,6 +395,7 @@ func (a *Auth) reloadLocked() {
 // The plaintext token is returned once; only its hash is stored.
 func (a *Auth) RedeemPairing(code, name, remoteIP, userAgent string) (token string, dev Public, err error) {
 	if !a.limiter.allow("pair:" + remoteIP) {
+		a.log.Warn("pairing rejected", "reason", "rate limited", "ip", remoteIP)
 		return "", Public{}, ErrUnauthorized
 	}
 	sum := sha256hex(strings.ToUpper(strings.TrimSpace(code)))
@@ -399,12 +412,14 @@ func (a *Auth) RedeemPairing(code, name, remoteIP, userAgent string) (token stri
 		}
 	}
 	if idx < 0 {
+		a.log.Warn("pairing rejected", "reason", "no such code", "ip", remoteIP)
 		return "", Public{}, ErrUnauthorized
 	}
 	hit := a.state.Pairing[idx]
 	// Single use: consumed whether or not the rest succeeds.
 	a.state.Pairing = append(a.state.Pairing[:idx], a.state.Pairing[idx+1:]...)
 	if time.Now().After(hit.Expires) {
+		a.log.Warn("pairing rejected", "reason", "code expired", "ip", remoteIP)
 		_ = a.save()
 		return "", Public{}, ErrUnauthorized
 	}
@@ -432,7 +447,15 @@ func (a *Auth) RedeemPairing(code, name, remoteIP, userAgent string) (token stri
 		return "", Public{}, err
 	}
 	a.limiter.reset("pair:" + remoteIP)
+	a.log.Info("pairing redeemed", "device", rec.ID, "name", rec.Name, "ip", remoteIP,
+		"expires_at", rec.ExpiresAt)
 	return tok, publicOf(rec), nil
+}
+
+// reject records a failed authentication. The reason is the whole point; the
+// token never appears, here or anywhere else.
+func (a *Auth) reject(remoteIP, reason string) {
+	a.log.Warn("auth rejected", "reason", reason, "ip", remoteIP)
 }
 
 // evictLocked enforces MaxDevices with least-recently-seen eviction.
@@ -473,6 +496,7 @@ func (a *Auth) RevokeDevice(id string) error {
 	if !a.removeDeviceLocked(id) {
 		return fmt.Errorf("serve: no device %q", id)
 	}
+	a.log.Info("device revoked", "device", id)
 	return a.save()
 }
 

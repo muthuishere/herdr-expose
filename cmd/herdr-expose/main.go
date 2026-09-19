@@ -64,6 +64,12 @@ func main() {
 		err = cmdShare(os.Args[2:])
 	case "panic":
 		err = cmdPanic(os.Args[2:])
+	case "config":
+		err = cmdConfig(os.Args[2:])
+	case "logs", "log":
+		err = cmdLogs(os.Args[2:])
+	case "doctor":
+		err = cmdDoctor(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Println("herdr-expose", version)
 	case "help", "--help", "-h":
@@ -103,6 +109,13 @@ func usage() {
   share list|extend <id>|pair <id>|revoke <id>|revoke --all|restore
                         manage shares (every verb takes --json)
   panic                 revoke every share AND stop the main tunnel
+  config print-default|path|show|edit
+                        the self-documenting config: print-default emits the
+                        COMPLETE commented file with every key at its default
+  logs [--follow] [-n N] [--share ID] [--json]
+                        read the daemon's log — the only way to see what a
+                        DETACHED daemon did; --share reads a share's own log
+  doctor [--json]       preflight everything and print pass/fail per check
 
   serve also accepts --only <session> / --only-target <session>/<pane> to pin
   an instance to one scope; the scope is enforced in the store, not the client.
@@ -115,14 +128,6 @@ func originOrNone() string {
 		return name
 	}
 	return "(none)"
-}
-
-func newLogger() *slog.Logger {
-	lvl := slog.LevelInfo
-	if os.Getenv("HERDR_EXPOSE_DEBUG") != "" {
-		lvl = slog.LevelDebug
-	}
-	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl}))
 }
 
 // cfgAdapter adapts the config store (workstream C) plus the exposure manager
@@ -183,10 +188,31 @@ func cmdServe(args []string) error {
 		return err
 	}
 
+	// The log file comes up before anything else does, because everything
+	// after this point is something you may later need to explain.
+	logPath := logFilePath(cfg, state)
+	if l, closer, lerr := buildLogger(cfg, logPath); lerr != nil {
+		log.Warn("log file unusable; staying on stderr", "path", logPath, "err", lerr)
+	} else {
+		log = l
+		if closer != nil {
+			defer closer.Close()
+		}
+		// Say on the terminal where the log went, once. Otherwise a foreground
+		// `serve` looks like it has gone silent.
+		fmt.Fprintf(os.Stderr, "herdr-expose: logging to %s (herdr-expose logs -f)\n", logPath)
+	}
+	log.Info("server starting", "version", version, "pid", os.Getpid(),
+		"config", cfg.Path(), "state", state, "log", logPath,
+		"level", cfg.Log.Level, "format", cfg.Log.Format,
+		"rotate_mb", cfg.Log.MaxSizeMB, "keep", cfg.Log.Keep)
+
 	// Resolve the exposure mode FIRST: it decides the bind address (SPEC E1).
 	// cloudflare + domain but no cloudflared binary falls back to lan loudly
 	// rather than failing.
-	mgr := exposeManagerFor(cfg, state)
+	mgr := exposeManagerLogging(cfg, state, func(f string, a ...any) {
+		log.Info("exposure: " + fmt.Sprintf(f, a...))
+	})
 	defer mgr.Close()
 	res := mgr.Resolution()
 	if res.FellBack != "" {
@@ -317,7 +343,10 @@ func cmdServe(args []string) error {
 	if err != nil {
 		return err
 	}
-	return srv.Serve(ctx)
+	serveErr := srv.Serve(ctx)
+	log.Info("server stopped", "mode", store.Mode(), "bind", store.Bind(),
+		"port", store.Port(), "err", serveErr)
+	return serveErr
 }
 
 // cmdDaemon is layer 1: fork-exec serve detached and exit 0 immediately, so a
@@ -339,7 +368,17 @@ func cmdDaemon() error {
 	if err != nil {
 		return err
 	}
-	logFile, err := os.OpenFile(state+"/serve.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	// The file the daemon writes and the file `herdr-expose logs` reads are
+	// resolved by the SAME function, so a log can never land where nothing
+	// reads it.
+	logPath := filepath.Join(state, config.DefaultLogFileName)
+	if cfg, cerr := config.Load(); cerr == nil {
+		logPath = logFilePath(cfg, state)
+	}
+	if derr := os.MkdirAll(filepath.Dir(logPath), 0o700); derr != nil {
+		return derr
+	}
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
 	}
@@ -356,6 +395,7 @@ func cmdDaemon() error {
 	recordPID(state, ledgerEntry{PID: cmd.Process.Pid, At: time.Now(), Kind: "daemon"})
 	_ = cmd.Process.Release()
 	fmt.Println("started, pid", cmd.Process.Pid)
+	fmt.Println("logs:", logPath, "(herdr-expose logs -f)")
 	return nil
 }
 
@@ -632,13 +672,23 @@ func cmdService(args []string) error {
 
 // exposeManagerFor builds a tunnel manager from config.
 func exposeManagerFor(cfg *config.Config, state string) *expose.Manager {
+	return exposeManagerLogging(cfg, state, func(f string, a ...any) {
+		fmt.Fprintf(os.Stderr, f+"\n", a...)
+	})
+}
+
+// exposeManagerLogging is the same manager with its narration routed
+// somewhere specific. The daemon sends it to the LOG — tunnel provisioning
+// steps and teardown are exactly what you want to read back afterwards — and
+// `doctor` sends it to a no-op, because doctor's output is the report.
+func exposeManagerLogging(cfg *config.Config, state string, logf func(string, ...any)) *expose.Manager {
 	root := os.Getenv("HERDR_PLUGIN_ROOT")
 	if root == "" {
 		root, _ = os.Getwd()
 	}
 	return expose.New(expose.Options{
 		Port: cfg.Port(), Expose: cfg.Expose, Root: root, StateDir: state,
-		Logf: func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) },
+		Logf: logf,
 	})
 }
 
@@ -769,8 +819,11 @@ func superviseExposure(ctx context.Context, mgr *expose.Manager, state string, l
 			_ = mgr.Stop()
 			halted = true
 		case !present && (halted || first):
-			if _, err := mgr.Start(ctx); err != nil {
+			log.Info("tunnel provisioning", "mode", mgr.Resolution().Mode, "url", mgr.Resolution().URL)
+			if st, err := mgr.Start(ctx); err != nil {
 				log.Warn("exposure did not start", "err", err)
+			} else {
+				log.Info("tunnel provisioned", "url", st.URL, "healthy", st.Healthy)
 			}
 			halted = false
 		}

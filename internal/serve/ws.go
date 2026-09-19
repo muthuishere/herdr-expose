@@ -196,11 +196,13 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.hostAllowed(r) {
+		s.log.Warn("ws refused", "reason", "forbidden host", "host", r.Host, "ip", ip)
 		http.Error(w, "forbidden host", http.StatusForbidden)
 		return
 	}
 	origin := r.Header.Get("Origin")
 	if origin != "" && !s.originAllowed(r, origin) {
+		s.log.Warn("ws refused", "reason", "forbidden origin", "origin", origin, "ip", ip)
 		http.Error(w, "forbidden origin", http.StatusForbidden)
 		return
 	}
@@ -213,6 +215,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		// Host pinning above have already run and are what actually defend
 		// this; a browser upgrade with no Origin is refused here.
 		if origin == "" && looksLikeBrowser(r) {
+			s.log.Warn("ws refused", "reason", "browser upgrade with no Origin", "ip", ip)
 			http.Error(w, "origin required", http.StatusForbidden)
 			return
 		}
@@ -226,6 +229,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		var err error
 		who, err = s.auth.Authenticate(token, ip, r.UserAgent())
 		if err != nil {
+			// Auth has already logged the specific reason.
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -257,10 +261,17 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		done:       make(chan struct{}),
 	}
 	conn.sess = s.hub.NewSession(ctx, conn)
+	s.log.Info("client connected", "conn", conn.id, "identity", who.Kind,
+		"name", who.Name, "device", who.DeviceID, "ip", ip,
+		"clients", s.hub.ConnectedClients())
+	connectedAt := time.Now()
 	go conn.writeLoop()
 	defer func() {
 		conn.sess.Close()
 		conn.shutdown()
+		s.log.Info("client disconnected", "conn", conn.id, "identity", who.Kind,
+			"ip", ip, "duration", time.Since(connectedAt).Round(time.Second),
+			"clients", s.hub.ConnectedClients())
 	}()
 
 	version, protocol := s.hub.Store().HerdrVersion()

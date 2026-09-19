@@ -789,3 +789,126 @@ clock.
 **Extending** is an explicit, logged, revocable act: `share extend <id>
 --hours N | --days N` pushes the deadline on `share.json` AND on the
 already-issued device tokens, or the tokens expire underneath a live share.
+
+---
+
+# AMENDMENTS 11 — the config documents itself
+
+Owner: "create the config automatically with empty so they know — need otel,
+logs and all stuff."
+
+## H1. First run writes the COMPLETE config, not a minimal one
+
+Every section and every key is present with its default value and a one-line
+comment saying what it does. A key that exists but is not written is a key
+nobody will ever find. Optional subsystems (otel, logging to a file, share
+defaults, limits) appear too, switched off, so their existence is discoverable
+without reading the source or the docs.
+
+Rules that still hold: unknown keys are preserved on rewrite, missing keys take
+defaults, and an older config loads on a newer binary. Adding a section must
+never rewrite or reorder what the user has already edited.
+
+`herdr-expose config print-default` prints the same scaffold to stdout (mirrors
+`herdr --default-config`). `config path` / `config show` / `config edit`.
+
+## H2. Sections
+
+```toml
+[server]
+port = 21118
+# No `bind` key. The resolved exposure mode decides the address — see [expose].
+
+[auth]
+pairing_ttl_seconds = 600
+max_devices = 32
+device_ttl_days = 30
+pair_attempts_per_minute = 10
+handshake_attempts_per_minute = 60
+
+[ui]
+theme = "auto"              # auto | light | dark
+default_view = "grid"       # grid | focus
+
+[expose]
+cloudflare = false
+domain = ""                 # REQUIRED when cloudflare = true
+tunnel_name = "herdr-expose"
+ngrok = false
+lan = false                 # bind 0.0.0.0; also the automatic fallback
+autostart = false
+
+[share]
+domain_suffix = ""          # `share --name review` -> review.<suffix>
+default_hours = 1
+default_mode = "auto"       # auto | lan | domain
+max_concurrent = 10
+
+[log]
+level = "info"              # debug | info | warn | error
+format = "text"             # text | json
+file = ""                   # empty = stderr, captured by the service manager
+
+[otel]
+enabled = false
+endpoint = ""               # e.g. http://10.8.0.4:4318
+protocol = "http/protobuf"  # http/protobuf | grpc
+service_name = "herdr-expose"
+traces = true
+metrics = true
+logs = false
+```
+
+## H3. OTEL credentials are env-only. No exception.
+
+OTLP headers routinely carry an auth token. **There is no header/token key in
+the config file and there never will be.** Headers come from
+`$OTEL_EXPORTER_OTLP_HEADERS`, read by name at point of use, and the value must
+never reach a log line, `status` output, an error message or a state file — the
+same rule as the Cloudflare token. A config file is something people paste into
+issues; a token must not be sitting in it.
+
+## H4. What is worth exporting
+
+Spans on the paths we already budget: upstream connect/resync, terminal stream
+spawn, share create/teardown, tunnel provisioning. Metrics: the existing
+`/v1/metrics` latency histograms, frames/bytes per second, connected clients,
+connected sessions, active shares. `logs = false` by default — terminal output
+must NEVER be exported; it is the user's screen contents, which can contain
+anything, and shipping it to a collector is a data-exfiltration path, not
+telemetry.
+
+---
+
+# AMENDMENTS 12 — no OTEL. Local log only. (WITHDRAWS H3/H4)
+
+Owner: "no otel machine, just local log please." AMENDMENTS 11 §H3 and §H4 are
+withdrawn in full: no `[otel]` section, no OTLP exporter, no
+`go.opentelemetry.io` dependency. The rest of AMENDMENTS 11 stands.
+
+```toml
+[log]
+level       = "info"   # debug | info | warn | error
+format      = "text"   # text | json
+file        = ""       # empty = <state>/herdr-expose.log
+max_size_mb = 10       # rotate past this
+keep        = 3        # rotated files retained
+```
+
+- **Default to a FILE, not stderr.** A detached daemon's stderr goes nowhere,
+  and "no way to see what the daemon did" is the problem being solved.
+- **Rotate in-process, no dependency.** This runs for weeks; an unbounded log is
+  a disk-filling bug.
+- **Shares log to their own file** in the share's state dir, so a share's life is
+  auditable on its own and the log dies with the share.
+- **Never log pane bytes or secrets, at any level including debug.** Terminal
+  output is the user's screen and can contain anything; tokens are logged as ids
+  or hashes, never values. Enforced in code, following the existing
+  `internal/expose` redactor.
+- Log what answers "what happened": start/stop with mode+bind, session
+  connect/disconnect, tunnel provisioning and teardown, share
+  create/extend/revoke/expire, pairing issued/redeemed/failed with device id,
+  auth rejections with reason, upstream reconnects.
+
+`herdr-expose logs [--follow] [-n N] [--share <id>] [--json]`.
+`doctor` reports the log path, size and writability.

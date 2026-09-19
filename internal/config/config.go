@@ -18,6 +18,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -26,7 +27,7 @@ import (
 	"github.com/pelletier/go-toml/v2"
 )
 
-// Defaults, mirrored by defaultFileTemplate below.
+// Defaults, mirrored by the scaffold in scaffold.go.
 const (
 	DefaultPort = 21118
 	DefaultBind = "127.0.0.1"
@@ -38,7 +39,26 @@ const (
 	DefaultHandshakeAttempts = 60
 	DefaultTheme             = "auto"
 	DefaultView              = "grid"
+
+	// [share] — AMENDMENTS 9/10: every share is time-boxed, so these are
+	// defaults for a TTL, never a way to switch time-boxing off.
+	DefaultShareHours      = 1.0
+	DefaultShareMode       = "auto"
+	DefaultShareConcurrent = 10
+
+	// [log] — a real FILE by default, rotated in-process. A detached daemon's
+	// stderr goes nowhere useful, and an unbounded log on something designed
+	// to run for weeks is a disk-filling bug.
+	DefaultLogLevel     = "info"
+	DefaultLogFormat    = "text"
+	DefaultLogMaxSizeMB = 10
+	DefaultLogKeep      = 3
 )
+
+// DefaultLogFileName is the log inside the state dir that `file = ""` means.
+// The daemon writes it and `herdr-expose logs` reads it, both through the same
+// resolver, so a log can never land where nothing reads it.
+const DefaultLogFileName = "herdr-expose.log"
 
 // Mode is the resolved exposure mode (AMENDMENT E1). It is decided at startup
 // by internal/expose — never by a user-set bind address.
@@ -95,6 +115,51 @@ type Auth struct {
 type UI struct {
 	Theme       string `toml:"theme" json:"theme"`
 	DefaultView string `toml:"default_view" json:"default_view"`
+}
+
+// Share is the [share] table: defaults for `herdr-expose share`.
+type Share struct {
+	// DomainSuffix turns `share --name review` into review.<suffix>.
+	DomainSuffix string `toml:"domain_suffix" json:"domain_suffix"`
+	// DefaultHours is the TTL used when neither --hours nor --days is given.
+	DefaultHours float64 `toml:"default_hours" json:"default_hours"`
+	// DefaultMode is auto | lan | domain.
+	DefaultMode string `toml:"default_mode" json:"default_mode"`
+	// MaxConcurrent caps live shares.
+	MaxConcurrent int `toml:"max_concurrent" json:"max_concurrent"`
+}
+
+// Log is the [log] table. `herdr-expose logs` reads whatever File points at,
+// which is the only way to see what a detached daemon did.
+type Log struct {
+	Level  string `toml:"level" json:"level"`   // debug | info | warn | error
+	Format string `toml:"format" json:"format"` // text | json
+	// File is an explicit path. Empty means the default log inside the state
+	// dir — NOT stderr: a detached daemon's stderr goes nowhere anybody can
+	// find, which is the whole problem this exists to solve.
+	File string `toml:"file" json:"file"`
+
+	// MaxSizeMB is the size at which the log rotates. Rotation is in-process
+	// and dependency-free; a daemon meant to run for weeks must not be able to
+	// fill the disk.
+	MaxSizeMB int `toml:"max_size_mb" json:"max_size_mb"`
+	// Keep is how many rotated files are retained (herdr-expose.log.1 ...).
+	Keep int `toml:"keep" json:"keep"`
+}
+
+// SlogLevel maps the configured level onto slog. An unknown value has already
+// been refused by Validate; it degrades to info rather than panicking.
+func (l Log) SlogLevel() slog.Level {
+	switch strings.ToLower(strings.TrimSpace(l.Level)) {
+	case "debug":
+		return slog.LevelDebug
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
 }
 
 // Adapter is one [[expose.adapters]] entry.
@@ -197,6 +262,8 @@ type Config struct {
 	Auth   Auth   `toml:"auth" json:"-"`
 	UI     UI     `toml:"ui" json:"ui"`
 	Expose Expose `toml:"expose" json:"expose"`
+	Share  Share  `toml:"share" json:"share"`
+	Log    Log    `toml:"log" json:"log"`
 
 	path string
 	raw  map[string]any
@@ -254,7 +321,18 @@ func Defaults() *Config {
 		},
 		UI:     UI{Theme: DefaultTheme, DefaultView: DefaultView},
 		Expose: Expose{},
-		raw:    map[string]any{},
+		Share: Share{
+			DefaultHours:  DefaultShareHours,
+			DefaultMode:   DefaultShareMode,
+			MaxConcurrent: DefaultShareConcurrent,
+		},
+		Log: Log{
+			Level:     DefaultLogLevel,
+			Format:    DefaultLogFormat,
+			MaxSizeMB: DefaultLogMaxSizeMB,
+			Keep:      DefaultLogKeep,
+		},
+		raw: map[string]any{},
 	}
 }
 
@@ -293,6 +371,15 @@ func LoadFrom(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	switch {
 	case err == nil:
+		// AMENDMENTS 11 §H1: a section this release added must become visible
+		// in the user's file, and it must get there by APPENDING — their edits,
+		// their key order and their comments above are untouched. Best-effort:
+		// a read-only or root-owned config is not a reason to refuse to start.
+		if added, aerr := EnsureSections(path); aerr == nil && len(added) > 0 {
+			if d2, rerr := os.ReadFile(path); rerr == nil {
+				data = d2
+			}
+		}
 	case os.IsNotExist(err):
 		if err := create(path); err != nil {
 			return nil, err
@@ -398,6 +485,12 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("expose.domain %q must be a bare hostname such as \"herdr.example.com\"", d)
 		}
 	}
+	if err := c.validateShare(); err != nil {
+		return err
+	}
+	if err := c.validateLog(); err != nil {
+		return err
+	}
 	// C1: a static domain is mandatory. There is no random-hostname fallback.
 	if d == "" {
 		switch c.Expose.Provider() {
@@ -409,6 +502,49 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("expose.ngrok = true requires expose.domain set to a RESERVED ngrok domain, " +
 				"e.g. domain = \"herdr.ngrok.app\" (random ngrok URLs are not supported)")
 		}
+	}
+	return nil
+}
+
+func (c *Config) validateShare() error {
+	switch c.Share.DefaultMode {
+	case "auto", "lan", "domain":
+	default:
+		return fmt.Errorf("share.default_mode %q is not one of auto|lan|domain", c.Share.DefaultMode)
+	}
+	if c.Share.DefaultHours <= 0 {
+		return fmt.Errorf("share.default_hours must be positive, got %v — every share is time-boxed (AMENDMENTS 10); "+
+			"a long share is a long TTL, e.g. --days 30, not an unlimited one", c.Share.DefaultHours)
+	}
+	if c.Share.DefaultHours > 365*24 {
+		return fmt.Errorf("share.default_hours %v is over a year; a share is time-boxed by design", c.Share.DefaultHours)
+	}
+	if c.Share.MaxConcurrent <= 0 {
+		return fmt.Errorf("share.max_concurrent must be positive, got %d", c.Share.MaxConcurrent)
+	}
+	d := strings.TrimSpace(c.Share.DomainSuffix)
+	if d != "" && (strings.Contains(d, "/") || strings.Contains(d, ":") || !strings.Contains(d, ".")) {
+		return fmt.Errorf("share.domain_suffix %q must be a bare domain such as \"share.example.com\"", d)
+	}
+	return nil
+}
+
+func (c *Config) validateLog() error {
+	switch strings.ToLower(strings.TrimSpace(c.Log.Level)) {
+	case "debug", "info", "warn", "warning", "error":
+	default:
+		return fmt.Errorf("log.level %q is not one of debug|info|warn|error", c.Log.Level)
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Log.Format)) {
+	case "text", "json":
+	default:
+		return fmt.Errorf("log.format %q is not one of text|json", c.Log.Format)
+	}
+	if c.Log.MaxSizeMB < 0 {
+		return fmt.Errorf("log.max_size_mb must not be negative, got %d (0 disables rotation)", c.Log.MaxSizeMB)
+	}
+	if c.Log.Keep < 0 {
+		return fmt.Errorf("log.keep must not be negative, got %d", c.Log.Keep)
 	}
 	return nil
 }
@@ -517,6 +653,21 @@ func (c *Config) merged() map[string]any {
 	}
 	doc["expose"] = expose
 
+	share := rawTable(doc, "share")
+	share["domain_suffix"] = c.Share.DomainSuffix
+	share["default_hours"] = c.Share.DefaultHours
+	share["default_mode"] = c.Share.DefaultMode
+	share["max_concurrent"] = int64(c.Share.MaxConcurrent)
+	doc["share"] = share
+
+	lg := rawTable(doc, "log")
+	lg["level"] = c.Log.Level
+	lg["format"] = c.Log.Format
+	lg["file"] = c.Log.File
+	lg["max_size_mb"] = int64(c.Log.MaxSizeMB)
+	lg["keep"] = int64(c.Log.Keep)
+	doc["log"] = lg
+
 	return doc
 }
 
@@ -587,13 +738,14 @@ func cloneMap(m map[string]any) map[string]any {
 	return out
 }
 
-// create writes the first-run file: commented defaults with the token already
-// minted, so the file is correct after a single 0600 write.
+// create writes the first-run file: the COMPLETE scaffold (AMENDMENTS 11 §H1),
+// every section and every key present with its default and a one-line comment,
+// in a single 0600 write.
 func create(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
-	return writeFile0600(path, []byte(defaultFileTemplate))
+	return writeFile0600(path, []byte(DefaultFileContents()))
 }
 
 // writeFile0600 writes atomically (temp file + rename) with 0600 permissions.
@@ -624,72 +776,3 @@ func writeFile0600(path string, data []byte) error {
 	}
 	return os.Chmod(path, 0o600)
 }
-
-const defaultFileTemplate = `# herdr-expose configuration.
-# Unknown keys are preserved when this file is rewritten, and missing keys fall
-# back to the documented defaults, so it is safe to hand-edit and safe to keep
-# across upgrades.
-
-[server]
-port = 21118
-# There is no 'bind' key: the exposure mode below decides the bind address
-# (loopback for a tunnel or for local mode, 0.0.0.0 for lan mode).
-# allowed_origins = ["https://herdr.example.com"]   # checked before any CORS header
-
-# Auth policy only. There are NO secrets in this file: the server token and the
-# per-device tokens are stored as SHA-256 hashes in the 0600 state file.
-[auth]
-pairing_ttl_seconds = 600           # pairing code lifetime (10 minutes)
-max_devices = 32                    # LRU-evicted
-device_ttl_days = 30                # sliding expiry per device
-pair_attempts_per_minute = 10       # per remote address
-handshake_attempts_per_minute = 60  # per remote address
-
-[ui]
-theme = "auto"              # auto | light | dark
-default_view = "grid"       # grid | focus
-
-# Exposure. The happy path is two lines and zero JavaScript:
-#
-#   cloudflare = true
-#   domain = "herdr.example.com"
-#
-# herdr-expose then creates or reuses a named Cloudflare tunnel, mints its
-# credentials through the API (so 'cloudflared login' and its browser prompt are
-# never needed), upserts the proxied CNAME, runs cloudflared, waits for
-# https://<domain>/healthz to answer, and restarts it if it dies. The API token
-# is read from the environment variable CLOUDFLARE_ALLPURPOSE_TOKEN at the
-# moment it is used; it is never stored here, never written to state, never
-# logged and never returned by 'status'.
-[expose]
-cloudflare = false
-# domain is REQUIRED when cloudflare or ngrok is on. The tunnel is static, on a
-# hostname you own; there is no ephemeral *.trycloudflare.com path at all.
-# domain = "herdr.example.com"
-# tunnel_name = "herdr-expose"
-ngrok = false
-
-# lan = true binds 0.0.0.0 so phones and laptops on the same wifi can reach this
-# machine directly at http://<this-machine-ip>:<port>. It is also the AUTOMATIC
-# fallback when cloudflare is on but cloudflared is not installed.
-#
-# It is safe because auth is never optional: a device token is required in every
-# mode, and the pairing code is shown only on this machine's screen, so a
-# neighbour on the network can reach the port and get nowhere. Note that plain
-# HTTP on a LAN IP is not a secure context, so the PWA cannot be INSTALLED over
-# LAN (the web app itself works fine).
-lan = false
-
-autostart = false
-
-# Escape hatch for exotic setups (tailscale, a corporate proxy, a homelab box):
-# point 'adapter' at one of the JS adapters below. A named adapter wins over the
-# built-ins above.
-# adapter = "my-tunnel"
-#
-# [[expose.adapters]]
-# id = "my-tunnel"
-# script = "adapters/template.js"
-# [expose.adapters.env]
-# hostname = "herdr.example.com"
-`
