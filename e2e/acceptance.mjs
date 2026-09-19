@@ -434,6 +434,13 @@ const main = async () => {
   // mask exactly the bug this is here to catch. A bash prompt emits nothing.
   const shellOpen = await openPane(page, SESSION, SHELL_PANE)
   check(`the idle pane (${SHELL_PANE}) opens and goes live`, shellOpen)
+  // Resize shortly AFTER mount, which is what a real client does when it fits
+  // itself to the box — and what made LIVE targets die silently before
+  // 4e9aee3. Without this the idle soak below passes on a broken build.
+  await sleep(800)
+  await page.setViewportSize({ width: 1240, height: 860 })
+  await sleep(800)
+  await page.setViewportSize({ width: 1280, height: 900 })
   await sleep(2000)
 
   const statsBefore = await stats(page)

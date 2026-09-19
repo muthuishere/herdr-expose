@@ -33,6 +33,10 @@ state/
 logs/
 .herdr-expose/
 
+# ---- e2e ----------------------------------------------------------------
+# Screenshots, stats and results from e2e/acceptance.sh. Evidence, not source.
+e2e/artifacts/
+
 # ---- tooling ------------------------------------------------------------
 schema.json
 *.test
