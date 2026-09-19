@@ -159,7 +159,13 @@ func (w *wsConn) backlogged() bool { return w.queued.Load() > SocketBacklogBytes
 func (w *wsConn) shutdown() {
 	w.closeMu.Do(func() {
 		close(w.done)
-		_ = w.c.Close()
+		// `c` is nil only in a unit test that drives a connection with no real
+		// socket, and it is reachable from SendJSON's queue-full path — so a
+		// slow drainer turned an existing regression test into an intermittent
+		// nil-deref panic rather than a failure it could report.
+		if w.c != nil {
+			_ = w.c.Close()
+		}
 	})
 }
 
@@ -357,6 +363,25 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 			"min_cols": core.MinCols, "min_rows": core.MinRows,
 			"max_write_bytes": core.MaxWriteBytes,
 		},
+		// Render modes a client may declare. `transcript` is spelled out here
+		// with its no-geometry contract because it is the one mode where
+		// sending `resize` is a bug rather than an omission.
+		"viewport": map[string]any{
+			"modes": []string{
+				string(core.ModeLive), string(core.ModeTranscript),
+				string(core.ModeSummary), string(core.ModeNone),
+			},
+			"transcript": map[string]any{
+				"plane":            "control",
+				"frame":            "transcript",
+				"geometry":         false,
+				"ansi_stripped":    true,
+				"interval_ms":      core.TranscriptInterval.Milliseconds(),
+				"sends_on_change":  true,
+				"sources":          []string{core.SourceRecent, core.SourceDetection},
+				"is_screen_buffer": true,
+			},
+		},
 		// A scoped instance says so: the client renders one session and knows
 		// the rest of the machine is not merely hidden but absent.
 		"scope": s.hub.Store().Scope().String(),
@@ -512,6 +537,20 @@ func (s *Server) handleControl(ctx context.Context, conn *wsConn, data []byte) {
 			cur[t] = "none"
 		}
 		conn.sess.SetViewport(cur)
+
+	case "repaint":
+		// The client has DETECTED that its own rendering is out of alignment
+		// (geometry drift, a font that loaded late, a wrapped buffer that
+		// disagrees with the width) and is repairing itself. It resets its
+		// emulator and needs a full screen to repaint from. Only the client can
+		// measure this, so only the client can ask.
+		var d struct {
+			Target string `json:"target"`
+		}
+		if err := json.Unmarshal(m.Data, &d); err != nil || d.Target == "" {
+			return
+		}
+		conn.sess.Repaint(d.Target)
 
 	case "scroll":
 		var d struct {

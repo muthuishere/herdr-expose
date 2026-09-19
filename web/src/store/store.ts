@@ -17,6 +17,7 @@ import type {
   PaneId,
   ResultData,
   TreeData,
+  TranscriptData,
   TreePane,
   ViewportMode,
   WelcomeData,
@@ -70,6 +71,12 @@ export interface AppState {
   runtime: Record<PaneId, PaneRuntime>
   /** Per-pane detection text from `agent` frames when state === 'blocked'. */
   detection: Record<PaneId, string>
+  /**
+   * Latest `transcript` frame per pane. The server sends one ONLY when the text
+   * changed, so this is deliberately sticky: it survives until replaced, and an
+   * idle agent keeps showing what it last displayed rather than blanking.
+   */
+  transcript: Record<PaneId, TranscriptData>
 
   /** The pane the USER has opened full-screen; drives the `viewport` frame. */
   focused: PaneId | null
@@ -98,6 +105,7 @@ const initial: AppState = {
   panesById: {},
   runtime: {},
   detection: {},
+  transcript: {},
   focused: null,
   visible: [],
   serverModes: {},
@@ -183,7 +191,9 @@ export const apply = {
     // Drop runtime for panes the server no longer lists.
     const runtime: Record<PaneId, PaneRuntime> = {}
     for (const [id, r] of Object.entries(state.runtime)) if (panesById[id]) runtime[id] = r
-    set({ tree: d, panesById, serverModes: modes, runtime, lastSeq: seq })
+    const transcript: Record<PaneId, TranscriptData> = {}
+    for (const [id, t] of Object.entries(state.transcript)) if (panesById[id]) transcript[id] = t
+    set({ tree: d, panesById, serverModes: modes, runtime, transcript, lastSeq: seq })
   },
 
   /**
@@ -283,6 +293,16 @@ export const apply = {
     })
   },
 
+  /**
+   * Control-plane `transcript`. It carries the pane's visible buffer with the
+   * ANSI already stripped, so it goes to the store as TEXT and never near the
+   * byte bus or xterm.
+   */
+  transcript(seq: number, d: TranscriptData) {
+    if (!d?.target) return
+    setLazy({ lastSeq: seq, transcript: { ...state.transcript, [d.target]: d } })
+  },
+
   result(seq: number, d: ResultData) {
     set({ lastSeq: seq, results: { ...state.results, [d.id]: d } })
   },
@@ -351,5 +371,12 @@ export function setVisible(ids: PaneId[]) {
 
 /** Reset only the volatile parts on a session change (resume impossible). */
 export function resetSession() {
-  set({ lastSeq: 0, runtime: {}, detection: {}, tree: EMPTY_TREE, panesById: {} })
+  set({
+    lastSeq: 0,
+    runtime: {},
+    detection: {},
+    transcript: {},
+    tree: EMPTY_TREE,
+    panesById: {},
+  })
 }

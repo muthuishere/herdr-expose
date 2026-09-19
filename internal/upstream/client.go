@@ -228,6 +228,41 @@ func (c *Client) PaneRead(ctx context.Context, paneID, source, format string, li
 	return res.Read.Text, nil
 }
 
+// PaneReadFull is PaneRead with the whole result, not just the text: the
+// transcript view needs `truncated` in order to say "this is the tail" rather
+// than implying it has the lot.
+func (c *Client) PaneReadFull(ctx context.Context, paneID, source string, lines int, out *PaneReadResult) error {
+	params := map[string]any{
+		"pane_id":    paneID,
+		"source":     source,
+		"format":     "text",
+		"strip_ansi": true,
+	}
+	if lines > 0 {
+		params["lines"] = lines
+	}
+	return c.CallInto(ctx, "pane.read", params, out)
+}
+
+// AgentRead is `agent.read` — the agent-facing read of a pane's buffer.
+//
+// Its target parameter is named `target`, not `pane_id`, and it accepts the
+// pane id. It is NOT a resize: like pane.read it takes no geometry and never
+// attaches to the terminal, which is what makes a transcript subscriber
+// non-destructive.
+func (c *Client) AgentRead(ctx context.Context, target, source string, lines int, out *PaneReadResult) error {
+	params := map[string]any{
+		"target":     target,
+		"source":     source,
+		"format":     "text",
+		"strip_ansi": true,
+	}
+	if lines > 0 {
+		params["lines"] = lines
+	}
+	return c.CallInto(ctx, "agent.read", params, out)
+}
+
 // readLine reads one newline-terminated JSON document, without a size cap that
 // would truncate a large session.snapshot.
 func readLine(br *bufio.Reader) ([]byte, error) {

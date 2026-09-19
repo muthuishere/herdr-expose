@@ -126,34 +126,79 @@ async function waitForTermText(page, needle, timeoutMs) {
  * test. The app's own viewport map says which target it is streaming `live`,
  * which is exactly the question "is the right pane open?".
  */
-async function openPane(page, session, paneId) {
+async function openPane(page, session, paneId, want = 'live') {
   const target = `${session}/${paneId}`
-  const rows = page.locator('.sidebar .row, .app-mobile .row')
-  const n = await rows.count()
-  for (let i = 0; i < n; i++) {
-    // On the phone the list is REPLACED by the pane, so step back out before
-    // trying the next candidate.
-    const back = page.locator('.paneview .iconbtn[aria-label="Back to panes"]')
-    if (await back.isVisible().catch(() => false)) {
-      await back.click().catch(() => {})
-      await page.locator('.row').first().waitFor({ state: 'visible', timeout: 5000 }).catch(() => {})
-    }
-    try {
-      await rows.nth(i).click({ timeout: 10000 })
-    } catch {
-      continue
-    }
-    await page
-      .locator('.term-host .xterm')
-      .waitFor({ state: 'visible', timeout: 20000 })
-      .catch(() => {})
-    for (let j = 0; j < 12; j++) {
-      const vp = (await stats(page))?.viewport ?? {}
-      if (vp[target] === 'live') return true
-      await sleep(250)
-    }
+  // BY TARGET, never by index or title. Row order is not stable — "Needs you"
+  // re-pins a pane the moment it blocks — and a title is whatever the shell
+  // last wrote to OSC 0/2. Both were unsafe handles and both bit this suite.
+  const row = page.locator(`.row[data-target="${target}"]`).first()
+
+  // On the phone the list is REPLACED by the pane, so step back out first.
+  const back = page.locator('.paneview .iconbtn[aria-label="Back to panes"]')
+  if (await back.isVisible().catch(() => false)) {
+    await back.click().catch(() => {})
+    await page.locator('.row').first().waitFor({ state: 'visible', timeout: 5000 }).catch(() => {})
+  }
+  try {
+    await row.click({ timeout: 15000 })
+  } catch {
+    return false
+  }
+  await page
+    .locator(want === 'transcript' ? '.tr-body' : '.term-host .xterm')
+    .waitFor({ state: 'visible', timeout: 20000 })
+    .catch(() => {})
+  for (let j = 0; j < 24; j++) {
+    const vp = (await stats(page))?.viewport ?? {}
+    if (vp[target] === want) return true
+    await sleep(250)
   }
   return false
+}
+
+/**
+ * Flip the header view toggle and wait for the server-declared mode to follow.
+ * A pane with an agent now DEFAULTS to transcript, so every terminal assertion
+ * has to ask for the terminal explicitly.
+ */
+async function setView(page, session, paneId, kind) {
+  const target = `${session}/${paneId}`
+  const want = kind === 'transcript' ? 'transcript' : 'live'
+  await page.locator(`.viewtoggle-btn:text-is("${kind === 'transcript' ? 'text' : 'term'}")`).click()
+  for (let i = 0; i < 24; i++) {
+    const vp = (await stats(page))?.viewport ?? {}
+    if (vp[target] === want) return true
+    await sleep(250)
+  }
+  return false
+}
+
+/** Text the transcript view is actually rendering. */
+async function transcriptText(page) {
+  return page.evaluate(() => document.querySelector('.tr-text')?.innerText ?? '')
+}
+
+async function waitForTranscriptText(page, needle, timeoutMs) {
+  const t0 = Date.now()
+  while (Date.now() - t0 < timeoutMs) {
+    if ((await transcriptText(page)).includes(needle)) return Date.now() - t0
+    await sleep(300)
+  }
+  return -1
+}
+
+/**
+ * `viewport_rows` for a pane, straight from Herdr. This is the number
+ * AMENDMENTS 13 is about: attaching a live observer changes it (and SIGWINCHes
+ * the agent into throwing its screen away); a transcript subscriber must not.
+ */
+function viewportRows(pane) {
+  try {
+    const panes = herdrJSON('pane', 'list').panes ?? []
+    return panes.find((p) => p.pane_id === pane)?.scroll?.viewport_rows ?? null
+  } catch {
+    return null
+  }
 }
 
 async function stats(page) {
@@ -285,14 +330,110 @@ const main = async () => {
     false,
   )
 
-  /* -- 4. the terminal renders what the agent says ----------------------- */
-  // Open the pane FIRST and let the geometry settle: attaching resizes the
-  // PTY, and a full-screen TUI redraws (and loses its old screen) on SIGWINCH.
-  // Then make the agent speak and watch the answer arrive live.
+  /* -- 4. TRANSCRIPT: the default for an agent pane, and non-destructive -- */
+  //
+  // This is the headline property of AMENDMENTS 13. A live observer attaches a
+  // PTY at the browser's size, which SIGWINCHes an agent TUI into discarding
+  // its screen — so opening a pane on a phone used to destroy the history you
+  // opened it to read. A transcript subscriber declares no geometry at all, and
+  // `viewport_rows` is where that is either true or false.
+  const rowsBefore = viewportRows(AGENT_PANE)
   check(
-    `the agent pane (${AGENT_PANE}) opens and goes live`,
-    await openPane(page, SESSION, AGENT_PANE),
+    'herdr reports a viewport_rows for the agent pane before we attach',
+    typeof rowsBefore === 'number' && rowsBefore > 0,
+    `viewport_rows=${rowsBefore}`,
   )
+
+  const trOpen = await openPane(page, SESSION, AGENT_PANE, 'transcript')
+  check(
+    `an agent pane (${AGENT_PANE}) opens in TRANSCRIPT view by default`,
+    trOpen,
+    `viewport declared ${JSON.stringify((await stats(page))?.viewport ?? {})}`,
+  )
+  await sleep(3000)
+  await shot('03a-transcript')
+
+  const rowsAfter = viewportRows(AGENT_PANE)
+  check(
+    'THE POINT: attaching in transcript view does NOT resize the pane',
+    rowsBefore !== null && rowsAfter === rowsBefore,
+    `viewport_rows ${rowsBefore} -> ${rowsAfter}`,
+  )
+  const trStats = (await stats(page))?.targets?.[`${SESSION}/${AGENT_PANE}`] ?? {}
+  check(
+    'and the client sent no `resize` for it at all',
+    (trStats.resizeSent ?? 0) === 0,
+    `resizeSent=${trStats.resizeSent ?? 0}`,
+  )
+
+  const trText = await transcriptText(page)
+  check(
+    'the transcript renders readable text from the agent pane',
+    trText.trim().length > 20,
+    `${trText.trim().length} chars: ${JSON.stringify(trText.trim().slice(0, 80))}`,
+  )
+  check(
+    'the transcript carries no escape sequences (stripped server-side)',
+    // eslint-disable-next-line no-control-regex
+    !/\u001b/.test(trText),
+    'searched the rendered text for ESC',
+  )
+  const prov = await page.locator('.tr-provenance').innerText().catch(() => '')
+  check(
+    'the transcript says plainly that it is a SCREEN, not a conversation log',
+    /screen/i.test(prov) && /not a reconstructed conversation/i.test(prov),
+    JSON.stringify(prov.slice(0, 140)),
+  )
+  check(
+    'and it is honest about not resizing the pane',
+    /does not resize/i.test(prov),
+    JSON.stringify(prov.slice(-60)),
+  )
+
+  /* -- 4b. the prompt box round-trips to the agent ----------------------- */
+  const trToken = `HEXE2E-TR-${Math.random().toString(16).slice(2, 8)}`
+  await page.locator('.tr-input').fill(`Reply with exactly this text and nothing else: ${trToken}`)
+  await page.locator('.tr-send').click()
+  let trArrived = -1
+  for (let i = 0; i < 40; i++) {
+    if (paneText(AGENT_PANE, 200).includes(trToken)) {
+      trArrived = i * 500
+      break
+    }
+    await sleep(500)
+  }
+  check(
+    'the transcript prompt box sends a real prompt to the agent',
+    trArrived >= 0,
+    trArrived >= 0
+      ? `"${trToken}" reached ${AGENT_PANE} in ~${trArrived}ms (verified with \`herdr pane read\`)`
+      : `"${trToken}" never reached the pane`,
+  )
+  const trEcho = await waitForTranscriptText(page, trToken, 45000)
+  check(
+    'and the transcript shows it back within a couple of poll ticks',
+    trEcho >= 0,
+    trEcho >= 0 ? `visible after ${trEcho}ms` : 'never appeared in 45s',
+  )
+  const rowsAfterPrompt = viewportRows(AGENT_PANE)
+  check(
+    'prompting from the transcript still does not resize the pane',
+    rowsAfterPrompt === rowsBefore,
+    `viewport_rows ${rowsBefore} -> ${rowsAfterPrompt}`,
+  )
+
+  /* -- 4c. the terminal renders what the agent says ---------------------- */
+  // Terminal is still available on any pane, via the header toggle, and is
+  // still the right tool when you need exactness. Ask for it explicitly now
+  // that transcript is the default for agents.
+  check(
+    `the header toggle switches the agent pane to the terminal and it goes live`,
+    await setView(page, SESSION, AGENT_PANE, 'terminal'),
+  )
+  await page
+    .locator('.term-host .xterm')
+    .waitFor({ state: 'visible', timeout: 20000 })
+    .catch(() => {})
   await sleep(2500)
   const promptProc = spawn(
     'herdr',
@@ -311,6 +452,17 @@ const main = async () => {
     'and Herdr agrees the pane really contains it',
     paneText(AGENT_PANE).includes(TOKEN),
     'cross-checked with `herdr pane read`',
+  )
+
+  /* -- 4d. the view choice is remembered per pane ------------------------ */
+  const remembered = await page.evaluate(
+    (t) => localStorage.getItem('hex.paneview.' + t),
+    `${SESSION}/${AGENT_PANE}`,
+  )
+  check(
+    'the view toggle is remembered per pane',
+    remembered === 'terminal',
+    `stored ${JSON.stringify(remembered)}`,
   )
 
   /* -- 5. keystrokes typed in the browser reach the pane ----------------- */
@@ -399,29 +551,53 @@ const main = async () => {
       .then(() => true)
       .catch(() => false)
     check('a blocked pane is pinned under "Needs you"', pinned)
+    // A pane with an agent now opens as a TRANSCRIPT, so the blocked question
+    // arrives through the transcript (read from herdr's own `detection`
+    // region) rather than through the terminal's Q&A panel.
+    const rowsBlockedBefore = viewportRows(BLOCKED_PANE)
     if (pinned) await urgentRow.click()
-    const qa = page.locator('.qa')
-    const shown = await qa
+    const trBody = page.locator('.tr-body')
+    const shown = await trBody
       .waitFor({ state: 'visible', timeout: 15000 })
       .then(() => true)
       .catch(() => false)
-    const qaText = shown ? await qa.innerText() : ''
+    // The transcript is POLLED at ~1Hz, so give it a couple of ticks rather
+    // than sampling the frame before the first one lands.
+    let qaText = ''
+    for (let i = 0; i < 20 && shown; i++) {
+      qaText = await transcriptText(page)
+      if (qaText.trim().length > 0) break
+      await sleep(500)
+    }
     await shot('05-blocked-question')
-    // The panel renders the pane's own detection text verbatim, which is the
-    // right thing: a question is whatever the agent actually printed.
+    // Rendered VERBATIM from herdr's own `detection` region — the same region
+    // Herdr classifies on, so the transcript and the answer keys can never be
+    // looking at different things. It is whatever the pane actually printed:
+    // `pane report-agent --message` sets metadata, it does not print, so the
+    // assertion is that the pane's own prompt region is shown, not that our
+    // message text appears in it.
     check(
-      'a blocked agent shows its question in the browser',
-      shown && qaText.replace(/needs an answer/i, '').trim().length > 0,
-      shown ? JSON.stringify(qaText.slice(0, 100)) : 'no .qa panel appeared',
+      'a blocked agent shows its prompt region in the browser',
+      shown && qaText.trim().length > 0,
+      shown ? JSON.stringify(qaText.slice(0, 160)) : 'no transcript appeared',
+    )
+    check(
+      'the transcript says it is reading the prompt region while blocked',
+      /prompt region/i.test(await page.locator('.tr-provenance').innerText().catch(() => '')),
+      'checked the provenance line',
     )
     const badge2 = await page.locator('.paneview .badge').first().getAttribute('data-state')
     check('the badge flips to blocked', badge2 === 'blocked', `badge=${badge2}`)
-    const keys = await page.locator('.keybar .key-quick').allInnerTexts()
+    const keys = await page.locator('.tr-keys .key').allInnerTexts()
     check(
-      'the answer key bar is offered (y / n / 1 / 2 / 3)',
-      ['y', 'n', '1', '2', '3'].every((k) => keys.includes(k)),
+      'the answer key bar is offered (y / n / 1 / 2 / 3, arrows, esc, enter)',
+      ['y', 'n', '1', '2', '3', 'esc', '↑', '↓', '←', '→'].every((k) => keys.includes(k)),
       JSON.stringify(keys),
-      false,
+    )
+    check(
+      'and reading a BLOCKED agent did not resize it either',
+      viewportRows(BLOCKED_PANE) === rowsBlockedBefore,
+      `viewport_rows ${rowsBlockedBefore} -> ${viewportRows(BLOCKED_PANE)}`,
     )
     herdr('pane', 'report-agent', BLOCKED_PANE,
       '--source', 'hexe2e-test', '--agent', 'claude', '--state', 'idle')
@@ -434,6 +610,15 @@ const main = async () => {
   // mask exactly the bug this is here to catch. A bash prompt emits nothing.
   const shellOpen = await openPane(page, SESSION, SHELL_PANE)
   check(`the idle pane (${SHELL_PANE}) opens and goes live`, shellOpen)
+  // A pane with no agent still DEFAULTS to the terminal (SPEC J2). Herdr
+  // reports `agent_status: "unknown"` for every plain shell, so "does this
+  // pane have an agent object" is the wrong question and once sent every
+  // shell to the transcript.
+  check(
+    'a pane with no agent still defaults to the TERMINAL view',
+    await page.locator('.term-host .xterm').isVisible().catch(() => false),
+    'no stored preference for this pane',
+  )
   // Resize shortly AFTER mount, which is what a real client does when it fits
   // itself to the box — and what made LIVE targets die silently before
   // 4e9aee3. Without this the idle soak below passes on a broken build.
@@ -455,6 +640,66 @@ const main = async () => {
     diff >= 0 && diff < 0.02,
     diff < 0 ? 'screenshots differ in size' : `${(diff * 100).toFixed(3)}% of pixels changed`,
   )
+
+  /* -- 8b. the render-health watchdog repairs, ONCE ---------------------- */
+  //
+  // The terminal view is pinned to a character grid, and SPEC B8 is a list of
+  // ways that pinning silently comes undone. The client must notice and fix
+  // itself — the owner is not the misalignment detector. But a watchdog that
+  // thrashes hands back every round of flicker we killed, so the assertion is
+  // deliberately two-sided: it repairs, and it repairs EXACTLY ONCE.
+  const healthBefore = (await stats(page))?.health?.counts ?? {}
+  const disturbed = await page.evaluate(() =>
+    window.__herdrDisturbGrid ? window.__herdrDisturbGrid(13) : null,
+  )
+  check(
+    'the harness can put the grid out of alignment with its container',
+    !!disturbed,
+    JSON.stringify(disturbed),
+  )
+  const detected = await page.evaluate(() =>
+    window.__herdrCheckRender ? window.__herdrCheckRender() : null,
+  )
+  check(
+    'the client DETECTS that it is rendering at the wrong geometry',
+    !!detected && detected.reasons?.includes('geometry-drift'),
+    JSON.stringify(detected?.reasons ?? null),
+  )
+
+  // Give the watchdog its tick, plus margin. No forcing: it has to act on its
+  // own schedule or it is not a watchdog.
+  let repaired = -1
+  for (let i = 0; i < 30; i++) {
+    await sleep(500)
+    const r = await page.evaluate(() =>
+      window.__herdrCheckRender ? window.__herdrCheckRender() : 'gone',
+    )
+    if (r === null) {
+      repaired = i * 500
+      break
+    }
+  }
+  check(
+    'and REPAIRS it without anyone being told',
+    repaired >= 0,
+    repaired >= 0 ? `back in alignment after ~${repaired}ms` : 'still misaligned after 15s',
+  )
+  const healthAfter = (await stats(page))?.health?.counts ?? {}
+  const repairs = (healthAfter.repair ?? 0) - (healthBefore.repair ?? 0)
+  check(
+    'exactly one repair, not a storm',
+    repairs === 1,
+    `repair ${healthBefore.repair ?? 0} -> ${healthAfter.repair ?? 0} (delta ${repairs})`,
+  )
+  check(
+    'the repair did not need to reset the emulator',
+    (healthAfter.repaint ?? 0) === (healthBefore.repaint ?? 0),
+    `repaint delta ${(healthAfter.repaint ?? 0) - (healthBefore.repaint ?? 0)}`,
+  )
+  const stuck = await page.locator('.notice-health').isVisible().catch(() => false)
+  check('no "display out of sync" notice after a successful repair', !stuck)
+  // Let it settle again before the idle soak measures churn.
+  await sleep(1500)
 
   console.log(`  ... holding an IDLE pane open for ${IDLE_SECS}s ...`)
   await sleep(IDLE_SECS * 1000)
@@ -531,6 +776,57 @@ const main = async () => {
     () => document.documentElement.scrollWidth - window.innerWidth,
   )
   check('nothing overflows horizontally at 375px', overflow <= 1, `${overflow}px of overflow`)
+
+  /* -- 9b. the transcript at 375px, which is what it is FOR -------------- */
+  await page.locator('.paneview .iconbtn[aria-label="Back to panes"]').click().catch(() => {})
+  await page.locator('.row').first().waitFor({ state: 'visible', timeout: 8000 }).catch(() => {})
+  // Section 4c switched this pane to the terminal and the app REMEMBERED that
+  // (asserted above). Forget it, so what follows tests the DEFAULT.
+  await page.evaluate(
+    (t) => localStorage.removeItem('hex.paneview.' + t),
+    `${SESSION}/${AGENT_PANE}`,
+  )
+  // Take a FRESH baseline. Section 4c deliberately opened this pane in the
+  // TERMINAL at 1280x900, which attaches an observer and legitimately does
+  // resize the PTY — that contrast is the whole argument for transcript being
+  // the default, and it makes the earlier number stale here.
+  const rowsBeforePhone = viewportRows(AGENT_PANE)
+  const mobileTr = await openPane(page, SESSION, AGENT_PANE, 'transcript')
+  check('the agent pane opens in transcript view at 375px', mobileTr)
+  await sleep(2500)
+  await shot('10-mobile-transcript')
+  const mobileTrText = await transcriptText(page)
+  check(
+    'the transcript is readable at 375px',
+    mobileTrText.trim().length > 20,
+    `${mobileTrText.trim().length} chars`,
+  )
+  const trOverflow = await page.evaluate(() => {
+    const doc = document.documentElement.scrollWidth - window.innerWidth
+    const body = document.querySelector('.tr-body')
+    const inner = body ? body.scrollWidth - body.clientWidth : 0
+    return { doc, inner }
+  })
+  check(
+    'the transcript wraps to the VIEWPORT — no sideways scroll at 375px',
+    trOverflow.doc <= 1 && trOverflow.inner <= 1,
+    `page ${trOverflow.doc}px, transcript ${trOverflow.inner}px`,
+  )
+  const rowsMobile = viewportRows(AGENT_PANE)
+  check(
+    'and opening it on a PHONE still does not resize the pane',
+    rowsBeforePhone !== null && rowsMobile === rowsBeforePhone,
+    `viewport_rows ${rowsBeforePhone} -> ${rowsMobile} at 375px`,
+  )
+  // The contrast, stated as an assertion rather than a claim: the terminal
+  // view at 1280x900 DID resize this pane earlier in the run. That is exactly
+  // the destruction AMENDMENTS 13 is about, and exactly what a phone must not
+  // do to an agent's screen.
+  check(
+    'for contrast: the terminal view earlier in this run DID resize it',
+    rowsBefore !== null && rowsBeforePhone !== null && rowsBeforePhone !== rowsBefore,
+    `viewport_rows ${rowsBefore} (before any attach) -> ${rowsBeforePhone} (after the terminal view)`,
+  )
 
   check(
     'no uncaught console errors',

@@ -23,6 +23,7 @@ import type {
   PongData,
   ResultData,
   ServerFrame,
+  TranscriptData,
   TreeData,
   ViewportData,
   ViewportMode,
@@ -295,6 +296,11 @@ function handleControl(raw: string) {
     case 'agent':
       apply.agent(seq, msg.data as AgentData)
       break
+    case 'transcript':
+      // Control plane, deliberately: a transcript is stripped text, not
+      // terminal bytes, and must never reach the byte bus (SPEC J3).
+      apply.transcript(seq, msg.data as TranscriptData)
+      break
     case 'closed':
       apply.closed(seq, msg.data as ClosedData)
       break
@@ -375,6 +381,7 @@ export function sendViewport(targets: Record<PaneId, ViewportMode>) {
  * frame is requested for a target.
  */
 export function sendResize(target: PaneId, cols: number, rows: number) {
+  countEvent('resizeSent', target)
   sendControl({
     seq: 0,
     type: 'resize',
@@ -384,6 +391,18 @@ export function sendResize(target: PaneId, cols: number, rows: number) {
       rows: Math.max(MIN_ROWS, Math.floor(rows)),
     },
   })
+}
+
+/**
+ * Ask for a guaranteed full repaint of a live target.
+ *
+ * Only the CLIENT can measure that its own grid has come out of alignment
+ * (see terminal/renderHealth.ts), so only the client can ask for the repair.
+ * Rate limiting lives in the watchdog: a repaint loop is indistinguishable
+ * from flicker, and the server does not throttle this for us.
+ */
+export function sendRepaint(target: PaneId) {
+  sendControl({ seq: 0, type: 'repaint', data: { target } })
 }
 
 /* --- input path ---------------------------------------------------- */

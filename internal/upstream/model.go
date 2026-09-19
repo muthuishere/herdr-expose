@@ -155,6 +155,9 @@ type PaneReadResult struct {
 		Source      string `json:"source"`
 		Format      string `json:"format"`
 		Text        string `json:"text"`
+		Revision    int64  `json:"revision"`
+		// Truncated means the buffer held more than `lines` asked for.
+		Truncated bool `json:"truncated"`
 	} `json:"read"`
 }
 

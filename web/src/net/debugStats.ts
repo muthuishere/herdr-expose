@@ -21,6 +21,41 @@ const global: Counter = {
   subscribe: 0,
   unsubscribe: 0,
   viewportSent: 0,
+  // Counted per target as well, because "did opening this pane resize it?" is
+  // the one question transcript mode exists to answer, and a count is a proof
+  // where a screenshot is an opinion.
+  resizeSent: 0,
+}
+
+/**
+ * Render-health counters. The watchdog is only trustworthy if it is READABLE:
+ * "it fixed itself" and "it is repairing in a loop" look identical on screen
+ * and are one counter apart here. `repair` is an attempt, `repaint` is the
+ * escalation that resets the emulator, `failed` means a repair could not change
+ * the measurement, `giveup` means the budget was spent and the user was told.
+ */
+const health: Counter = {
+  detect: 0,
+  repair: 0,
+  repaint: 0,
+  failed: 0,
+  giveup: 0,
+}
+const healthReasons: Counter = {}
+const healthLast: Record<string, { reasons: string[]; signature: string; at: number }> = {}
+
+export type HealthCounter = keyof typeof health
+
+export function countHealth(name: HealthCounter, reasons: readonly string[] = []) {
+  health[name] += 1
+  for (const r of reasons) healthReasons[r] = (healthReasons[r] ?? 0) + 1
+}
+
+export function recordHealth(
+  target: string,
+  d: { reasons: readonly string[]; signature: string },
+) {
+  healthLast[target] = { reasons: [...d.reasons], signature: d.signature, at: Date.now() }
 }
 
 function bucket(target: string): Counter {
@@ -57,6 +92,12 @@ export interface HerdrStats {
   global: Counter
   viewport: Record<string, string>
   targets: Record<string, Counter & { snapshotsPerSec: number; framesPerSec: number }>
+  /** Render-health watchdog: counts, per-reason counts, and the last reading. */
+  health: {
+    counts: Counter
+    reasons: Counter
+    last: Record<string, { reasons: string[]; signature: string; at: number }>
+  }
 }
 
 export function stats(): HerdrStats {
@@ -69,7 +110,17 @@ export function stats(): HerdrStats {
       framesPerSec: round(c.frame / seconds),
     }
   }
-  return { seconds: round(seconds), global: { ...global }, viewport: { ...lastViewport }, targets }
+  return {
+    seconds: round(seconds),
+    global: { ...global },
+    viewport: { ...lastViewport },
+    targets,
+    health: {
+      counts: { ...health },
+      reasons: { ...healthReasons },
+      last: JSON.parse(JSON.stringify(healthLast)) as HerdrStats['health']['last'],
+    },
+  }
 }
 
 function round(n: number): number {

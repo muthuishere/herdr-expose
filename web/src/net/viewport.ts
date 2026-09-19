@@ -22,7 +22,12 @@ const sources = new Map<string, Record<PaneId, ViewportMode>>()
 let lastKey = ''
 let scheduled = false
 
-const RANK: Record<ViewportMode, number> = { live: 2, summary: 1, none: 0 }
+/**
+ * `transcript` outranks `summary` and is outranked by `live`. Opening a pane as
+ * a transcript while the pane LIST still declares it a summary tile must not
+ * silently demote it back to a summary poll.
+ */
+const RANK: Record<ViewportMode, number> = { live: 3, transcript: 2, summary: 1, none: 0 }
 
 function merged(): Record<PaneId, ViewportMode> {
   const out: Record<PaneId, ViewportMode> = {}

@@ -64,6 +64,26 @@ func (t *Tree) Session(name string) *SessionState {
 	return nil
 }
 
+// Pane looks up one pane by SESSION-QUALIFIED target. It returns a pointer
+// into the immutable tree, so callers must read it and not retain it across a
+// tree replacement.
+func (t *Tree) Pane(target string) *upstream.Pane {
+	name, id := SplitTarget(target)
+	if name == "" {
+		name = t.FocusedSession
+	}
+	st := t.Session(name)
+	if st == nil || st.Snapshot == nil {
+		return nil
+	}
+	for i := range st.Snapshot.Panes {
+		if st.Snapshot.Panes[i].PaneID == id {
+			return &st.Snapshot.Panes[i]
+		}
+	}
+	return nil
+}
+
 // ErrNoSession means a target named a session this server does not have.
 var ErrNoSession = errors.New("core: unknown herdr session")
 

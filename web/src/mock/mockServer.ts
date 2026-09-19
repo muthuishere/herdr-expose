@@ -398,9 +398,18 @@ class MockSocket implements Transport {
     }
   }
 
+  private lastTranscript: Record<PaneId, string> = {}
+
   private tick(p: MockPane) {
     const mode = this.modes[p.id] ?? 'none'
     if (mode === 'none') return
+    // TRANSCRIPT is CONTROL-PLANE text at ~1Hz, on change only, with the ANSI
+    // already stripped — and, crucially, with no geometry anywhere near it.
+    if (mode === 'transcript') {
+      p.cursor++
+      this.transcript(p)
+      return
+    }
     // SUMMARY is a repaint at 1-2Hz; LIVE is an append stream (SPEC §3).
     if (mode === 'summary') {
       if (Math.random() < 0.5) return
@@ -411,6 +420,35 @@ class MockSocket implements Transport {
     const line = p.script[p.cursor % p.script.length]
     p.cursor++
     this.bin(BIN_FRAME, p.id, enc.encode(line + '\r\n'))
+  }
+
+  /**
+   * A TRANSCRIPT frame. Text only, and only when it changed: the mock models
+   * the suppression too, because "why is my mock quiet" is easier to debug
+   * than "why is production 200KB/s".
+   */
+  private transcript(p: MockPane) {
+    const rows = 24
+    const out: string[] = []
+    for (let i = 0; i < rows; i++) {
+      const idx = p.cursor - rows + i
+      out.push(
+        idx < 0 ? '' : p.script[((idx % p.script.length) + p.script.length) % p.script.length],
+      )
+    }
+    const text = stripAnsi(out.join('\n'))
+    if (this.lastTranscript[p.id] === text) return
+    this.lastTranscript[p.id] = text
+    this.text('transcript', {
+      target: p.id,
+      source: p.agent?.state === 'blocked' ? 'detection' : 'recent_unwrapped',
+      text: p.agent?.state === 'blocked' ? stripAnsi(p.detection ?? text) : text,
+      lines: 400,
+      truncated: true,
+      agent: !!p.agent,
+      state: p.agent?.state ?? '',
+      at: new Date().toISOString(),
+    })
   }
 
   /** A SUMMARY snapshot = the visible region, a full repaint. */
@@ -544,4 +582,16 @@ export const mockTransportFactory: TransportFactory = () => new MockSocket()
 
 export function isMockEnabled(): boolean {
   return import.meta.env.VITE_MOCK === '1' || import.meta.env.VITE_MOCK === 'true'
+}
+
+
+/**
+ * The real server strips ANSI before a transcript ever leaves it. The mock must
+ * too, or the dev build would be the only place a transcript ever contains
+ * escape codes — and a mock that is easier than production teaches the wrong
+ * lesson.
+ */
+function stripAnsi(s: string): string {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/\r/g, '')
 }

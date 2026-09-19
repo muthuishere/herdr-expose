@@ -584,6 +584,18 @@ button {
   color: #ff8b8b;
 }
 
+/* The render-health watchdog gave up. It is a BUTTON because there is
+   something to do about it, and it is a plain row because a pulsing banner is
+   the flicker we spent three rounds removing. */
+.notice-health {
+  display: block;
+  width: 100%;
+  text-align: left;
+  color: var(--blocked);
+  background: rgba(255, 139, 61, 0.1);
+  font-family: var(--sans);
+}
+
 .renderer-note {
   position: absolute;
   right: 8px;
@@ -634,6 +646,221 @@ button {
   font-family: var(--sans);
   color: var(--fg-dim);
   margin: 0;
+}
+
+/* ------------------------------------------------------------ transcript */
+
+/*
+ * The readable view for an agent pane (SPEC AMENDMENTS 13). Everything here
+ * obeys the rules we learned the hard way:
+ *  - NO animation on any state indicator. Twenty things breathing at slightly
+ *    different periods is what "flickering" turned out to mean.
+ *  - fixed row heights and a reserved status row, so text arriving at 1Hz never
+ *    moves a control under a thumb.
+ *  - `scrollbar-gutter: stable`, so a scrollbar appearing does not reflow the
+ *    text it just became necessary for.
+ *  - wraps to the VIEWPORT, never the PTY: `pre-wrap` + `overflow-wrap`, so a
+ *    119-column agent reads at 375px and the page never scrolls sideways.
+ */
+
+.tr {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+.tr-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+  -webkit-overflow-scrolling: touch;
+  padding: 12px calc(var(--safe-right) + 14px) 4px calc(var(--safe-left) + 14px);
+  overscroll-behavior: contain;
+}
+
+/*
+ * The agent's own text. Visibly ITS text: our chrome is sans-serif and dim,
+ * this is mono and full contrast, so nothing we wrote can be mistaken for
+ * something the agent said.
+ */
+.tr-text {
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.5;
+  margin: 0;
+  color: var(--fg);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  max-width: 100%;
+  tab-size: 2;
+}
+
+.tr-line {
+  display: inline;
+}
+
+/*
+ * A line that was ONLY a repeated rule character. Rendering the characters
+ * themselves wraps a 119-column divider into six lines of noise on a phone;
+ * this is the same divider, drawn as one.
+ */
+.tr-rule {
+  display: block;
+  height: 1px;
+  margin: 8px 0;
+  background: var(--line);
+}
+
+.tr-blank {
+  display: block;
+  height: 8px;
+}
+
+.tr-empty,
+.tr-blocked {
+  font-family: var(--sans);
+  font-size: 13px;
+  color: var(--fg-dim);
+  margin: 0 0 10px;
+}
+
+.tr-blocked {
+  color: var(--blocked);
+}
+
+/*
+ * The honesty line (J4). Always present, never dismissible, and never styled
+ * like agent output — this is us, saying what the thing above it is.
+ */
+.tr-provenance {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 8px calc(var(--safe-right) + 14px) 8px calc(var(--safe-left) + 14px);
+  border-top: 1px solid var(--line);
+  background: var(--bg-1);
+  font-family: var(--sans);
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--fg-faint);
+}
+
+.tr-provenance b {
+  color: var(--fg-dim);
+  font-weight: 600;
+}
+
+.tr-provenance code {
+  font-family: var(--mono);
+  font-size: 10.5px;
+}
+
+.tr-keys {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px calc(var(--safe-right) + 12px) 8px calc(var(--safe-left) + 12px);
+  background: var(--bg-1);
+  border-top: 1px solid var(--blocked);
+}
+
+.tr-prompt {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-rows: auto 16px;
+  gap: 8px 8px;
+  align-items: end;
+  padding: 8px calc(var(--safe-right) + 12px)
+    calc(8px + var(--safe-bottom) + var(--keyboard-inset))
+    calc(var(--safe-left) + 12px);
+  background: var(--bg-1);
+  border-top: 1px solid var(--line);
+}
+
+.tr-input {
+  font-family: var(--sans);
+  font-size: 16px; /* 16px or iOS zooms the page on focus. */
+  line-height: 1.35;
+  color: var(--fg);
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 9px 10px;
+  width: 100%;
+  min-height: 40px;
+  max-height: 96px;
+  resize: none;
+}
+
+.tr-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.tr-send {
+  height: 40px;
+  min-width: 64px;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: #06121f;
+  font-weight: 700;
+  font-size: 14px;
+}
+
+.tr-send:disabled {
+  background: var(--bg-3);
+  color: var(--fg-faint);
+}
+
+/* The status row is ALWAYS in the layout, empty or not: a result appearing must
+   not shove the prompt box under the user's thumb. */
+.tr-status {
+  grid-column: 1 / -1;
+  font-size: 11px;
+  line-height: 16px;
+  height: 16px;
+  overflow: hidden;
+  color: var(--fg-faint);
+}
+
+.tr-status.is-sent {
+  color: var(--done);
+}
+
+.tr-status.is-failed {
+  color: #ff8b8b;
+}
+
+/* ------------------------------------------------------------ view toggle */
+
+.viewtoggle {
+  display: inline-flex;
+  flex: 0 0 auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  margin-right: 4px;
+}
+
+.viewtoggle-btn {
+  height: 36px;
+  min-width: 44px;
+  padding: 0 8px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-faint);
+  background: transparent;
+}
+
+.viewtoggle-btn.is-on {
+  color: var(--fg);
+  background: var(--bg-3);
 }
 
 /* ---------------------------------------------------------------- ansi */

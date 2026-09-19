@@ -417,6 +417,24 @@ Declare what you are **rendering**. This is a statement, not a request — see
 }}}
 ```
 
+#### `repaint`
+
+Ask the server for a guaranteed full repaint of a **live** target.
+
+```json
+{ "type": "repaint", "data": { "target": "herdr-plugins/w1:p1" } }
+```
+
+You send this when you have **measured** that your own rendering is out of
+alignment — geometry drift, a webfont that loaded after the grid was sized, a
+DPR or zoom change, a wrapped buffer that disagrees with the current width — and
+you are about to reset your emulator. The server replies with a `snapshot`
+(binary type 2). It is a no-op for a target that is not `live`: a `transcript`
+has no grid to be misaligned with.
+
+Rate-limit yourself. The server does not throttle this, and a repaint loop is
+indistinguishable from flicker.
+
 #### `command`
 
 Call a Herdr socket method **on one session's socket**. See
@@ -833,6 +851,7 @@ and pinning a laptop's CPU, and it is not negotiable from the client side.
 |---|---|---|
 | `live` | full terminal stream, same-tick coalescing, 64KB flush | one upstream stream, per connection |
 | `summary` | periodic `snapshot` frames at 1-2 Hz | shared across clients |
+| `transcript` | `transcript` **control-plane** frames at ~1Hz, on change only | shared across clients, **no geometry** |
 | `none` | nothing but control-plane state | free |
 
 Rules a client must honour:
@@ -849,6 +868,39 @@ Rules a client must honour:
    `resize`. `summary` reads are geometry-free and therefore deduplicated across
    clients — which is why a summary tile shows the pane at its own size, not
    yours.
+5. **`transcript` declares NO geometry and must never be paired with a
+   `resize`.** That is the whole point of the mode. `live` attaches an observer
+   at your size, which SIGWINCHes an agent TUI into throwing its screen away and
+   redrawing — so on a phone, opening a pane used to destroy the history you
+   opened it to read. A transcript subscriber never attaches, so `viewport_rows`
+   for that pane is provably unchanged by your being there. The server enforces
+   this: a `resize` for a transcript target is dropped, and raw binary input to
+   one is refused with `input_failed` (use `agent.prompt` / `agent.send_keys`).
+
+### The `transcript` frame
+
+```json
+{ "seq": 41, "type": "transcript", "data": {
+  "target": "herdr-plugins/w1:p1",
+  "source": "recent_unwrapped",
+  "text": "\u276f explain what a PTY is\n\n\u23fa A PTY is ...",
+  "lines": 400,
+  "truncated": true,
+  "agent": true,
+  "state": "idle",
+  "at": "2026-09-19T20:31:02+05:30"
+}}
+```
+
+- `text` is plain UTF-8 with every escape sequence stripped **server-side**. It
+  is not a binary frame and must not be fed to a terminal emulator.
+- It is sent **only when the text actually changed**, so an idle pane costs
+  nothing. A new subscriber always gets one immediately.
+- `source` is `recent_unwrapped` normally and `detection` while the agent is
+  blocked — Herdr's own spellings, reported so you can say what you are showing.
+- **This is the agent's visible SCREEN, not its message history.** Herdr exposes
+  the screen; there is no conversation log to read. Render the text; do not
+  invent message boundaries, roles or turns from it.
 
 ---
 

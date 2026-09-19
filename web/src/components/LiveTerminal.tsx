@@ -36,6 +36,7 @@ import { countEvent } from '../net/debugStats'
 import {
   onReconnected,
   sendInput,
+  sendRepaint,
   sendResize,
   sendScrollInput,
   sendSubscribe,
@@ -53,6 +54,12 @@ import {
   sameGeometry,
   type Geometry,
 } from '../terminal/fit'
+import {
+  setBaseline,
+  startWatchdog,
+  type HealthReading,
+  type Watchdog,
+} from '../terminal/renderHealth'
 import { attachTouch } from '../terminal/touch'
 import { PredictiveEcho } from '../terminal/predictiveEcho'
 import { useElementSize } from '../hooks/useViewport'
@@ -62,6 +69,12 @@ export interface LiveTerminalProps {
   /** Local-only display size. Never reaches the PTY (B8: zoom must not resize). */
   fontSize?: number
   onRenderer?: (kind: RendererKind) => void
+  /**
+   * The render-health watchdog could not repair the view within its budget.
+   * Surfaced so the pane can say so honestly instead of sitting there looking
+   * broken. Called with null when a later repair settled it.
+   */
+  onHealth?: (reading: HealthReading | null) => void
 }
 
 /**
@@ -79,7 +92,7 @@ export interface LiveTerminalProps {
  *   - the first snapshot after a `gap`, where bytes were really dropped.
  * Every other snapshot is just bytes.
  */
-function LiveTerminalImpl({ target, fontSize, onRenderer }: LiveTerminalProps) {
+function LiveTerminalImpl({ target, fontSize, onRenderer, onHealth }: LiveTerminalProps) {
   const hostRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<XTerm | null>(null)
   const geomRef = useRef<Geometry | null>(null)
@@ -88,6 +101,10 @@ function LiveTerminalImpl({ target, fontSize, onRenderer }: LiveTerminalProps) {
   const echoRef = useRef<PredictiveEcho | null>(null)
   /** True while the buffer is untrustworthy; consumed by the next snapshot. */
   const needsResetRef = useRef(true)
+  /** Render-health instrumentation, read by the watchdog (never on a hot path). */
+  const bytesSeenRef = useRef(0)
+  const lastSnapshotAtRef = useRef(0)
+  const dogRef = useRef<Watchdog | null>(null)
   const [ready, setReady] = useState(false)
 
   const localFont = fontSize ?? DEFAULT_FONT_SIZE
@@ -194,28 +211,46 @@ function LiveTerminalImpl({ target, fontSize, onRenderer }: LiveTerminalProps) {
   }, [localFont, ready])
 
   /* --- geometry ----------------------------------------------------- */
-  const pushGeometry = useCallback(() => {
+  /**
+   * Re-measure and re-fit. Returns whether anything ACTUALLY changed — the
+   * render-health watchdog escalates on "the refit moved nothing", so a
+   * no-op fit must report itself as one rather than as a repair.
+   */
+  const pushGeometry = useCallback((): boolean => {
     const t = termRef.current
     const box = boxRef.current
-    if (!t || box.width < 2 || box.height < 2) return
+    if (!t || box.width < 2 || box.height < 2) return false
 
     // Local xterm grid: fit the ACTUAL rendered cells so nothing is clipped.
-    const local = fitGeometry(box, cellMetrics(t, localFont))
+    const metrics = cellMetrics(t, localFont)
+    const local = fitGeometry(box, metrics)
     // Upstream PTY grid: reference metrics, so client-local zoom/font never
     // resizes the remote terminal (B8).
     const pty = ptyGeometry(box)
 
-    if (t.cols !== local.cols || t.rows !== local.rows) t.resize(local.cols, local.rows)
+    let changed = false
+    if (t.cols !== local.cols || t.rows !== local.rows) {
+      t.resize(local.cols, local.rows)
+      changed = true
+    }
     if (!sameGeometry(geomRef.current, pty)) {
       geomRef.current = pty
       sendResize(target, pty.cols, pty.rows)
+      changed = true
     }
+    // Re-baseline only from a REAL measurement. Re-baselining from the 1.30
+    // fallback would erase the very drift the watchdog exists to see.
+    if (metrics.measured) setBaseline(t, metrics)
+    return changed
   }, [target, localFont])
 
   const onResize = useCallback(
     (box: { width: number; height: number }) => {
       boxRef.current = box
       pushGeometry()
+      // A container change is one of the known fit invalidators (B8). Check
+      // immediately rather than waiting up to a tick to notice.
+      dogRef.current?.check()
       // Re-verify the renderer once after the first resize (B8).
       const v = verifyRef.current
       if (v) {
@@ -246,6 +281,9 @@ function LiveTerminalImpl({ target, fontSize, onRenderer }: LiveTerminalProps) {
       // until the new snapshot arrives. Mark it untrusted and let the first
       // snapshot do the reset, so the repaint is a single frame.
       needsResetRef.current = true
+      // A new socket is a new world: the repair budget and any accepted-bad
+      // reading belong to the old one.
+      dogRef.current?.reset()
       // The screen we were predicting against is gone.
       echoRef.current?.wipe('reconnect')
       resendViewport()
@@ -258,12 +296,80 @@ function LiveTerminalImpl({ target, fontSize, onRenderer }: LiveTerminalProps) {
     }
   }, [target, ready])
 
+  /* --- render health ------------------------------------------------ */
+  /*
+   * THE TERMINAL VIEW IS THE ONLY VIEW THAT NEEDS THIS. It is pinned to a
+   * character grid measured in CSS pixels, and SPEC B8 is a catalogue of ways
+   * that pinning silently comes undone. A transcript declares no geometry and
+   * reflows in CSS, so it has nothing to drift — which is the argument for it
+   * being the default on an agent pane, not merely a nicer one.
+   */
+  useEffect(() => {
+    if (!ready) return
+    const dog = startWatchdog(target, {
+      term: () => termRef.current,
+      host: () => hostRef.current,
+      fontSize: () => localFont,
+      declared: () => geomRef.current,
+      box: () => boxRef.current,
+      bytesSeen: () => bytesSeenRef.current,
+      sinceSnapshot: () =>
+        lastSnapshotAtRef.current === 0 ? Infinity : Date.now() - lastSnapshotAtRef.current,
+      refit: () => pushGeometry(),
+      repaint: () => {
+        // Reset on the SNAPSHOT, not here: blanking now would leave an empty
+        // terminal on display until the server's repaint arrives. Marking the
+        // buffer untrusted makes the next snapshot a single-frame repaint,
+        // which is the same discipline the reconnect path uses.
+        needsResetRef.current = true
+        echoRef.current?.wipe('repaint')
+        sendRepaint(target)
+      },
+      onGiveUp: (reading) => onHealth?.(reading),
+      onRecovered: () => onHealth?.(null),
+    })
+    dogRef.current = dog
+    return () => {
+      dogRef.current = null
+      dog.dispose()
+      onHealth?.(null)
+    }
+  }, [target, ready, localFont, pushGeometry, onHealth])
+
+  /**
+   * Diagnostic hooks, in the same spirit as __herdrStats / __herdrEcho: SPEC
+   * F2.5, measure rather than assert.
+   *
+   * `__herdrDisturbGrid` puts the emulator at a size the container does not
+   * imply — the exact geometry-drift condition the watchdog exists to catch.
+   * It is how the acceptance suite proves the repair happens AND that it
+   * happens ONCE, which no amount of staring at the screen can establish.
+   */
+  useEffect(() => {
+    const w = window as unknown as {
+      __herdrCheckRender?: () => unknown
+      __herdrDisturbGrid?: (deltaCols: number) => unknown
+    }
+    w.__herdrCheckRender = () => dogRef.current?.check(true) ?? null
+    w.__herdrDisturbGrid = (deltaCols = 13) => {
+      const t = termRef.current
+      if (!t) return null
+      t.resize(Math.max(2, t.cols + deltaCols), t.rows)
+      return { cols: t.cols, rows: t.rows }
+    }
+    return () => {
+      delete w.__herdrCheckRender
+      delete w.__herdrDisturbGrid
+    }
+  }, [])
+
   /* --- bytes -------------------------------------------------------- */
   useEffect(() => {
     if (!ready) return
     return onBytes(target, (bytes, kind) => {
       const t = termRef.current
       if (!t) return
+      bytesSeenRef.current += bytes.length
       if (kind === 'gap') {
         // Bytes were genuinely lost: what is on screen no longer matches the
         // host. The next snapshot repaints from a clean buffer.
@@ -272,6 +378,7 @@ function LiveTerminalImpl({ target, fontSize, onRenderer }: LiveTerminalProps) {
         return
       }
       if (kind === 'snapshot') {
+        lastSnapshotAtRef.current = Date.now()
         // Only the untrusted-buffer case resets. A routine `full` repaint is
         // written straight in — it clears and homes itself.
         if (needsResetRef.current) {

@@ -912,3 +912,57 @@ keep        = 3        # rotated files retained
 
 `herdr-expose logs [--follow] [-n N] [--share <id>] [--json]`.
 `doctor` reports the log path, size and writability.
+
+---
+
+# AMENDMENTS 13 — agent panes get a TRANSCRIPT view, not a terminal mirror
+
+Owner, looking at a real Claude pane in the browser: "not proper, often getting
+nonsense, need some better representation."
+
+## J1. The diagnosis
+
+Mirroring an agent's TUI grid is the wrong abstraction and cannot be fixed by
+making the mirror better:
+
+- Claude Code (and Codex, and most agent TUIs) paint incrementally near the
+  BOTTOM of the grid and repaint on SIGWINCH. Attaching a browser resizes the
+  PTY, so the agent throws away its screen and redraws — you see a fragment in a
+  void, and the history you attached to read is gone.
+- The PTY grid is a fixed cols x rows. A phone is not. Reflowing is impossible
+  because the server only has the post-layout character grid.
+- What the user wants from a phone is the CONVERSATION and the STATE — what did
+  I ask, what did it say, is it stuck, what do I answer. Not a faithful
+  reproduction of a 100x30 character matrix.
+
+## J2. Two views, chosen by what the pane is
+
+- **Transcript view — the DEFAULT for a pane with an agent.** Reflowed, readable
+  text: the recent conversation, ANSI stripped, wrapped to the VIEWPORT width,
+  not the PTY width. Plus the agent's state, a prompt box that sends
+  `agent.prompt`, and the key bar (y/n/enter/esc/arrows/1/2/3) when blocked.
+- **Terminal view — the default for a pane with NO agent**, and available on any
+  pane via a toggle in the header. This is today's xterm mirror, unchanged. It
+  is the right tool for a shell, for a TUI, and for when you need exactness.
+
+The toggle is remembered per pane.
+
+## J3. Transcript view MUST NOT resize the PTY
+
+This is the point. A transcript subscriber declares no geometry, so the agent's
+own screen is never disturbed — no SIGWINCH, no redraw, no lost history. Opening
+a pane on a phone becomes non-destructive, which it is not today.
+
+Server: a new viewport mode `transcript`, polled at ~1Hz via `agent.read` /
+`pane.read` (`--source detection` when blocked, otherwise recent lines), ANSI
+stripped SERVER-side, delivered as a control-plane frame — not binary, not
+xterm. Geometry is never sent for a transcript target.
+
+## J4. Honesty about what a transcript is
+
+It is a rendering of the agent's visible buffer, not a true conversation log —
+Herdr exposes the screen, not the agent's message history. So: do not fake
+structure we cannot know. Show the text the agent is displaying, cleanly
+reflowed, with clear separation between the agent's output and our chrome. If
+the buffer is all we have, say what it is rather than implying a transcript we
+did not actually reconstruct.

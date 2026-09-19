@@ -25,6 +25,7 @@ export type ClientFrameType =
   | 'unsubscribe'
   | 'viewport'
   | 'resize'
+  | 'repaint'
   | 'command'
   | 'ping'
 
@@ -41,6 +42,7 @@ export type ServerFrameType =
   | 'agent'
   | 'result'
   | 'pong'
+  | 'transcript'
 
 export interface Envelope<T extends string, D> {
   seq: number
@@ -192,6 +194,33 @@ export interface AgentData extends TreeAgent {
   detection?: string
 }
 
+/**
+ * A `transcript` frame — SPEC AMENDMENTS 13.
+ *
+ * BE HONEST ABOUT WHAT THIS IS. Herdr exposes the pane's SCREEN, not the
+ * agent's message history, so this is a cleaned-up rendering of the visible
+ * buffer and nothing more. There are no message boundaries in it, no roles and
+ * no turns, and the client must not manufacture any: fake chat bubbles would
+ * look authoritative while being fabricated, which is worse than the raw
+ * terminal it replaces.
+ */
+export interface TranscriptData {
+  target: PaneId
+  /** Herdr's own buffer name: `recent_unwrapped`, or `detection` when blocked. */
+  source: string
+  /** Plain UTF-8. ANSI was stripped SERVER-side; never feed this to xterm. */
+  text: string
+  /** Line budget the read asked for. */
+  lines?: number
+  /** Herdr's own report that the buffer held more than we asked for. */
+  truncated?: boolean
+  /** Whether the pane has an agent bound to it. */
+  agent?: boolean
+  /** Herdr's raw agent_status at read time; "" for a plain pane. */
+  state?: string
+  at?: string
+}
+
 export interface ResultData {
   id: string
   ok: boolean
@@ -213,6 +242,7 @@ export type ServerFrame =
   | Envelope<'gap', GapData>
   | Envelope<'closed', ClosedData>
   | Envelope<'agent', AgentData>
+  | Envelope<'transcript', TranscriptData>
   | Envelope<'result', ResultData>
   | Envelope<'pong', PongData>
 
@@ -220,7 +250,15 @@ export type ServerFrame =
 /* Client -> server                                                    */
 /* ------------------------------------------------------------------ */
 
-export type ViewportMode = 'live' | 'summary' | 'none'
+/**
+ * `transcript` is a first-class render mode, not a flavour of `summary`.
+ *
+ * It is the only one that declares NO GEOMETRY: a client rendering a transcript
+ * must never send `resize` for that target, because not resizing the agent's
+ * PTY is the entire point (SPEC J3). The server enforces it too, but the client
+ * is the one that knows what it is drawing.
+ */
+export type ViewportMode = 'live' | 'summary' | 'transcript' | 'none'
 
 export interface HelloData {
   protocol: 'v1'
@@ -274,12 +312,22 @@ export interface PingData {
   t: number
 }
 
+/**
+ * Client-initiated full repaint. Sent when the client has MEASURED that its
+ * own rendering is out of alignment and is about to reset its emulator.
+ * A no-op server-side for anything that is not `live`.
+ */
+export interface RepaintData {
+  target: PaneId
+}
+
 export type ClientFrame =
   | Envelope<'hello', HelloData>
   | Envelope<'subscribe', SubscribeData>
   | Envelope<'unsubscribe', UnsubscribeData>
   | Envelope<'viewport', ViewportData>
   | Envelope<'resize', ResizeData>
+  | Envelope<'repaint', RepaintData>
   | Envelope<'command', CommandData>
   | Envelope<'ping', PingData>
 

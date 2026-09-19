@@ -15,6 +15,16 @@ const (
 	ModeLive Mode = "live"
 	// ModeSummary is visible-but-unfocused: a deduplicated pane.read poll.
 	ModeSummary Mode = "summary"
+	// ModeTranscript is a READABLE rendering of an agent pane, polled at ~1Hz
+	// and delivered as control-plane JSON with the ANSI already stripped.
+	//
+	// It is the only mode that declares NO GEOMETRY, and that is the entire
+	// point of it (SPEC AMENDMENTS 13 / J3). A live observer attaches a PTY at
+	// the client's size, so opening an agent pane on a phone used to SIGWINCH
+	// the agent, make it throw its screen away and redraw — destroying the
+	// history you attached in order to read. A transcript subscriber never
+	// touches the pane's geometry, so reading is non-destructive.
+	ModeTranscript Mode = "transcript"
 	// ModeNone is offscreen: state changes only, no output at all.
 	ModeNone Mode = "none"
 )
@@ -27,6 +37,8 @@ func ParseMode(s string) Mode {
 		return ModeLive
 	case "summary":
 		return ModeSummary
+	case "transcript":
+		return ModeTranscript
 	default:
 		return ModeNone
 	}

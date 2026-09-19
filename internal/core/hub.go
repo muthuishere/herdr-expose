@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strconv"
 	"sync"
@@ -24,10 +25,11 @@ import (
 // targets compose: the stream key is the full target, so the same pane id in two
 // sessions is two independent streams.
 type Hub struct {
-	store   *Store
-	log     *slog.Logger
-	summary *summaryPoller
-	metrics *Metrics
+	store      *Store
+	log        *slog.Logger
+	summary    *summaryPoller
+	transcript *transcriptPoller
+	metrics    *Metrics
 
 	// clients counts live websocket connections, for /v1/metrics and for the
 	// "clients" line in the log on connect/disconnect.
@@ -43,7 +45,9 @@ func NewHub(store *Store, log *slog.Logger) *Hub {
 		log = slog.Default()
 	}
 	return &Hub{store: store, log: log,
-		summary: newSummaryPoller(store, log), metrics: NewMetrics()}
+		summary:    newSummaryPoller(store, log),
+		transcript: newTranscriptPoller(store, log),
+		metrics:    NewMetrics()}
 }
 
 // Metrics exposes the latency instrument.
@@ -52,8 +56,14 @@ func (h *Hub) Metrics() *Metrics { return h.metrics }
 // Store exposes the tree store.
 func (h *Hub) Store() *Store { return h.store }
 
-// Run drives the shared summary poller.
-func (h *Hub) Run(ctx context.Context) { h.summary.run(ctx) }
+// Run drives the shared pollers. Summary and transcript are separate loops on
+// separate periods: a tile refresh and a readable transcript are different
+// products with different costs, and folding them into one ticker would make
+// the cheaper one pay the other's rate.
+func (h *Hub) Run(ctx context.Context) {
+	go h.transcript.run(ctx)
+	h.summary.run(ctx)
+}
 
 // Upstream supervision (SPEC B7: supervision is a layer, not a hope).
 //
@@ -149,6 +159,18 @@ func (h *Hub) NewSession(ctx context.Context, sink ClientSink) *Session {
 // SetGeometry records this connection's size for a target and resizes an
 // already-running stream. Geometry must be set before the first LIVE frame.
 func (s *Session) SetGeometry(target string, cols, rows int) {
+	// Note what this does NOT do: refuse a resize because the target is
+	// currently a transcript.
+	//
+	// It used to, and that was a deadlock. A client toggling transcript ->
+	// terminal sends `resize` and then `viewport: live`, in that order (B2
+	// requires it), so the resize necessarily arrives while the server still
+	// believes the target is a transcript. Dropping it left the target with no
+	// geometry, and `viewport: live` then refused itself forever.
+	//
+	// Recording a size costs nothing: geometry only reaches Herdr through
+	// startStream, which refuses a transcript target outright. That is where
+	// the no-resize property is enforced, because that is where it is real.
 	g := Geometry{Cols: cols, Rows: rows}.Clamp()
 	s.mu.Lock()
 	prev := s.geom[target]
@@ -243,6 +265,7 @@ func (s *Session) SetViewport(decl map[string]string) {
 		}
 		switch mode {
 		case ModeLive:
+			s.hub.transcript.unsubscribe(target, s)
 			if !geoms[target].Valid() {
 				s.sink.SendJSON("error", map[string]any{
 					"target": target,
@@ -261,18 +284,28 @@ func (s *Session) SetViewport(decl map[string]string) {
 				s.lastLive = target
 				s.mu.Unlock()
 			}
+		case ModeTranscript:
+			// No startStream, and therefore no `herdr terminal session
+			// observe --cols --rows` subprocess: the pane's own geometry is
+			// never touched. That is the whole mode.
+			s.stopStream(target)
+			s.hub.summary.unsubscribe(target, s)
+			s.hub.transcript.subscribe(target, s)
 		case ModeSummary:
 			s.stopStream(target)
+			s.hub.transcript.unsubscribe(target, s)
 			s.hub.summary.subscribe(target, s)
 		default:
 			s.stopStream(target)
 			s.hub.summary.unsubscribe(target, s)
+			s.hub.transcript.unsubscribe(target, s)
 		}
 	}
 	for target := range old {
 		if _, still := want[target]; !still {
 			s.stopStream(target)
 			s.hub.summary.unsubscribe(target, s)
+			s.hub.transcript.unsubscribe(target, s)
 		}
 	}
 }
@@ -280,12 +313,38 @@ func (s *Session) SetViewport(decl map[string]string) {
 // Input writes raw bytes to a target. This is the keystroke path: no JSON
 // decode of the payload, no re-encode, no accumulation timer.
 func (s *Session) Input(target string, data []byte) error {
+	// TRANSCRIPT targets refuse raw input, and this is a safety property rather
+	// than a policy. ensureControl would spawn a CONTROL stream, and a
+	// transcript connection has deliberately recorded no geometry for the
+	// target — so the size that stream would attach at is Clamp()'s floor,
+	// 20x6. One key-bar tap would therefore squeeze a real agent into a
+	// twenty-column terminal: the exact destruction transcript mode exists to
+	// prevent, arriving through the back door. Answer keys and prompts in a
+	// transcript go through the geometry-free `command` path
+	// (agent.send_keys / agent.prompt) instead.
+	s.mu.Lock()
+	transcript := s.modes[target] == ModeTranscript
+	s.mu.Unlock()
+	if transcript {
+		return ErrTranscriptInput
+	}
 	ls, err := s.ensureControl(target)
 	if err != nil {
 		return err
 	}
 	return ls.stream.SendInput(data)
 }
+
+// ErrTranscriptInput is returned when raw bytes are aimed at a target this
+// connection is rendering as a transcript.
+var ErrTranscriptInput = errors.New(
+	"this pane is open in transcript view, which never attaches to the terminal: " +
+		"send agent.prompt or agent.send_keys instead of raw input")
+
+// ErrTranscriptStream is returned when anything tries to attach a terminal
+// stream to a target this connection is rendering as a transcript.
+var ErrTranscriptStream = errors.New(
+	"transcript mode never attaches to the terminal, so it cannot resize the pane")
 
 // Metrics is the shared latency instrument.
 func (s *Session) Metrics() *Metrics { return s.hub.metrics }
@@ -330,6 +389,22 @@ func (s *Session) Scroll(target string, delta int) error {
 }
 
 func (s *Session) startStream(target string, mode upstream.TerminalMode) (*liveStream, error) {
+	// THE no-resize enforcement point (SPEC AMENDMENTS 13 / J3), and it comes
+	// FIRST — before routing, before any upstream lookup.
+	//
+	// `herdr terminal session observe --cols --rows` is the ONLY thing in this
+	// program that can change a pane's geometry, and this is the only place it
+	// is spawned. A transcript subscriber must never reach it — including
+	// through Session.Input's control upgrade, which would attach at the
+	// Clamp() floor and squeeze a real agent into a 20-column terminal.
+	// Guarding here means the property holds no matter which path asks.
+	s.mu.Lock()
+	transcript := s.modes[target] == ModeTranscript
+	s.mu.Unlock()
+	if transcript {
+		return nil, ErrTranscriptStream
+	}
+
 	// Route by session BEFORE spawning: the herdr CLI selects its server from
 	// $HERDR_SOCKET_PATH, and a bare pane id would otherwise resolve against
 	// whichever session launched us.
@@ -394,6 +469,27 @@ func (s *Session) stopStream(target string) {
 	}
 }
 
+// Repaint is a CLIENT-REQUESTED full repaint of a LIVE target.
+//
+// It exists for the browser's render-health watchdog (SPEC B8 is a list of ways
+// a character grid can silently go out of alignment; the client is the only
+// side that can measure that it happened). The client resets its emulator and
+// needs a guaranteed full screen to repaint from — Herdr's own periodic `full`
+// frames are not a guarantee, they are a coincidence with a period.
+//
+// It is deliberately a no-op for anything that is not LIVE: a transcript
+// target has no emulator and no geometry to be out of alignment with, and a
+// `none` target has no buffer to repair.
+func (s *Session) Repaint(target string) {
+	s.mu.Lock()
+	live := s.modes[target] == ModeLive && !s.closed
+	s.mu.Unlock()
+	if !live {
+		return
+	}
+	s.requestRepaint(target)
+}
+
 // requestRepaint fetches a fresh full repaint after a gap. Resume/replay was
 // deleted on purpose: repainting is cheaper and cannot be subtly wrong.
 func (s *Session) requestRepaint(target string) {
@@ -440,6 +536,7 @@ func (s *Session) Close() {
 		}
 	}
 	s.hub.summary.unsubscribeAll(s)
+	s.hub.transcript.unsubscribeAll(s)
 	s.co.close()
 }
 
