@@ -66,8 +66,22 @@ type wsConn struct {
 	who  Identity
 	sess *core.Session
 
+	// agentState/first back emitAgents' per-connection change detection. Tree
+	// pushes are SERIALISED onto treeLoop, which is their only writer; the
+	// mutex is the guard that keeps that invariant from silently decaying if a
+	// second caller ever appears. It is never held across the upstream
+	// PaneRead in emitAgents.
+	//
+	// The seen-set that `done` is derived from lives in conn.sess.Seen and is
+	// per-connection by construction (SPEC B-seen) — nothing here shares or
+	// reorders it.
+	agentMu    sync.Mutex
 	agentState map[string]string
 	first      bool
+
+	// treeReq asks treeLoop for a push from a goroutine that does not own the
+	// connection's tree state (the reader goroutine, on `hello` / `seen`).
+	treeReq chan struct{}
 
 	out     chan outMsg
 	queued  atomic.Int64
@@ -106,6 +120,37 @@ func (w *wsConn) SendJSON(typ string, data any) {
 		w.log.Warn("ws: send queue full, closing connection", "conn", w.id)
 		w.shutdown()
 	}
+}
+
+// requestTree asks this connection's treeLoop for a fresh push. Non-blocking
+// and coalescing: a request already pending covers this one, because the tree
+// is always rebuilt from the live store rather than from a queued copy.
+func (w *wsConn) requestTree() {
+	select {
+	case w.treeReq <- struct{}{}:
+	default:
+	}
+}
+
+// takeFirst reports whether this is the connection's first tree push, and
+// clears the flag.
+func (w *wsConn) takeFirst() bool {
+	w.agentMu.Lock()
+	defer w.agentMu.Unlock()
+	f := w.first
+	w.first = false
+	return f
+}
+
+// agentChanged records a pane's agent state for THIS connection and reports
+// whether an `agent` frame is owed: on the first push, on a pane never seen
+// before, or on an actual state change.
+func (w *wsConn) agentChanged(target, state string, first bool) bool {
+	w.agentMu.Lock()
+	defer w.agentMu.Unlock()
+	prev, seen := w.agentState[target]
+	w.agentState[target] = state
+	return first || !seen || prev != state
 }
 
 // backlogged reports whether the client is falling behind.
@@ -191,10 +236,6 @@ type clientMsg struct {
 // handleStream upgrades and runs one connection.
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	ip := RemoteIP(r)
-	if !s.auth.AllowHandshake(ip) {
-		http.Error(w, "too many requests", http.StatusTooManyRequests)
-		return
-	}
 	if !s.hostAllowed(r) {
 		s.log.Warn("ws refused", "reason", "forbidden host", "host", r.Host, "ip", ip)
 		http.Error(w, "forbidden host", http.StatusForbidden)
@@ -235,6 +276,23 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Handshake budget, AFTER authentication and keyed on the identity the
+	// token proved — never on the remote address, which behind cloudflared is
+	// 127.0.0.1 for every client on the public URL (see connlimit.go).
+	//
+	// An unauthenticated peer never reaches this gate: it was refused a socket
+	// above, before the upgrade, at a cost of one hash and a constant-time
+	// compare. Only a proven identity gets to consume a handshake slot.
+	release, allowed, why := s.conns.acquire(identityKey(who, ip))
+	if !allowed {
+		s.log.Warn("ws refused", "reason", why, "identity", who.Kind,
+			"device", who.DeviceID, "ip", ip)
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "too many requests", http.StatusTooManyRequests)
+		return
+	}
+	defer release()
+
 	var respHeader http.Header
 	if p := token; p != "" && r.Header.Get("Sec-WebSocket-Protocol") != "" {
 		respHeader = http.Header{"Sec-WebSocket-Protocol": {"bearer." + p}}
@@ -257,6 +315,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		met:        s.hub.Metrics(),
 		agentState: map[string]string{},
 		first:      true,
+		treeReq:    make(chan struct{}, 1),
 		out:        make(chan outMsg, SendQueueDepth),
 		done:       make(chan struct{}),
 	}
@@ -310,23 +369,14 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 			"default_session": s.hub.Store().DefaultSession(),
 		},
 	})
+	// The first push runs inline, before treeLoop exists, so it is ordered
+	// ahead of every later push by the goroutine start below.
 	s.sendTree(ctx, conn)
 
 	// Push tree updates for as long as the connection lives.
 	treeCh, unwatch := s.hub.Store().Watch()
 	defer unwatch()
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-conn.done:
-				return
-			case <-treeCh:
-				s.sendTree(ctx, conn)
-			}
-		}
-	}()
+	go s.treeLoop(ctx, conn, treeCh)
 
 	c.SetReadLimit(1 << 20)
 	_ = c.SetReadDeadline(time.Now().Add(pongWait))
@@ -368,17 +418,47 @@ func (s *Server) handleBinary(conn *wsConn, data []byte) {
 	}
 }
 
+// treeLoop is the ONLY goroutine that pushes trees for a connection.
+//
+// It replaces a `go s.emitAgents(...)` per tree push. That spawn was a live
+// fatal bug, not a style problem: tree pushes are driven by upstream events
+// across every attached Herdr session, so two pushes landing close together ran
+// two emitAgents goroutines over the same plain `conn.agentState` map — a
+// concurrent map write, which Go turns into an unrecoverable runtime throw that
+// takes the whole daemon down with every session on it. The reader goroutine
+// pushed too (`hello`, `seen`), so it could collide with a watch-driven push
+// as well.
+//
+// Serialising is preferable to locking here and costs nothing that matters: a
+// goroutine per push bought no parallelism worth having (one client, one
+// socket, one outbound queue), and the only slow step — the detection PaneRead
+// for a blocked agent — now delays at most the NEXT tree push on this one
+// connection. It never touches the data plane, input, or any other client.
+func (s *Server) treeLoop(ctx context.Context, conn *wsConn, treeCh <-chan struct{}) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-conn.done:
+			return
+		case <-treeCh:
+		case <-conn.treeReq:
+		}
+		s.sendTree(ctx, conn)
+	}
+}
+
 // sendTree pushes the nested tree, then the per-pane agent frames. The order
 // matters: `agent` frames reference targets the client has just learned about,
 // and an already-blocked pane must arrive with its detection text on the very
 // first push or the Q&A view has nothing to render.
+//
+// Callers other than treeLoop must go through conn.requestTree().
 func (s *Server) sendTree(ctx context.Context, conn *wsConn) {
 	t := s.hub.Store().Tree()
 	view := buildTree(t, conn.sess)
 	conn.SendJSON("tree", view)
-	first := conn.first
-	conn.first = false
-	go s.emitAgents(ctx, conn, view, first)
+	s.emitAgents(ctx, conn, view, conn.takeFirst())
 }
 
 func (s *Server) handleControl(ctx context.Context, conn *wsConn, data []byte) {
@@ -389,7 +469,7 @@ func (s *Server) handleControl(ctx context.Context, conn *wsConn, data []byte) {
 	switch m.Type {
 	case "hello":
 		// data: {protocol:"v1", client:{...}, session?:"..."} — informational.
-		s.sendTree(ctx, conn)
+		conn.requestTree()
 
 	case "ping":
 		// Echo the client's `t` VERBATIM: RTT is then a pure client-side
@@ -457,8 +537,11 @@ func (s *Server) handleControl(ctx context.Context, conn *wsConn, data []byte) {
 		if err := json.Unmarshal(m.Data, &d); err != nil {
 			return
 		}
+		// MarkSeen lands before the request, so the push treeLoop builds
+		// already reflects it: `done` is derived from this connection's own
+		// seen set at build time, never carried over from a stale view.
 		conn.sess.Seen.MarkSeen(d.Target, s.hub.Store().Tree().DoneSeq[d.Target])
-		s.sendTree(ctx, conn)
+		conn.requestTree()
 
 	case "command":
 		var d struct {

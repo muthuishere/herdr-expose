@@ -268,10 +268,6 @@ func (a *Auth) Authenticate(token, remoteIP, userAgent string) (Identity, error)
 		a.reject(remoteIP, "no token presented")
 		return Identity{}, ErrUnauthorized
 	}
-	if !a.limiter.allow("auth:" + remoteIP) {
-		a.reject(remoteIP, "rate limited")
-		return Identity{}, ErrUnauthorized
-	}
 	sum := sha256hex(token)
 
 	a.mu.Lock()
@@ -323,7 +319,7 @@ func (a *Auth) Authenticate(token, remoteIP, userAgent string) (Identity, error)
 		found.UserAgent = userAgent
 	}
 	_ = a.save()
-	a.limiter.reset("auth:" + remoteIP)
+	a.limiter.reset("authfail:" + remoteIP)
 	return Identity{Kind: "device", DeviceID: found.ID, Name: found.Name}, nil
 }
 
@@ -454,7 +450,25 @@ func (a *Auth) RedeemPairing(code, name, remoteIP, userAgent string) (token stri
 
 // reject records a failed authentication. The reason is the whole point; the
 // token never appears, here or anywhere else.
+//
+// The per-address bucket here throttles the LOG, not the credential check: a
+// valid device token is never refused because some other client burned the
+// bucket. That matters because behind a proxy every remote client shares one
+// address, so a pre-check bucket keyed on the address is a shared bucket that a
+// stranger can empty on everyone's behalf — exactly the denial-of-service this
+// limiter exists to prevent.
+//
+// Brute force is not what is being held back here, and it must not be confused
+// with pairing: a device token is 256 bits, so guessing is not a threat model,
+// whereas a 6-character pairing code is ~30 bits and its limiter in
+// RedeemPairing IS load-bearing and stays a strict pre-check.
 func (a *Auth) reject(remoteIP, reason string) {
+	if !a.limiter.allow("authfail:" + remoteIP) {
+		// Already warned plenty from this address; stay quiet rather than let
+		// a flood write the log.
+		a.log.Debug("auth rejected (log throttled)", "reason", reason, "ip", remoteIP)
+		return
+	}
 	a.log.Warn("auth rejected", "reason", reason, "ip", remoteIP)
 }
 
@@ -470,6 +484,27 @@ func (a *Auth) evictLocked() {
 		a.log.Warn("auth: evicting least-recently-seen device", "device", d.Name, "id", d.ID)
 	}
 	a.state.Devices = a.state.Devices[:MaxDevices]
+}
+
+// deviceExpiry is the ONE instant at which a device credential dies, and every
+// expiry a client is told must be derived from it.
+//
+// Two rules are in play and the sooner wins: the absolute instance deadline
+// (a share's expiry, pinned into ExpiresAt), and otherwise the sliding
+// DeviceTTL measured from last use — which, for a token just issued or just
+// used, is LastSeen + DeviceTTL.
+func deviceExpiry(d Public) time.Time {
+	sliding := d.LastSeen.Add(DeviceTTL)
+	if d.LastSeen.IsZero() {
+		sliding = time.Now().Add(DeviceTTL)
+	}
+	if d.ExpiresAt.IsZero() {
+		return sliding
+	}
+	if d.ExpiresAt.Before(sliding) {
+		return d.ExpiresAt
+	}
+	return sliding
 }
 
 func publicOf(d *DeviceRecord) Public {
@@ -529,10 +564,9 @@ func (a *Auth) OriginAllowed(origin string) bool {
 	return false
 }
 
-// AllowHandshake rate-limits WebSocket upgrades per address.
-func (a *Auth) AllowHandshake(remoteIP string) bool {
-	return a.limiter.allow("ws:" + remoteIP)
-}
+// AllowHandshake is deliberately gone. WebSocket upgrades are gated by
+// connGate (connlimit.go), keyed on the identity the token proved, because an
+// address-keyed bucket is one shared bucket for every client behind a proxy.
 
 // BearerFrom extracts a token from the Authorization header or ?token=.
 func BearerFrom(r *http.Request) string {
@@ -564,9 +598,23 @@ func RemoteIP(r *http.Request) string {
 }
 
 // rateLimiter is a token bucket keyed by an arbitrary string.
+//
+// The map is bounded: buckets idle long enough to have refilled to full are
+// indistinguishable from buckets that do not exist, so they are evicted. Before
+// this, `buckets` was a map keyed by remote IP that only ever grew — every
+// address that ever touched the server kept a live entry for the lifetime of
+// the process, which is an unbounded, attacker-driven allocation.
 type rateLimiter struct {
 	mu      sync.Mutex
 	buckets map[string]*bucket
+	burst   float64
+	refill  float64 // tokens per second
+	idleTTL time.Duration
+	maxKeys int
+	lastGC  time.Time
+	// now is time.Now, replaceable so a 90-second reconnect storm can be
+	// replayed against the REAL limiter in a test that finishes instantly.
+	now func() time.Time
 }
 
 type bucket struct {
@@ -577,22 +625,52 @@ type bucket struct {
 const (
 	rlBurst  = 10
 	rlRefill = 0.5 // tokens per second
+	// rlGCInterval is how often allow() sweeps idle buckets. The sweep is O(n)
+	// over a map that is normally tiny, and it is amortised across calls rather
+	// than run by a goroutine, so the limiter still owns no background work.
+	rlGCInterval = time.Minute
+	// rlMaxKeys is a hard ceiling on tracked keys; past it the sweep runs
+	// regardless of the interval and drops the least recently used.
+	rlMaxKeys = 4096
 )
 
-func newRateLimiter() *rateLimiter { return &rateLimiter{buckets: map[string]*bucket{}} }
+func newRateLimiter() *rateLimiter { return newRateLimiterWith(rlBurst, rlRefill) }
+
+func newRateLimiterWith(burst, refill float64) *rateLimiter {
+	// A bucket that has been idle for longer than it takes to refill from empty
+	// to full holds exactly `burst` tokens, which is what a brand-new bucket
+	// holds. Evicting it therefore cannot hand anyone capacity they had not
+	// already earned. The floor keeps the sweep cheap on a busy server.
+	full := time.Duration(float64(time.Second) * burst / refill)
+	ttl := 10 * time.Minute
+	if full > ttl {
+		ttl = full
+	}
+	return &rateLimiter{
+		buckets: map[string]*bucket{},
+		burst:   burst,
+		refill:  refill,
+		idleTTL: ttl,
+		maxKeys: rlMaxKeys,
+		now:     time.Now,
+	}
+}
 
 func (l *rateLimiter) allow(key string) bool {
-	now := time.Now()
+	now := l.now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if now.Sub(l.lastGC) >= rlGCInterval || len(l.buckets) > l.maxKeys {
+		l.gcLocked(now)
+	}
 	b := l.buckets[key]
 	if b == nil {
-		b = &bucket{tokens: rlBurst, last: now}
+		b = &bucket{tokens: l.burst, last: now}
 		l.buckets[key] = b
 	}
-	b.tokens += now.Sub(b.last).Seconds() * rlRefill
-	if b.tokens > rlBurst {
-		b.tokens = rlBurst
+	b.tokens += now.Sub(b.last).Seconds() * l.refill
+	if b.tokens > l.burst {
+		b.tokens = l.burst
 	}
 	b.last = now
 	if b.tokens < 1 {
@@ -600,6 +678,50 @@ func (l *rateLimiter) allow(key string) bool {
 	}
 	b.tokens--
 	return true
+}
+
+// gcLocked evicts buckets that have gone idle, and, if the map is still over
+// its ceiling, the least recently used until it is not. Callers hold l.mu.
+func (l *rateLimiter) gcLocked(now time.Time) {
+	l.lastGC = now
+	for k, b := range l.buckets {
+		if now.Sub(b.last) >= l.idleTTL {
+			delete(l.buckets, k)
+		}
+	}
+	if len(l.buckets) <= l.maxKeys {
+		return
+	}
+	// Still oversized: a flood of distinct keys inside one interval. Trim well
+	// below the ceiling rather than to it, so the O(n log n) sweep runs once
+	// per flood instead of once per insert.
+	target := l.maxKeys * 3 / 4
+	type kv struct {
+		key  string
+		last time.Time
+	}
+	all := make([]kv, 0, len(l.buckets))
+	for k, b := range l.buckets {
+		all = append(all, kv{k, b.last})
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].last.Before(all[j].last) })
+	for _, e := range all[:len(all)-target] {
+		delete(l.buckets, e.key)
+	}
+}
+
+// size is the number of live buckets.
+func (l *rateLimiter) size() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.buckets)
+}
+
+// gc forces a sweep. Exposed for the daemon's idle path and for tests.
+func (l *rateLimiter) gc() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.gcLocked(l.now())
 }
 
 func (l *rateLimiter) reset(key string) {

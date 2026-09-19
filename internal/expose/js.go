@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -77,9 +78,15 @@ type jsTunnel struct {
 }
 
 type jsProc struct {
-	cmd  *exec.Cmd
-	pid  int
-	dead bool
+	cmd *exec.Cmd
+	pid int
+	// dead is atomic, not guarded by jsTunnel.mu. The reaper goroutine writes
+	// it while killAll() reads it from INSIDE a ctx.kill() call on the JS
+	// goroutine, and killAll deliberately drops the lock before it starts
+	// signalling process groups (killing under the lock would block every
+	// spawn, status and URL read for as long as the kills take). A plain bool
+	// there is an unsynchronised read of a field another goroutine is writing.
+	dead atomic.Bool
 }
 
 // newJSTunnel loads and compiles an adapter. Nothing runs until Launch.
@@ -337,9 +344,7 @@ func (j *jsTunnel) jsSpawn(call goja.FunctionCall) goja.Value {
 	go j.pump(p, stderr)
 	go func() {
 		_ = cmd.Wait()
-		j.mu.Lock()
-		p.dead = true
-		j.mu.Unlock()
+		p.dead.Store(true)
 		j.logf("adapter %s: pid %d exited", j.id, p.pid)
 	}()
 
@@ -433,7 +438,7 @@ func (j *jsTunnel) alive() bool {
 	j.mu.RLock()
 	defer j.mu.RUnlock()
 	for _, p := range j.procs {
-		if !p.dead {
+		if !p.dead.Load() {
 			return true
 		}
 	}
@@ -451,7 +456,7 @@ func (j *jsTunnel) killAll() {
 	procs := append([]*jsProc{}, j.procs...)
 	j.mu.RUnlock()
 	for _, p := range procs {
-		if !p.dead {
+		if !p.dead.Load() {
 			killProcessGroup(p.pid, j.logf)
 		}
 	}
@@ -543,7 +548,7 @@ func (j *jsTunnel) Snapshot() Status {
 		StartedAt: j.startedAt,
 	}
 	for _, p := range j.procs {
-		if !p.dead {
+		if !p.dead.Load() {
 			st.PID = p.pid
 			break
 		}

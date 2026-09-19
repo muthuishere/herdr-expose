@@ -1,0 +1,56 @@
+{
+  "seconds": 80.13,
+  "global": {
+    "reset": 4,
+    "termCreate": 4,
+    "termDispose": 3,
+    "subscribe": 7,
+    "unsubscribe": 6,
+    "viewportSent": 13
+  },
+  "viewport": {
+    "hexe2e-0535/w1:p3": "summary",
+    "hexe2e-0535/w1:p1": "summary",
+    "hexe2e-0535/w1:p2": "live"
+  },
+  "targets": {
+    "hexe2e-0535/w1:p3": {
+      "frame": 0,
+      "snapshot": 117,
+      "gap": 0,
+      "bytes": 18922,
+      "subscribe": 2,
+      "unsubscribe": 2,
+      "termCreate": 1,
+      "reset": 1,
+      "termDispose": 1,
+      "snapshotsPerSec": 1.46,
+      "framesPerSec": 0
+    },
+    "hexe2e-0535/w1:p1": {
+      "frame": 32,
+      "snapshot": 115,
+      "gap": 0,
+      "bytes": 271907,
+      "termCreate": 2,
+      "subscribe": 3,
+      "reset": 2,
+      "termDispose": 2,
+      "unsubscribe": 3,
+      "snapshotsPerSec": 1.44,
+      "framesPerSec": 0.4
+    },
+    "hexe2e-0535/w1:p2": {
+      "frame": 3,
+      "snapshot": 24,
+      "gap": 0,
+      "bytes": 10127,
+      "subscribe": 2,
+      "unsubscribe": 1,
+      "termCreate": 1,
+      "reset": 1,
+      "snapshotsPerSec": 0.3,
+      "framesPerSec": 0.04
+    }
+  }
+}

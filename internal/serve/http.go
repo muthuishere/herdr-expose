@@ -56,6 +56,9 @@ type Server struct {
 	static   fs.FS
 	exposure Exposure
 	upgrader websocket.Upgrader
+	// conns gates WebSocket handshakes per proven identity, with concurrency
+	// caps as the backstop. See connlimit.go.
+	conns *connGate
 
 	http  *http.Server
 	addr  string
@@ -94,6 +97,7 @@ func New(o Options) (*Server, error) {
 		slog:     o.Log,
 		static:   o.Static,
 		exposure: o.Exposure,
+		conns:    newConnGate(),
 		addr:     net.JoinHostPort(bind, fmt.Sprint(o.Config.Port())),
 	}
 	s.upgrader = websocket.Upgrader{
@@ -225,6 +229,27 @@ func (s *Server) originAllowed(r *http.Request, origin string) bool {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	// Unauthenticated liveness is the CONTRACT here (SPEC D2/E2, and
+	// internal/expose.probe polls it through the public hostname to decide a
+	// tunnel is actually routing). What is not part of the contract is telling
+	// the internet how many sessions are running, which Herdr version to look
+	// up CVEs for, or — via tree_rev — how busy the machine is right now.
+	//
+	// So: `ok` semantics are byte-for-byte what every probe already checks
+	// (HTTP 200 with "ok":true), and the operational detail is served only to a
+	// caller that proved itself, or to a loopback caller under the local-mode
+	// bypass (which `status` and `doctor` use, and which a tunnelled request
+	// can never satisfy — its Host is the tunnel hostname).
+	if !s.healthDetail(r) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok": true,
+			// The API version is static, already published unauthenticated in
+			// the client bootstrap, and is what lets a client tell a herdr
+			// endpoint from anything else answering on that hostname.
+			"api": APIVersion,
+		})
+		return
+	}
 	t := s.hub.Store().Tree()
 	connected := 0
 	for _, se := range t.Sessions {
@@ -244,6 +269,23 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"tree_rev":           t.Rev,
 		"web_ui":             s.static != nil,
 	})
+}
+
+// healthDetail reports whether this caller may see the operational fields.
+//
+// A bearer token is only checked when one is actually presented: an anonymous
+// liveness probe every few seconds must not write a rejection to the log, and
+// must not consume any budget.
+func (s *Server) healthDetail(r *http.Request) bool {
+	if s.local.bypassAuth(r) {
+		return true
+	}
+	tok := BearerFrom(r)
+	if tok == "" {
+		return false
+	}
+	_, err := s.auth.Authenticate(tok, RemoteIP(r), r.UserAgent())
+	return err == nil
 }
 
 // handleConfig is the client bootstrap. It contains NO secrets, by construction:
@@ -304,7 +346,16 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	writeJSON(w, http.StatusOK, s.hub.Metrics().Snapshot())
+	snap := s.hub.Metrics().Snapshot()
+	// SPEC A3 budgets "output to LIVE client < 20ms", and that path ends when
+	// the socket write returns — Output (decode -> queued) is only its first
+	// half. Write (queued -> write returned) is collected on the hot path but
+	// was never published, which left the budgeted path unmeasurable from
+	// outside. Same shape as the others, so a client renders it identically.
+	if _, ok := snap["write_us"]; !ok {
+		snap["write_us"] = s.hub.Metrics().Write.Snapshot()
+	}
+	writeJSON(w, http.StatusOK, snap)
 }
 
 // handlePair exchanges a one-time pairing code for a long-lived device token.
@@ -327,10 +378,21 @@ func (s *Server) handlePair(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	// expires_in and expires_at MUST come from the same instant. They did not:
+	// expires_in was hardcoded to the 30-day device TTL while expires_at
+	// carried the share's real deadline, so a client that trusted expires_in
+	// cached a token that was already dead — on a 1-hour share it believed it
+	// had a month.
+	expAt := deviceExpiry(dev)
+	in := int(time.Until(expAt).Seconds())
+	if in < 0 {
+		in = 0
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"token":      token,
 		"device":     dev,
-		"expires_in": int(DeviceTTL.Seconds()),
+		"expires_at": expAt.UTC().Format(time.RFC3339),
+		"expires_in": in,
 	})
 }
 

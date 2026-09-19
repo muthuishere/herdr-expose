@@ -253,6 +253,11 @@ type agentFrame struct {
 // emitAgents sends an `agent` frame for every pane whose agent state changed
 // for THIS connection since the last tree push, and unconditionally on the
 // first push so an already-blocked pane arrives with its question text.
+//
+// It runs ON the connection's treeLoop goroutine (see ws.go). It used to be
+// spawned per push, which raced the plain agentState map into a fatal
+// concurrent map write; the change-detection state now lives behind
+// conn.agentChanged and the pushes themselves are serialised.
 func (s *Server) emitAgents(ctx context.Context, conn *wsConn, view TreeView, first bool) {
 	store := s.hub.Store()
 	for _, sv := range view.Sessions {
@@ -262,11 +267,9 @@ func (s *Server) emitAgents(ctx context.Context, conn *wsConn, view TreeView, fi
 					if p.Agent == nil {
 						continue
 					}
-					prev, seen := conn.agentState[p.ID]
-					if seen && prev == p.Agent.State && !first {
+					if !conn.agentChanged(p.ID, p.Agent.State, first) {
 						continue
 					}
-					conn.agentState[p.ID] = p.Agent.State
 
 					f := agentFrame{
 						Target: p.ID, Session: sv.ID, ID: p.Agent.ID, Kind: p.Agent.Kind,

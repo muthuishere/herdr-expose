@@ -147,7 +147,6 @@ func (t *TerminalStream) Start(ctx context.Context) error {
 		}
 		t.mu.Unlock()
 		_ = cmd.Wait()
-		close(t.done)
 		if reason == "" {
 			if s := bytes.TrimSpace(stderr.Bytes()); len(s) > 0 {
 				reason = string(s)
@@ -155,7 +154,14 @@ func (t *TerminalStream) Start(ctx context.Context) error {
 				reason = "stream ended"
 			}
 		}
+		// done closes AFTER the handler has been told, so Wait is a real
+		// barrier: once it returns, no OnClosed for this stream can still be in
+		// flight. Closing it first let a caller tear a stream down, start a
+		// replacement, and then have the OLD stream's late OnClosed delete the
+		// NEW one from the session — a running subprocess nobody owned any
+		// more, and a client told its still-live target had closed.
 		t.handler.OnClosed(reason)
+		close(t.done)
 	}()
 	return nil
 }
@@ -293,7 +299,8 @@ func (t *TerminalStream) Release() error {
 	return t.Send(map[string]any{"type": "terminal.release"})
 }
 
-// Wait blocks until the subprocess has been reaped, or the timeout elapses.
+// Wait blocks until the subprocess has been reaped AND its OnClosed has
+// returned, or the timeout elapses.
 //
 // This matters when upgrading observe -> control on the same terminal: Herdr
 // allows ONE attached client, so starting the controller before the observer

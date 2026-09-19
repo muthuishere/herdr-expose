@@ -1,0 +1,14 @@
+{
+  "name": "herdr-expose-e2e",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Real end-to-end acceptance test: a throwaway Herdr session + agent, a LAN share, and a browser that pairs, reads and types.",
+  "scripts": {
+    "test": "node acceptance.mjs",
+    "test:headed": "HEX_HEADED=1 node acceptance.mjs"
+  },
+  "dependencies": {
+    "playwright": "^1.50.0"
+  }
+}

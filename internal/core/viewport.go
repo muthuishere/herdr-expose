@@ -96,6 +96,21 @@ type pendingTarget struct {
 	hdrLen      int
 }
 
+// pendingRun is one target's output, OWNED BY THE WRITER for the duration of a
+// drain. The slices are lifted OUT of the pendingTarget under the lock, so a
+// concurrent close() cannot see — let alone Release — a buffer that writeRun is
+// still holding. Returning a pooled Buf twice hands the same bytes to two
+// owners, which on a multi-viewer terminal is one client's output appearing in
+// another client's frame; it is not merely a panic.
+type pendingRun struct {
+	target  string
+	frames  []*upstream.Buf
+	ats     []time.Time
+	dropped uint64
+	repaint bool
+	hdrLen  int
+}
+
 // coalescer batches output per connection.
 //
 // It coalesces SAME-TICK only: the writer drains whatever is already queued and
@@ -168,16 +183,16 @@ func (c *coalescer) push(target string, buf *upstream.Buf, hdrLen int, full bool
 		p.dropped += uint64(buf.Len() - hdrLen)
 		p.repaint = true
 		buf.Release()
+		c.wakeLocked()
 		c.mu.Unlock()
-		c.wake()
 		return
 	}
 	p.frames = append(p.frames, buf)
 	p.at = append(p.at, at)
 	p.bytes += buf.Len()
 	c.bytes += buf.Len()
+	c.wakeLocked()
 	c.mu.Unlock()
-	c.wake()
 }
 
 // markGap records a synthetic gap (e.g. an upstream stream restart).
@@ -198,11 +213,18 @@ func (c *coalescer) markGap(target string, dropped uint64, hdrLen int) {
 	}
 	p.dropped += dropped
 	p.repaint = true
+	c.wakeLocked()
 	c.mu.Unlock()
-	c.wake()
 }
 
-func (c *coalescer) wake() {
+// wakeLocked nudges the writer. It is called WITH c.mu held, and close() closes
+// c.sig with c.mu held, so the two can never interleave. Waking outside the
+// lock was a send on a closed channel — an unrecovered panic on the upstream
+// reader goroutine, which takes the whole daemon with it.
+func (c *coalescer) wakeLocked() {
+	if c.closed {
+		return
+	}
 	select {
 	case c.sig <- struct{}{}:
 	default:
@@ -220,7 +242,7 @@ func (c *coalescer) run(seq *seqCounter, repaint gapReporter, m *Metrics) {
 	defer close(c.done)
 
 	// Reused across drains so the drain loop itself never allocates.
-	var order []string
+	var runs []pendingRun
 	for range c.sig {
 		for {
 			c.mu.Lock()
@@ -232,49 +254,51 @@ func (c *coalescer) run(seq *seqCounter, repaint gapReporter, m *Metrics) {
 				c.mu.Unlock()
 				break
 			}
-			order = append(order[:0], c.order...)
-			c.order = c.order[:0]
-			c.bytes = 0
-			for _, target := range order {
+			runs = runs[:0]
+			for _, target := range c.order {
 				p := c.pending[target]
 				if p == nil {
 					continue
 				}
-				// Swap the producer's buffers for the spares. The writer then
-				// owns the full slices until the next drain, which is this same
-				// goroutine, so no copy and no race.
-				p.frames, p.spareFrames = p.spareFrames[:0], p.frames
-				p.at, p.spareAt = p.spareAt[:0], p.at
+				// Swap the producer's buffers for the spares AND take the full
+				// ones out of p entirely: for as long as writeRun holds them
+				// they belong to this goroutine and to nobody else. They are
+				// handed back (empty) below, so steady state still allocates
+				// nothing on the fanout path.
+				full, fullAt := p.frames, p.at
+				p.frames, p.at = p.spareFrames[:0], p.spareAt[:0]
+				p.spareFrames, p.spareAt = nil, nil
 				p.bytes = 0
 				p.queued = false
+				runs = append(runs, pendingRun{
+					target: target, frames: full, ats: fullAt,
+					dropped: p.dropped, repaint: p.repaint, hdrLen: p.hdrLen,
+				})
+				p.dropped, p.repaint = 0, false
 			}
+			c.order = c.order[:0]
+			c.bytes = 0
 			c.mu.Unlock()
 
-			for _, target := range order {
+			for i := range runs {
+				r := &runs[i]
+				if r.dropped > 0 {
+					c.sink.SendBinary(encodeGap(seq.next(), r.target, r.dropped))
+				}
+				c.writeRun(seq, r.target, r.frames, r.ats, r.hdrLen, m)
+				// writeRun nils every entry it consumed, so what comes back is
+				// an empty slice with its capacity intact: the next drain's
+				// spare.
 				c.mu.Lock()
-				p := c.pending[target]
-				var (
-					frames  []*upstream.Buf
-					ats     []time.Time
-					dropped uint64
-					needRe  bool
-					hdrLen  int
-				)
-				if p != nil {
-					frames, ats = p.spareFrames, p.spareAt
-					dropped, needRe, hdrLen = p.dropped, p.repaint, p.hdrLen
-					p.dropped, p.repaint = 0, false
+				if !c.closed {
+					if p := c.pending[r.target]; p != nil && p.spareFrames == nil {
+						p.spareFrames, p.spareAt = r.frames[:0], r.ats[:0]
+					}
 				}
 				c.mu.Unlock()
-				if p == nil {
-					continue
-				}
-				if dropped > 0 {
-					c.sink.SendBinary(encodeGap(seq.next(), target, dropped))
-				}
-				c.writeRun(seq, target, frames, ats, hdrLen, m)
-				if needRe && repaint != nil {
-					repaint(target)
+				r.frames, r.ats = nil, nil
+				if r.repaint && repaint != nil {
+					repaint(r.target)
 				}
 			}
 		}
@@ -334,26 +358,35 @@ func (c *coalescer) close() {
 		return
 	}
 	c.closed = true
+	started := c.started
+	close(c.sig)
+	c.mu.Unlock()
+
+	// WAIT for the writer before releasing anything. An in-flight writeRun owns
+	// the frames it was handed; releasing them here is a double free, and a Buf
+	// returned to its sync.Pool twice can be handed to two owners at once.
+	if started {
+		<-c.done
+	}
+
+	c.mu.Lock()
 	for _, p := range c.pending {
-		for _, f := range p.frames {
+		for i, f := range p.frames {
 			if f != nil {
 				f.Release()
 			}
+			p.frames[i] = nil
 		}
-		for _, f := range p.spareFrames {
+		for i, f := range p.spareFrames {
 			if f != nil {
 				f.Release()
 			}
+			p.spareFrames[i] = nil
 		}
 	}
 	c.pending = nil
 	c.order = nil
-	started := c.started
-	close(c.sig)
 	c.mu.Unlock()
-	if started {
-		<-c.done
-	}
 }
 
 // seqCounter hands out monotonic data-plane sequence numbers.

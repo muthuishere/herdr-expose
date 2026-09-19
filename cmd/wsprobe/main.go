@@ -11,6 +11,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"flag"
@@ -92,9 +93,15 @@ type envelope struct {
 func main() {
 	addr := flag.String("addr", "127.0.0.1:21118", "server address")
 	token := flag.String("token", os.Getenv("HERDR_EXPOSE_TOKEN"), "bearer token")
-	target := flag.String("target", "", "session-qualified pane id, e.g. herdr-plugins/w2:p1 "+
-		"(default: one pane per connected session)")
-	secs := flag.Int("secs", 8, "how long to stream")
+	target := flag.String("target", "", "comma-separated session-qualified pane ids, e.g. "+
+		"herdr-plugins/w2:p1,herdr-plugins/w2:p2 (default: one pane per connected session)")
+	secs := flag.Int("secs", 25, "how long to stream")
+	silentFail := flag.Int("silent-secs", 12, "FAIL a LIVE target that delivers nothing for this "+
+		"many seconds AFTER the pane is observed (via pane.read) to have produced output")
+	verify := flag.Bool("verify", true, "poll pane.read per LIVE target so an idle pane can be told "+
+		"apart from a DEAD upstream stream; this is what makes silence a failure and not a shrug")
+	resizeAfter := flag.Int("resize-after-ms", 0, "re-send a slightly different `resize` this many "+
+		"milliseconds AFTER the viewport (what a real xterm client does when it mounts and fits)")
 	cols := flag.Int("cols", 100, "terminal columns")
 	echo := flag.Int("echo", 0, "measure keystroke->echo latency with N probe keystrokes "+
 		"(DEFAULT 0 = read-only; this TAKES CONTROL of the pane and types into it)")
@@ -165,14 +172,20 @@ func main() {
 		gotTree    bool
 		targets    []string
 		perTarget  = map[string]int{}
-		pane       = *target
-		frames     int
-		snapshots  int
-		gaps       int
-		dataBytes  int
-		firstFrame time.Time
-		pingSent   time.Time
-		rtt        time.Duration
+		// Liveness bookkeeping, touched only by the read loop.
+		lastData      = map[string]time.Time{}
+		dataSincePoll = map[string]bool{}
+		unexplained   = map[string]time.Time{}
+		paneHash      = map[string]string{}
+		changedEver   = map[string]bool{}
+		pane          = *target
+		frames        int
+		snapshots     int
+		gaps          int
+		dataBytes     int
+		firstFrame    time.Time
+		pingSent      time.Time
+		rtt           time.Duration
 
 		echoMu      sync.Mutex
 		echoPending time.Time
@@ -257,7 +270,11 @@ func main() {
 					fmt.Println("PASS every target is namespaced <session>/<pane_id>")
 
 					if *target != "" {
-						targets = []string{*target}
+						for _, tg := range strings.Split(*target, ",") {
+							if tg = strings.TrimSpace(tg); tg != "" {
+								targets = append(targets, tg)
+							}
+						}
 					} else {
 						// One pane per CONNECTED session: the point of api 2 is
 						// that many sessions stream at once.
@@ -288,6 +305,42 @@ func main() {
 						view[tg] = "live"
 					}
 					send("viewport", map[string]any{"targets": view})
+					started := time.Now()
+					for _, tg := range targets {
+						lastData[tg] = started
+					}
+					if *resizeAfter > 0 {
+						tgs := append([]string(nil), targets...)
+						go func() {
+							time.Sleep(time.Duration(*resizeAfter) * time.Millisecond)
+							for _, tg := range tgs {
+								fmt.Printf("     re-resize %s to %dx%d AFTER viewport\n", tg, *cols-1, *rows)
+								send("resize", map[string]any{"target": tg, "cols": *cols - 1, "rows": *rows})
+							}
+						}()
+					}
+					if *verify {
+						// Poll what the PANE actually holds, so "no frames" can
+						// be judged. An idle pane is legitimately silent; a pane
+						// whose content is changing while our LIVE stream says
+						// nothing is a dead product, and must FAIL.
+						tgs := append([]string(nil), targets...)
+						go func() {
+							t := time.NewTicker(2 * time.Second)
+							defer t.Stop()
+							for range t.C {
+								if time.Now().After(deadline) {
+									return
+								}
+								for _, tg := range tgs {
+									send("command", map[string]any{"id": "verify:" + tg,
+										"method": "pane.read",
+										"params": map[string]any{"pane_id": tg,
+											"source": "visible", "format": "text", "strip_ansi": true}})
+								}
+							}
+						}()
+					}
 					pingSent = time.Now()
 					send("ping", map[string]any{"t": pingSent.UnixMilli()})
 					if *cmdMethod != "" {
@@ -313,6 +366,37 @@ func main() {
 					fmt.Printf("PASS pong control-plane RTT %.2fms\n", float64(rtt.Microseconds())/1000)
 				}
 			case "result":
+				var rr struct {
+					ID     string `json:"id"`
+					OK     bool   `json:"ok"`
+					Result struct {
+						Read struct {
+							Text string `json:"text"`
+						} `json:"read"`
+					} `json:"result"`
+				}
+				_ = json.Unmarshal(e.Data, &rr)
+				if strings.HasPrefix(rr.ID, "verify:") {
+					// The data plane is FASTER than this poll, so a change seen
+					// here is normally already explained by a frame that landed
+					// during the previous poll window. Only a change with NO
+					// data in that window is unexplained, and only an
+					// unexplained window that PERSISTS is a dead stream.
+					tg := strings.TrimPrefix(rr.ID, "verify:")
+					h := hash(rr.Result.Read.Text)
+					if prev, seen := paneHash[tg]; seen && prev != h {
+						changedEver[tg] = true
+						if !dataSincePoll[tg] && unexplained[tg].IsZero() {
+							unexplained[tg] = time.Now()
+						}
+					}
+					if dataSincePoll[tg] {
+						unexplained[tg] = time.Time{}
+					}
+					dataSincePoll[tg] = false
+					paneHash[tg] = h
+					continue
+				}
 				fmt.Printf("PASS result %s\n", compact(e.Data))
 			case "agent":
 				fmt.Printf("PASS agent %s\n", compact(e.Data))
@@ -336,6 +420,9 @@ func main() {
 			case 1:
 				frames++
 				perTarget[tgt]++
+				lastData[tgt] = time.Now()
+				dataSincePoll[tgt] = true
+				unexplained[tgt] = time.Time{}
 				dataBytes += len(payload)
 				// keystroke -> echo: the first frame after a probe keystroke.
 				echoMu.Lock()
@@ -361,6 +448,9 @@ func main() {
 			case 2:
 				snapshots++
 				perTarget[tgt]++
+				lastData[tgt] = time.Now()
+				dataSincePoll[tgt] = true
+				unexplained[tgt] = time.Time{}
 				dataBytes += len(payload)
 				if snapshots == 1 {
 					fmt.Printf("PASS snapshot seq=%d target=%s bytes=%d\n", seq, tgt, len(payload))
@@ -399,17 +489,42 @@ func main() {
 
 	fmt.Printf("\nPER-TARGET data frames:\n")
 	silent := 0
+	var dead []string
 	for _, tg := range targets {
-		fmt.Printf("     %-28s frames+snapshots=%d\n", tg, perTarget[tg])
+		fmt.Printf("     %-28s frames+snapshots=%d pane_changed=%v\n",
+			tg, perTarget[tg], changedEver[tg])
 		if perTarget[tg] == 0 {
 			silent++
 		}
+		// THE acceptance rule. A LIVE target whose pane demonstrably produced
+		// output, and which then stayed silent on the data plane for longer
+		// than -silent-secs, is a DEAD STREAM. Saying "an idle pane can be
+		// legitimately silent" about that is how a broken product passes.
+		if since := unexplained[tg]; !since.IsZero() &&
+			time.Since(since) > time.Duration(*silentFail)*time.Second {
+			dead = append(dead, fmt.Sprintf("%s (pane has been producing output since %s — %s — "+
+				"while the LIVE stream delivered nothing; last data %s)",
+				tg, since.Format("15:04:05"), time.Since(since).Round(time.Second),
+				lastData[tg].Format("15:04:05")))
+		}
+	}
+	if len(dead) > 0 {
+		for _, d := range dead {
+			fmt.Printf("FAIL dead LIVE stream: %s\n", d)
+		}
+		fail("%d LIVE target(s) went silent while their pane was producing output", len(dead))
 	}
 	fmt.Printf("\nSUMMARY welcome=%v tree=%v targets=%d snapshots=%d frames=%d gaps=%d payload_bytes=%d\n",
 		gotWelcome, gotTree, len(targets), snapshots, frames, gaps, dataBytes)
 	if silent > 0 {
-		fmt.Printf("WARN %d of %d targets produced no data (an idle pane can be legitimately silent)\n",
-			silent, len(targets))
+		if *verify {
+			fmt.Printf("INFO %d of %d targets produced no data; pane.read confirms those panes "+
+				"produced no output either, so the silence is the pane's, not ours\n",
+				silent, len(targets))
+		} else {
+			fmt.Printf("WARN %d of %d targets produced no data and -verify is off, so this run "+
+				"CANNOT tell an idle pane from a dead stream\n", silent, len(targets))
+		}
 	}
 	if !gotWelcome || !gotTree {
 		fail("did not receive welcome + tree")
@@ -418,6 +533,12 @@ func main() {
 		fail("no terminal data arrived for %v", targets)
 	}
 	fmt.Println("RESULT ok")
+}
+
+// hash is a cheap content fingerprint; pane.read text can be large.
+func hash(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return fmt.Sprintf("%x", sum[:8])
 }
 
 func ms(d time.Duration) float64 { return float64(d.Microseconds()) / 1000 }

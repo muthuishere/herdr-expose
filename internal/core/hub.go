@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"log/slog"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -54,6 +55,28 @@ func (h *Hub) Store() *Store { return h.store }
 // Run drives the shared summary poller.
 func (h *Hub) Run(ctx context.Context) { h.summary.run(ctx) }
 
+// Upstream supervision (SPEC B7: supervision is a layer, not a hope).
+//
+// A LIVE target whose `herdr terminal session observe` subprocess exits is the
+// flagship failure: the pane is still there, the websocket is still open, and
+// the client sits forever believing it is watching a terminal that stopped
+// existing. Restart it, tell the client to repaint, and if it truly cannot come
+// back say so with a `closed` — never go silent.
+// They are vars, not consts, only so tests can shrink them; nothing at runtime
+// writes them.
+var (
+	// RestartBackoffMin is the delay before the first supervised restart.
+	RestartBackoffMin = 250 * time.Millisecond
+	// RestartBackoffMax caps the exponential backoff.
+	RestartBackoffMax = 10 * time.Second
+	// MaxRestarts is how many consecutive failures we tolerate before telling
+	// the client the target is gone.
+	MaxRestarts = 8
+	// StreamHealthyAfter is how long a restarted stream must survive before the
+	// backoff counter is forgiven.
+	StreamHealthyAfter = 30 * time.Second
+)
+
 // Session is one client connection's view of the world.
 type Session struct {
 	hub  *Hub
@@ -73,6 +96,10 @@ type Session struct {
 	// It is what a `command` frame with no explicit session defaults to.
 	lastLive string
 	closed   bool
+	// restarting/restartCount drive supervised upstream restarts (see
+	// superviseRestart). Both are guarded by mu.
+	restarting   map[string]bool
+	restartCount map[string]int
 }
 
 type liveStream struct {
@@ -88,6 +115,16 @@ type liveStream struct {
 	// of them a snapshot told the client to reset several times a second, which
 	// is what the flicker was.
 	needSnap atomic.Bool
+	// stopped marks a DELIBERATE teardown (viewport change, geometry restart,
+	// control upgrade, connection close). Without it the supervisor cannot tell
+	// "we killed it" from "it died", and every normal viewport change would
+	// look like an upstream failure worth restarting.
+	stopped atomic.Bool
+	// startedAt/healthy drive the supervisor's backoff reset: a stream only
+	// counts as recovered once it has stayed up for StreamHealthyAfter, not
+	// merely because it emitted its attach snapshot before dying again.
+	startedAt time.Time
+	healthy   atomic.Bool
 }
 
 // NewSession creates a per-connection session.
@@ -120,13 +157,29 @@ func (s *Session) SetGeometry(target string, cols, rows int) {
 	mode := s.modes[target]
 	s.mu.Unlock()
 
-	if ls != nil && prev != g {
-		if err := ls.stream.Resize(g.Cols, g.Rows); err != nil {
-			// Observers have no stdin: restart at the new size instead.
-			s.stopStream(target)
-			if mode == ModeLive {
-				s.startStream(target, upstream.ModeObserve)
-			}
+	if ls == nil || prev == g {
+		return
+	}
+	if ls.mode == upstream.ModeControl {
+		if err := ls.stream.Resize(g.Cols, g.Rows); err == nil {
+			return
+		}
+	}
+	// `herdr terminal session observe` takes no stdin — verified on 0.9.0: a
+	// terminal.resize written to an observer is ignored, and the CLI exposes no
+	// other way to change geometry. So an observer is restarted at the new size.
+	// stopStream marks the teardown deliberate, so the supervisor does not see
+	// a failure and the client is not told the target closed; needSnap on the
+	// fresh stream turns its first full frame into a snapshot, so the repaint
+	// is seamless.
+	s.stopStream(target)
+	s.mu.Lock()
+	closed := s.closed
+	mode = s.modes[target]
+	s.mu.Unlock()
+	if !closed && mode == ModeLive {
+		if _, err := s.startStream(target, upstream.ModeObserve); err != nil {
+			s.log.Warn("resize restart failed", "target", target, "err", err)
 		}
 	}
 }
@@ -150,6 +203,22 @@ func (s *Session) FocusedSession() string {
 	return s.hub.store.DefaultSession()
 }
 
+// needsReconcile reports whether a target whose declared mode did NOT change
+// still needs work. Viewport is a RECONCILIATION, not a diff: a target can be
+// ModeLive in `modes` with no entry in `streams` because its upstream
+// subprocess died, and a client re-sending the same viewport is precisely how
+// it asks us to fix that. Treating an unchanged mode as a no-op made that state
+// unrecoverable for the life of the connection.
+func (s *Session) needsReconcile(target string, mode Mode) bool {
+	if mode != ModeLive {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, running := s.streams[target]
+	return !running
+}
+
 // SetViewport applies a client's declared render modes. The server decides what
 // it actually sends; clients never request LIVE directly, they declare that they
 // are rendering a full terminal and the server grants it.
@@ -169,7 +238,7 @@ func (s *Session) SetViewport(decl map[string]string) {
 	s.mu.Unlock()
 
 	for target, mode := range want {
-		if old[target] == mode {
+		if old[target] == mode && !s.needsReconcile(target, mode) {
 			continue
 		}
 		switch mode {
@@ -285,7 +354,7 @@ func (s *Session) startStream(target string, mode upstream.TerminalMode) (*liveS
 	}
 	g := s.geom[target].Clamp()
 	hdr := HeaderLenFor(target)
-	ls := &liveStream{mode: mode, hdrLen: hdr, target: target}
+	ls := &liveStream{mode: mode, hdrLen: hdr, target: target, startedAt: time.Now()}
 	// Fresh attachment (or a restart after a takeover): this connection has no
 	// trustworthy buffer for the target, so the next full repaint is a snapshot.
 	ls.needSnap.Store(true)
@@ -313,7 +382,13 @@ func (s *Session) stopStream(target string) {
 	ls := s.streams[target]
 	delete(s.streams, target)
 	s.mu.Unlock()
-	if ls != nil && ls.stream != nil {
+	if ls == nil {
+		return
+	}
+	// Mark BEFORE killing: OnClosed runs on the subprocess reader goroutine and
+	// must be able to tell a deliberate teardown from an upstream death.
+	ls.stopped.Store(true)
+	if ls.stream != nil {
 		ls.stream.Stop()
 		ls.stream.Wait(2 * time.Second)
 	}
@@ -359,12 +434,22 @@ func (s *Session) Close() {
 	s.streams = map[string]*liveStream{}
 	s.mu.Unlock()
 	for _, ls := range streams {
+		ls.stopped.Store(true)
 		if ls.stream != nil {
 			ls.stream.Stop()
 		}
 	}
 	s.hub.summary.unsubscribeAll(s)
 	s.co.close()
+}
+
+// clearRestarts forgets a target's restart history after a successful frame.
+func (s *Session) clearRestarts(target string) {
+	s.mu.Lock()
+	if len(s.restartCount) > 0 {
+		delete(s.restartCount, target)
+	}
+	s.mu.Unlock()
 }
 
 // streamHandler bridges an upstream terminal stream into this session's
@@ -378,6 +463,14 @@ type streamHandler struct {
 
 func (h *streamHandler) OnFrame(f upstream.TerminalFrame) {
 	t0 := time.Now()
+	// A stream that has stayed up counts as recovered: forget the backoff
+	// history so a target that dies again hours later restarts promptly. The
+	// check is a wall-clock compare and an atomic load, so it costs nothing on
+	// the per-frame hot path.
+	if h.ls != nil && !h.ls.healthy.Load() && !h.ls.startedAt.IsZero() &&
+		time.Since(h.ls.startedAt) >= StreamHealthyAfter && h.ls.healthy.CompareAndSwap(false, true) {
+		h.sess.clearRestarts(h.target)
+	}
 	h.sess.hub.metrics.CountFrame(f.Data.Len() - f.Off)
 	if f.Off != h.hdrLen {
 		// Defensive: reservation mismatch means we cannot stamp in place.
@@ -401,14 +494,130 @@ func (h *streamHandler) OnFrame(f upstream.TerminalFrame) {
 }
 
 func (h *streamHandler) OnClosed(reason string) {
-	h.sess.mu.Lock()
-	delete(h.sess.streams, h.target)
-	closed := h.sess.closed
-	h.sess.mu.Unlock()
+	s := h.sess
+	s.mu.Lock()
+	// Only retire OURSELVES. A supervised restart may already have installed a
+	// newer stream for this target; deleting it here would orphan a live
+	// subprocess and lose the client's output for good.
+	if cur := s.streams[h.target]; cur == h.ls {
+		delete(s.streams, h.target)
+	}
+	closed := s.closed
+	mode := s.modes[h.target]
+	s.mu.Unlock()
 	if closed {
 		return
 	}
-	h.sess.sink.SendJSON("closed", map[string]any{"target": h.target, "reason": reason})
+	if h.ls != nil && h.ls.stopped.Load() {
+		// We asked for this (viewport change, resize restart, control upgrade).
+		// It is not a failure and the client must not be told the pane died.
+		return
+	}
+	if mode == ModeLive {
+		// The target is still supposed to be LIVE, so this is an upstream
+		// failure, not a client decision. Restart it.
+		s.superviseRestart(h.target, reason)
+		return
+	}
+	s.sink.SendJSON("closed", map[string]any{"target": h.target, "reason": reason})
+}
+
+// superviseRestart brings a LIVE target's upstream stream back after it died,
+// with exponential backoff, and tells the client to repaint. If it cannot come
+// back it emits `closed` with a real reason: a client is NEVER left believing
+// it is live on a dead target.
+//
+// The backoff counter deliberately survives a successful restart and is only
+// cleared once a stream has stayed up for StreamHealthyAfter. Otherwise a
+// stream that dies five seconds after every attach would restart at the minimum
+// delay forever, and 26 targets doing that is a subprocess storm, not recovery.
+func (s *Session) superviseRestart(target, reason string) {
+	s.mu.Lock()
+	if s.closed || s.modes[target] != ModeLive {
+		s.mu.Unlock()
+		return
+	}
+	if _, running := s.streams[target]; running {
+		s.mu.Unlock()
+		return
+	}
+	if s.restarting == nil {
+		s.restarting = map[string]bool{}
+	}
+	if s.restarting[target] {
+		s.mu.Unlock()
+		return
+	}
+	s.restarting[target] = true
+	prior := s.restartCount[target]
+	s.mu.Unlock()
+
+	go func() {
+		defer func() {
+			s.mu.Lock()
+			delete(s.restarting, target)
+			s.mu.Unlock()
+		}()
+		lastErr := reason
+		for attempt := prior + 1; attempt <= MaxRestarts; attempt++ {
+			backoff := backoffFor(attempt)
+			s.log.Warn("upstream stream died; restarting", "target", target,
+				"reason", lastErr, "attempt", attempt, "in", backoff)
+			select {
+			case <-s.ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+
+			s.mu.Lock()
+			if s.closed || s.modes[target] != ModeLive {
+				s.mu.Unlock()
+				return
+			}
+			if _, running := s.streams[target]; running {
+				s.mu.Unlock()
+				return
+			}
+			if s.restartCount == nil {
+				s.restartCount = map[string]int{}
+			}
+			s.restartCount[target] = attempt
+			s.mu.Unlock()
+
+			ls, err := s.startStream(target, upstream.ModeObserve)
+			if err != nil {
+				// startStream already told the client with `closed`; keep
+				// trying rather than going quiet.
+				lastErr = err.Error()
+				continue
+			}
+			_ = ls
+			// The client's buffer describes a stream that no longer exists.
+			// Say so with a gap, then repaint. startStream has already set
+			// needSnap, so Herdr's own next full frame lands as a snapshot too.
+			s.sink.SendBinary(encodeGap(s.seq.next(), target, 0))
+			s.requestRepaint(target)
+			return
+		}
+		s.mu.Lock()
+		delete(s.restartCount, target)
+		s.mu.Unlock()
+		s.sink.SendJSON("closed", map[string]any{"target": target,
+			"reason": "upstream stream could not be kept alive after " +
+				strconv.Itoa(MaxRestarts) + " restarts: " + lastErr})
+	}()
+}
+
+// backoffFor is exponential from RestartBackoffMin, capped at RestartBackoffMax.
+func backoffFor(attempt int) time.Duration {
+	d := RestartBackoffMin
+	for i := 1; i < attempt; i++ {
+		d *= 2
+		if d >= RestartBackoffMax {
+			return RestartBackoffMax
+		}
+	}
+	return d
 }
 
 // summaryPoller deduplicates SUMMARY reads across connections. pane.read has no
