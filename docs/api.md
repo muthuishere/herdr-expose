@@ -209,7 +209,7 @@ and get precisely nowhere without looking at your screen.
     |                              |                             |
     |--- POST /v1/pair ----------->|                             |
     |    {"code":"7K2QX9", ... }   |  verify, single-use, burn it |
-    |<-- 200 {"device_token": ...} |                             |
+    |<-- 200 {"token": ...}        |                             |
     |                              |                             |
     |--- GET /v1/stream (Bearer) ->|                             |
 ```
@@ -228,11 +228,14 @@ does not leave a stale URL behind.
 
 **`POST /v1/pair`**
 
+Request — the server reads exactly these two fields. `name` is free text shown
+in `herdr-expose devices` so a human can tell which device to revoke; anything
+else you send is ignored.
+
 ```json
 {
   "code": "7K2QX9",
-  "device_name": "Pixel 8",
-  "platform": "android"
+  "name": "Pixel 8"
 }
 ```
 
@@ -240,11 +243,27 @@ does not leave a stale URL behind.
 
 ```json
 {
-  "device_id": "dev_01HQ8R2K9M",
-  "device_token": "yq8Zr1Wd3pK7sVx0aB4cE6gH9jL2nP5tQ8uY1wA3zC7",
-  "expires_at": "2026-10-16T09:12:00Z"
+  "token": "yq8Zr1Wd3pK7sVx0aB4cE6gH9jL2nP5tQ8uY1wA3zC7",
+  "device": {
+    "id": "dev_01HQ8R2K9M",
+    "name": "Pixel 8",
+    "created_at": "2026-09-16T09:12:00Z",
+    "last_seen": "2026-09-16T09:12:00Z"
+  },
+  "expires_at": "2026-10-16T09:12:00Z",
+  "expires_in": 2592000
 }
 ```
+
+The bearer token is `token`, at the top level. **`expires_at` and `expires_in`
+always describe the same instant** — take whichever you prefer, but do not
+assume `expires_in` is the 30-day device TTL: on a share-scoped instance the
+token expires with the share, so a one-hour share returns `expires_in: 3600`.
+A client that hardcodes the TTL will cache a token that is already dead.
+
+Any failure — wrong code, expired code, already redeemed — returns a bare
+`401`. The reason is deliberately not distinguished, so a caller cannot use the
+error to probe which codes exist.
 
 Pairing parameters, all enforced server-side:
 

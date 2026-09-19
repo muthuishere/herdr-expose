@@ -59,14 +59,24 @@ type Scroll struct {
 
 // Pane is one terminal pane.
 type Pane struct {
-	PaneID                string        `json:"pane_id"`
-	TerminalID            string        `json:"terminal_id"`
-	WorkspaceID           string        `json:"workspace_id"`
-	TabID                 string        `json:"tab_id"`
-	Focused               bool          `json:"focused"`
-	Cwd                   string        `json:"cwd"`
-	ForegroundCwd         string        `json:"foreground_cwd"`
-	Agent                 string        `json:"agent,omitempty"`
+	PaneID        string `json:"pane_id"`
+	TerminalID    string `json:"terminal_id"`
+	WorkspaceID   string `json:"workspace_id"`
+	TabID         string `json:"tab_id"`
+	Focused       bool   `json:"focused"`
+	Cwd           string `json:"cwd"`
+	ForegroundCwd string `json:"foreground_cwd"`
+	Agent         string `json:"agent,omitempty"`
+	// Label is what the user explicitly named this pane (`herdr pane rename`).
+	// It must win over any terminal title: a title is whatever the shell last
+	// wrote to OSC 0/2 and changes under you, whereas a label is a deliberate
+	// human choice. Missing this field meant a renamed pane silently lost its
+	// name in the web UI.
+	Label string `json:"label,omitempty"`
+	// Title is Herdr's own resolved display title, which already folds in the
+	// label, the agent name and the terminal title.
+	Title                 string        `json:"title,omitempty"`
+	DisplayAgent          string        `json:"display_agent,omitempty"`
 	TerminalTitle         string        `json:"terminal_title,omitempty"`
 	TerminalTitleStripped string        `json:"terminal_title_stripped,omitempty"`
 	AgentStatus           string        `json:"agent_status,omitempty"`

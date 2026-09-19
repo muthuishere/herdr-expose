@@ -196,7 +196,19 @@ func nonNilPanes(p []PaneView) []PaneView {
 
 func paneView(session string, p *upstream.Pane, t *core.Tree, sess *core.Session) PaneView {
 	target := core.JoinTarget(session, p.PaneID)
-	title := p.TerminalTitleStripped
+	// Precedence matters: an explicit `herdr pane rename` must beat a terminal
+	// title, because a title is whatever the shell last wrote to OSC 0/2 and
+	// changes on its own, while a label is a deliberate human choice. Herdr's
+	// own resolved Title already folds label > agent > terminal title, so it
+	// comes second. The pane id is a last resort and is never a good label —
+	// rendering one is the bug the e2e suite now guards against.
+	title := p.Label
+	if title == "" {
+		title = p.Title
+	}
+	if title == "" {
+		title = p.TerminalTitleStripped
+	}
 	if title == "" {
 		title = p.TerminalTitle
 	}
