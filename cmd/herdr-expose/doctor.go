@@ -388,6 +388,31 @@ func (d *doctorRun) checkCloudflareToken(cfg *config.Config) {
 	d.add("cloudflare token", statusPass, detail)
 }
 
+// publicResolver resolves through 1.1.1.1 (8.8.8.8 as fallback) instead of the
+// host stub resolver — the SAME way internal/expose's verify-before-publish
+// probe resolves, and for the same reason.
+//
+// A stub resolver that was asked for a hostname *before* it existed can hold the
+// NXDOMAIN well past the record's TTL; macOS mDNSResponder does exactly this.
+// If doctor asked only the stub it would print `dns: FAIL` beside
+// `exposure: PASS` for a tunnel that answers from every other machine on earth
+// — a diagnostic that contradicts reality, sending the user after a problem
+// that is not there.
+var publicResolver = &net.Resolver{
+	PreferGo: true,
+	Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		d := net.Dialer{Timeout: 3 * time.Second}
+		c, err := d.DialContext(ctx, network, "1.1.1.1:53")
+		if err == nil {
+			return c, nil
+		}
+		return d.DialContext(ctx, network, "8.8.8.8:53")
+	},
+}
+
+// checkDNS asks BOTH resolvers, because the difference between them is itself
+// the diagnosis. Public authority decides whether the record exists; the local
+// stub only decides whether *this* machine can see it yet.
 func (d *doctorRun) checkDNS(cfg *config.Config) {
 	domain := strings.TrimSpace(cfg.Expose.Domain)
 	if domain == "" {
@@ -396,13 +421,71 @@ func (d *doctorRun) checkDNS(cfg *config.Config) {
 	}
 	cctx, cancel := context.WithTimeout(d.ctx, 10*time.Second)
 	defer cancel()
-	ips, err := net.DefaultResolver.LookupHost(cctx, domain)
-	if err != nil {
-		d.add("dns", statusFail, domain+" does not resolve: "+err.Error(),
-			"the proxied CNAME may not be created yet — `herdr-expose expose start` creates it")
-		return
+
+	pubIPs, pubErr := publicResolver.LookupHost(cctx, domain)
+	localIPs, localErr := net.DefaultResolver.LookupHost(cctx, domain)
+
+	c := classifyDNS(domain, pubIPs, pubErr, localIPs, localErr)
+	d.checks = append(d.checks, c)
+}
+
+// classifyDNS is the whole judgement, kept pure so it can be tested without a
+// network: the two resolvers' answers in, one honest verdict out.
+func classifyDNS(domain string, pubIPs []string, pubErr error, localIPs []string, localErr error) check {
+	mk := func(st checkStatus, detail, hint string) check {
+		return check{Name: "dns", Status: st, Detail: detail, Hint: hint}
 	}
-	d.add("dns", statusPass, fmt.Sprintf("%s -> %s", domain, strings.Join(ips, ", ")))
+	switch {
+	case pubErr == nil && localErr == nil:
+		detail := fmt.Sprintf("%s -> %s", domain, strings.Join(pubIPs, ", "))
+		if !sameHosts(pubIPs, localIPs) {
+			return mk(statusWarn,
+				fmt.Sprintf("%s; this machine's resolver answers %s instead",
+					detail, strings.Join(localIPs, ", ")),
+				"a cached older answer, a split-horizon resolver or an /etc/hosts entry — "+
+					"the public answer is the one the outside world uses")
+		}
+		return mk(statusPass, detail+" (public resolver and this machine agree)", "")
+
+	case pubErr == nil && localErr != nil:
+		// The interesting state, and the one this check exists to name.
+		return mk(statusWarn,
+			fmt.Sprintf("%s resolves publicly -> %s, but this machine's resolver does not see it yet (%v)",
+				domain, strings.Join(pubIPs, ", "), localErr),
+			"a stale negative cache entry from before the record existed; it clears on its own. "+
+				"The tunnel is not broken — if `exposure` passed, the URL works from anywhere else. "+
+				"To clear it now on macOS: `sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder`")
+
+	case pubErr != nil && localErr == nil:
+		return mk(statusWarn,
+			fmt.Sprintf("%s resolves only locally -> %s; public DNS does not have it (%v)",
+				domain, strings.Join(localIPs, ", "), pubErr),
+			"an /etc/hosts entry or a private/split-horizon zone — nobody outside this network "+
+				"can reach that name")
+
+	default:
+		return mk(statusFail,
+			fmt.Sprintf("%s does not resolve, publicly or locally: %v", domain, pubErr),
+			"the proxied CNAME may not be created yet — `herdr-expose expose start` creates it")
+	}
+}
+
+// sameHosts compares two answer sets as sets: resolvers are free to reorder.
+func sameHosts(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := make(map[string]int, len(a))
+	for _, v := range a {
+		seen[v]++
+	}
+	for _, v := range b {
+		seen[v]--
+		if seen[v] < 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func (d *doctorRun) checkShares() {

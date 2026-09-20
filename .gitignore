@@ -1,5 +1,9 @@
 # ---- build output -------------------------------------------------------
 bin/
+# A stray `go build` with no -o drops a 24MB binary named after the module at
+# the repo root. It is build output like anything in bin/, and it has already
+# been caught once on its way into a commit.
+/herdr-expose
 dist/
 *.exe
 

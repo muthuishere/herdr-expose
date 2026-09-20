@@ -233,6 +233,10 @@ point, not the happy path. Nobody should write JS to put this on a domain.
 
 ## A3. Performance budget — these are acceptance criteria, not aspirations
 
+> **SUPERSEDED in its memory row** by AMENDMENTS 20: the RSS line measured only
+> the server process and ignored the `herdr terminal session observe`
+> subprocesses the design mandates. N20 below carries the measured numbers.
+
 | path                          | target                          |
 |-------------------------------|---------------------------------|
 | keystroke -> upstream write   | < 5ms                           |
@@ -381,6 +385,10 @@ the reference — budget for it:
   SGR/OSC colour through exactly as the host sent it.
 
 ## B9. Compression tuning (EXTENDS A1)
+
+> **Backpressure clause CORRECTED** by AMENDMENTS 19: there is no `gap`-and-degrade
+> ladder for a slow socket. Scroll shedding is real, but a client that cannot drain
+> is disconnected. See N19 below for what was measured.
 
 permessage-deflate `threshold: 1024` so keystrokes and small echoes skip
 compression entirely (zero CPU, zero buffering delay), level 3, and leave context
@@ -1246,3 +1254,140 @@ anything is not a reason to take somebody's daemon down.
 
 The four rungs of AMENDMENTS 16/17 are unchanged: bare = lan, `--quick`,
 `--domain`, `--local`, and the ladder is still never climbed for you.
+
+---
+
+# AMENDMENTS 19 — what a slow client ACTUALLY gets (corrects B9's backpressure clause)
+
+B9 said: "if the socket's buffered amount exceeds ~256KB, drop WHEEL/scroll input
+but never keystrokes." That describes a degradation ladder that ends in a `gap`.
+Half of it is true; the ending is not, and the spec has been claiming a mechanism
+that does not exist in the code.
+
+## N19.1 What the stress test measured
+
+A client that accepts a connection and then never drains it, against a busy pane:
+
+| observation                | measured                                    |
+|----------------------------|---------------------------------------------|
+| time to disconnect         | ~20s                                         |
+| degradation phase before it| none observed                                |
+| `gap` frame to that client | none                                         |
+| server RSS over 180s       | +0.2MB — bounded                             |
+
+The **safety** property B9 exists for holds: one stalled viewer cannot grow the
+server's memory, and cannot stall the hub for anybody else. The described
+*mechanism* is what is wrong.
+
+## N19.2 What the code does, in three layers
+
+1. **Inbound scroll shedding — REAL, and exactly as B9 says.** `backlogged()` is
+   `queued > SocketBacklogBytes` (256KB), and a `scroll` message from a backlogged
+   connection is dropped on the floor. Keystrokes are never shed. This is the half
+   of B9 that shipped (`internal/serve/ws.go`).
+2. **Hard disconnect on a full outbound queue.** The per-connection queue is
+   `SendQueueDepth` = 512 messages. `SendBinary`/`SendJSON` never block: on a full
+   queue they release the buffer, log `ws: send queue full, closing connection`,
+   and `shutdown()` the socket. There is no throttle, no partial send, no
+   half-speed mode between 256KB and closed — 256KB of backlog buys the client
+   only a scroll-free ride toward the same door.
+3. **`gap` is an UPSTREAM-side frame, not a backpressure signal.** Type-3 `gap`
+   (`internal/core/wire.go`) is emitted by the coalescer when a *target's* buffer
+   overflows or its upstream stream restarts, and it is followed by a repaint.
+   It reports bytes lost between Herdr and the hub. It is never the answer to a
+   client that is not reading its socket, because a client that is not reading its
+   socket cannot receive it.
+
+## N19.3 Which behaviour is INTENDED
+
+**The code's.** Disconnect is the right policy here and the spec moves to it:
+
+- A `gap` to a stalled client is undeliverable by construction. Queuing one
+  behind 512 messages the client is already not reading is theatre.
+- A degradation ladder nobody can observe is a ladder nobody can test. This one
+  was never observed in 180s of stress because it is not there.
+- The viewer is a web app with reconnect. Closing is a two-second recovery for a
+  client that is genuinely wedged, and it releases pooled buffers immediately —
+  which is *why* RSS stayed flat at +0.2MB.
+- Silence has a bound: 512 messages or 256KB of backlog, whichever comes first.
+  An unbounded queue to a dead reader is the classic way to turn one bad client
+  into an OOM.
+
+**Recommendation on record: the SPEC moves, the code stays.** The one thing worth
+adding later is honesty on the way out — a close code and reason (`1008`,
+"send queue full: client could not keep up") so the client can tell "you were too
+slow" from "the network dropped" and say so in its reconnect banner. That is a
+UX improvement, not a change of policy, and it is not required for v1.
+
+## N19.4 The corrected clause
+
+> Backpressure: a connection whose queued bytes exceed `SocketBacklogBytes`
+> (256KB) has WHEEL/scroll input shed; keystrokes are never shed. A connection
+> whose outbound queue reaches `SendQueueDepth` (512 messages) is CLOSED — the
+> hub never blocks on a client and never grows a queue to fit one. There is no
+> intermediate degradation phase and no `gap` on this path; `gap` reports bytes
+> lost upstream of the hub, and a repaint follows it.
+
+---
+
+# AMENDMENTS 20 — the memory budget measures the whole footprint, or it measures nothing
+
+A3's memory row reads "RSS, 20 panes < 60MB". It was measured as the server
+process alone, and it is wrong in two separate ways: the number is not achievable,
+and the thing it counts is not the thing the user pays for.
+
+## N20.1 What was measured
+
+| observation                                    | measured        |
+|------------------------------------------------|-----------------|
+| server process RSS, loaded, plateau             | ~88MB           |
+| per LIVE target, `herdr terminal session observe` subprocess | ~8.7MB **per connection** |
+| 1 pane, 16 viewers, total                       | ~223MB          |
+
+## N20.2 Why counting only the server is the wrong unit
+
+B1 (AMENDMENTS 2) replaced "one upstream stream per target" with **per-connection
+streams**, and A3 was never reconciled with it. A3 still carries the old
+invariant in its prose ("one upstream stream per target no matter how many
+clients") beneath a table that counts panes, not viewers. Under B1 the dominant
+term is not panes at all — it is `observe` subprocesses, one per LIVE target per
+connection, and each is a process this binary spawns and is responsible for.
+
+A budget that excludes the subprocesses the design mandates is not measuring the
+product's footprint; it is measuring one process inside it. `ps` on the machine
+tells the user the truth either way, so the budget may as well.
+
+## N20.3 The corrected budget
+
+The unit is **RSS of the herdr-expose process + the RSS of every
+`herdr terminal session observe` child it has spawned**, sampled at plateau
+(after the tree is loaded and every viewer has attached), not at startup.
+
+| path                                         | target                         |
+|----------------------------------------------|--------------------------------|
+| server process RSS, 20 panes, no LIVE viewer | < 100MB (measured plateau ~88MB) |
+| per LIVE target-connection (observe child)   | < 10MB (measured ~8.7MB)        |
+| TOTAL, 20 panes + 16 LIVE viewers of one pane| < 250MB (measured ~223MB)       |
+| idle CPU, 20 panes                           | < 1%                            |
+
+60MB is retired. It was never met and pretending otherwise made every other
+number in the table less believable. ~88MB is a Go server with an embedded web
+bundle, a goja runtime and pooled fanout buffers; it is a fair price and it is
+now the stated one.
+
+## N20.4 The per-connection term is a BUG against this budget, not a licence
+
+The `< 10MB` row prices what the code does today; it does not bless it. Under
+B1 the `observe` child is per connection, so 16 viewers of ONE pane spawn 16
+children of the same pane — the linear term that turns 88MB into 223MB. The
+fan-out fix (one upstream stream per target, shared by every connection, which
+is what A3's prose asked for all along) is in progress. When it lands, the TOTAL
+row drops to `< 120MB` for the same 20-pane / 16-viewer shape and the
+per-connection row becomes `< 1MB`. **Amend this table when that is MEASURED,
+not when it is merged.**
+
+## N20.5 The rule this came from
+
+A budget that is quietly missed is not a budget; it is a wish with a table
+around it. Every row here is a number somebody watched a process reach. A3's
+closing line still governs: *a claimed number is not a number*.
