@@ -63,6 +63,51 @@ make, and the thing this was rebuilt around.
 
 ---
 
+## Why the skill is the whole point
+
+Every other way to do this is something **you** operate. You install the app,
+you scan the QR, you keep the relay account alive, you remember the flag. The
+agent is the subject of the sentence and never the one saying it.
+
+`herdr plugin install` puts a skill called `herdr-share` next to the binary,
+and after that **sharing is something the agent knows how to do**. Say *share
+this*, or *put this on my phone*, or *send Priya a link to this one* — it picks
+the verb, runs it, and reads the URL and pairing code back to you. You never
+left the session you were in.
+
+Worth saying plainly, because you can check it: Herdr's plugin format has no
+concept of a skill at all — the manifest covers actions, panes, keybindings,
+link handlers, startup hooks and storage, and the word "skill" does not appear
+in its plugin documentation. This plugin installs one anyway, as part of its
+build. That is why it feels different to use, and it is the one thing no other
+plugin in that marketplace ships.
+
+---
+
+## Next to the alternatives
+
+The row that matters is the first one.
+
+| | **herdr-expose** | VibeTunnel | Omnara | Happy Coder | Claude Remote Control |
+|---|---|---|---|---|---|
+| **Who starts the share** | **The agent — you say "share this"** | You do | You do | You do | You do — scan a QR |
+| **Ships an agent skill** | **Yes — `herdr-share`** | No — terminal proxy, no skill or MCP | No | No | n/a |
+| **Account or relay** | **None — your own network, direct** | None | Relay + account, $9/mo; plaintext on their servers unless self-hosted | Free relay, E2E encrypted, self-hostable | Through Anthropic's servers |
+| **On a name you own** | **`--domain yours.com`** — your Cloudflare; expiry deletes the DNS record and tunnel it made | Bring your own tunnel, by hand | Their hostname | Their hostname | No |
+| **Windows** | **Yes** — verified on real hardware, no Administrator rights | "Windows is not yet supported" | not claimed | Yes | Through WSL |
+| **Agents it covers** | 21 kinds Herdr detects, plus any plain shell | Any terminal | Claude Code | Claude Code and Codex | Claude Code only |
+| **What a link exposes** | **One session** — pairing-gated, expires on its own | Server-wide auth; no per-session expiry documented | Your account's sessions | Your account's sessions | The session you paired |
+| **What it costs you** | It needs Herdr | — | $9/mo | — | A Pro or Max plan |
+
+Two rows are deliberately not a clean sweep. **Happy Coder runs on Windows
+too** — VibeTunnel is the one that says it does not — and **herdr-expose is the
+only one here that needs another tool installed**, namely Herdr, which the rest
+do not. A comparison you can catch out on one row is worth nothing on the
+others, so those stay in. Everything above is from each project's own
+documentation as of September 2026; check it before you believe it.
+
+---
+
 ## Before you run it
 
 This gives a browser control of a terminal. Typing into it runs commands as you.

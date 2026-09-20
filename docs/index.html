@@ -630,6 +630,21 @@ footer a { color: var(--fg-dim); }
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
+
+/* ------------------------------------------------------------ compare */
+.cmp-scroll { overflow-x: auto; margin-top: 26px; -webkit-overflow-scrolling: touch; }
+table.cmp { border-collapse: collapse; width: 100%; min-width: 680px; font-size: 14.5px; }
+table.cmp th, table.cmp td {
+  text-align: left; padding: 11px 13px; border-bottom: 1px solid var(--line);
+  vertical-align: top; color: var(--fg-dim);
+}
+table.cmp thead th { color: var(--fg); font-weight: 600; font-size: 13.5px; white-space: nowrap; }
+table.cmp tbody th { color: var(--fg); font-weight: 600; width: 19%; }
+table.cmp td.us, table.cmp thead th.us { color: var(--fg); background: var(--bg-1); }
+table.cmp thead th.us { color: var(--accent); }
+table.cmp td.us b { color: var(--fg); }
+table.cmp .no { color: var(--fg-faint); }
+.cmp-note { font-size: 14px; color: var(--fg-faint); max-width: 70ch; margin-top: 16px; }
 </style>
 </head>
 
@@ -641,6 +656,7 @@ footer a { color: var(--fg-dim); }
     <nav>
       <a href="#why" class="hide-sm">Why</a>
       <a href="#look" class="hide-sm">What it looks like</a>
+      <a href="#compare" class="hide-sm">Compare</a>
       <a href="#security">Security</a>
       <a href="https://github.com/muthuishere/herdr-expose">GitHub</a>
     </nav>
@@ -653,13 +669,16 @@ footer a { color: var(--fg-dim); }
 <section class="hero">
   <div class="wrap">
     <p class="eyebrow">A Herdr plugin · one Go binary</p>
-    <h1>Your agents run on one machine. <em>You aren't always at it.</em></h1>
+    <h1>Say <em>“share this”</em> to the agent. It hands back a link to itself.</h1>
     <p class="lede">
-      Reach every Claude Code, Codex, Devin, Gemini, Copilot, Cursor — any of the 21 agent kinds Herdr detects, in a
-      <a href="https://herdr.dev">Herdr</a> pane — from any browser on your
-      network: the laptop in the other room, the desktop upstairs, a tablet, a
-      phone. Answer the ones that are blocked. Hand a teammate a link scoped to
-      one session that expires on its own. The web app is inside the binary.
+      Your agents run on one machine and you aren't always at it. So don't go
+      to the machine and don't learn a CLI — tell the agent, in the session you
+      are already in, and it puts itself in a browser: Claude Code, Codex,
+      Devin, Gemini, Copilot, Cursor, any of the 21 agent kinds
+      <a href="https://herdr.dev">Herdr</a> detects. Read it from the laptop in
+      the other room, a tablet, a phone. Answer the ones that are blocked. Hand
+      a teammate a link scoped to one session that expires on its own. The web
+      app is inside the binary.
     </p>
 
     <div class="cmds">
@@ -668,15 +687,17 @@ footer a { color: var(--fg-dim); }
         <button class="copy" type="button" data-copy="herdr plugin install muthuishere/herdr-expose">Copy</button>
       </div>
       <div class="cmd">
-        <pre><span class="sig">$ </span>herdr-expose share</pre>
-        <button class="copy" type="button" data-copy="herdr-expose share">Copy</button>
+        <pre><span class="sig">› </span>share this</pre>
+        <button class="copy" type="button" data-copy="share this">Copy</button>
       </div>
       <p class="cmd-note">
-        The first installs the binary, the plugin and the agent skill. The
-        second prints a URL and a pairing code — open it on any device on your
-        network, or send it to the person who needs to drive that session. Or
-        skip sharing entirely: <code>herdr-expose daemon</code>, then
-        <code>127.0.0.1:21118</code> right where you are sitting.
+        The first command installs three things: the binary, the Herdr plugin,
+        and the agent skill. After that the second line is not a command — it is
+        what you say to the agent. It runs <code>herdr-expose share</code> for
+        you and reports back the URL and the pairing code. Type it yourself if
+        you would rather. Or skip sharing entirely:
+        <code>herdr-expose daemon</code>, then <code>127.0.0.1:21118</code>
+        right where you are sitting.
       </p>
     </div>
 
@@ -1158,6 +1179,135 @@ is not reversible.<span class="m-tr-rule"></span>Run migration 0042 against dev?
       write. A <code>--quick</code> or <code>--domain</code> request with no
       <code>cloudflared</code> to run degrades to your network and prints why —
       because you did ask to be reachable, and that is the nearest honest answer.
+    </p>
+  </div>
+</section>
+
+<!-- ------------------------------------------------------------- the skill -->
+<section id="skill">
+  <div class="wrap">
+    <p class="eyebrow">What actually makes this different</p>
+    <h2>Every other way to do this is something <em>you</em> operate. This one, the agent operates.</h2>
+    <p class="lede">
+      The tools in this space all end at the same place — a browser showing
+      your terminal — and they all start at the same place too: you. You
+      install the app, you scan the QR, you keep the relay account alive, you
+      remember the flag. The agent is the subject of the sentence and never the
+      one saying it.
+    </p>
+    <p class="lede" style="margin-top:14px">
+      <code>herdr plugin install</code> puts a skill called
+      <code>herdr-share</code> next to the binary. After that, <b>sharing is
+      something the agent knows how to do</b>. You say <em>share this</em>, or
+      <em>put this on my phone</em>, or <em>send Priya a link to this one</em>,
+      and it picks the verb, runs it, and reads the URL and the pairing code
+      back to you. You never left the session you were in.
+    </p>
+    <p class="cmd-note" style="margin-top:18px">
+      Worth saying plainly, because it is checkable: Herdr's plugin format has
+      no concept of a skill at all — the manifest covers actions, panes,
+      keybindings, link handlers, startup hooks and storage, and the word
+      “skill” does not appear in its plugin documentation. This plugin installs
+      one anyway, as part of its build. That is the whole reason it feels
+      different to use, and it is the one thing no other plugin in that
+      marketplace ships.
+    </p>
+  </div>
+</section>
+
+<!-- ----------------------------------------------------------- comparison -->
+<section id="compare">
+  <div class="wrap">
+    <p class="eyebrow">Next to the alternatives</p>
+    <h2>The row that matters is the first one.</h2>
+    <div class="cmp-scroll">
+      <table class="cmp">
+        <thead>
+          <tr>
+            <th></th>
+            <th class="us">herdr-expose</th>
+            <th>VibeTunnel</th>
+            <th>Omnara</th>
+            <th>Happy Coder</th>
+            <th>Claude Remote Control</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th>Who starts the share</th>
+            <td class="us"><b>The agent — you say “share this”</b></td>
+            <td class="no">You do</td>
+            <td class="no">You do</td>
+            <td class="no">You do</td>
+            <td class="no">You do — scan a QR</td>
+          </tr>
+          <tr>
+            <th>Ships an agent skill</th>
+            <td class="us"><b>Yes — <code>herdr-share</code></b></td>
+            <td class="no">No — a terminal proxy, no skill or MCP</td>
+            <td class="no">No</td>
+            <td class="no">No</td>
+            <td class="no">n/a</td>
+          </tr>
+          <tr>
+            <th>Account or relay</th>
+            <td class="us"><b>None — your own network, direct</b></td>
+            <td>None</td>
+            <td class="no">Relay + account, $9/mo; plaintext on their servers unless self-hosted</td>
+            <td>Free relay, end-to-end encrypted, self-hostable</td>
+            <td class="no">Through Anthropic's servers</td>
+          </tr>
+          <tr>
+            <th>On a name you own</th>
+            <td class="us"><b><code>--domain yours.com</code></b> — your Cloudflare account; expiry deletes the DNS record and the tunnel it made</td>
+            <td>Bring your own tunnel, wired up by hand</td>
+            <td class="no">Their hostname</td>
+            <td class="no">Their hostname</td>
+            <td class="no">No</td>
+          </tr>
+          <tr>
+            <th>Windows</th>
+            <td class="us"><b>Yes</b> — verified on real hardware, no Administrator rights</td>
+            <td class="no">“Windows is not yet supported”</td>
+            <td>not claimed</td>
+            <td>Yes</td>
+            <td>Through WSL</td>
+          </tr>
+          <tr>
+            <th>Agents it covers</th>
+            <td class="us"><b>21 kinds Herdr detects, plus any plain shell</b></td>
+            <td>Any terminal</td>
+            <td>Claude Code</td>
+            <td>Claude Code and Codex</td>
+            <td class="no">Claude Code only</td>
+          </tr>
+          <tr>
+            <th>What a link exposes</th>
+            <td class="us"><b>One session</b> — pairing-gated, expires on its own</td>
+            <td>Server-wide auth; no per-session expiry documented</td>
+            <td>Your account's sessions</td>
+            <td>Your account's sessions</td>
+            <td>The session you paired</td>
+          </tr>
+          <tr>
+            <th>What it costs you</th>
+            <td class="us">It needs Herdr</td>
+            <td>—</td>
+            <td class="no">$9/mo</td>
+            <td>—</td>
+            <td class="no">A Pro or Max plan</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="cmp-note">
+      Two rows are deliberately not a clean sweep. <b>Happy Coder runs on
+      Windows too</b> — VibeTunnel is the one that says it does not — and
+      <b>herdr-expose is the only one here that needs another tool
+      installed</b>, namely Herdr, which the rest do not. A comparison you can
+      catch out on one row is worth nothing on the others, so those stay in.
+      Everything above is from each project's own documentation, as of
+      September 2026; check it before you believe it.
     </p>
   </div>
 </section>
