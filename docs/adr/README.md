@@ -45,6 +45,7 @@ Herdr 0.9.0 verification.
 | [0033](0033-self-documenting-config.md) | The config file documents itself | Accepted |
 | [0034](0034-cloudflare-is-the-only-built-in-provider.md) | Cloudflare is the only built-in provider; everything else is an adapter | Accepted; **removes** 0005's `ngrok` clause and narrows 0028's provider parity |
 | [0035](0035-all-sessions-share.md) | `share --all`: an all-sessions share, confirmed out loud | Accepted; extends 0026's scoped share with the absence of a scope, and leaves 0029's ladder untouched |
+| [0036](0036-one-install-binary-plugin-and-skill.md) | One install: the binary, the plugin AND the agent skill | Accepted; adds the `skill` verb and makes 0001's build step finish the install |
 
 ## Supersessions
 
@@ -70,6 +71,7 @@ Herdr 0.9.0 verification.
 | 0033 | extends 0009 (where the config lives) with what a first run writes |
 | 0034 | **removes** 0005's `ngrok = true` clause and narrows 0028's provider parity; promotes the JS adapter from escape hatch to the extension point |
 | 0035 | extends the scoped share with `--all` (no scope at all); changes nothing about the rung ladder, pairing or time-boxing |
+| 0036 | extends 0001's build step (it now links into $HOME, announced) and 0025's id set (`hex:install-skill`); changes no runtime behaviour |
 
 ## Themes
 

@@ -46,6 +46,19 @@ description = "Server state, local URL, exposed URL, and paired devices"
 command = ["./bin/herdr-expose", "status"]
 contexts = ["global"]
 
+# The skill install is ALSO done by scripts/build.sh, which Herdr runs at
+# `plugin install` — so the one-command path stays one command. This action is
+# the repair verb: run it after moving the checkout, after a manual
+# `skill uninstall`, or on a second machine whose ~/.claude did not exist when
+# the plugin was first built. It is a symlink, it is idempotent, and it refuses
+# to clobber a real directory. See docs/adr/0036.
+[[actions]]
+id = "hex:install-skill"
+title = "Install the herdr-share agent skill"
+description = "Link skill/ into ~/.claude/skills (and ~/.agents/skills) so an agent can drive share"
+command = ["./bin/herdr-expose", "skill", "install"]
+contexts = ["global"]
+
 [[actions]]
 id = "hex:expose"
 title = "Expose over a tunnel"

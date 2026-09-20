@@ -40,6 +40,9 @@ WebSocket contract.
   in `lan` mode: plain HTTP on a LAN IP is not a secure context.)
 - **Loopback by default**, your wifi if you ask, your own domain if you mean it —
   and a device token required in both of the latter.
+- **An agent skill in the box.** Installing the plugin also installs
+  [`herdr-share`](#the-agent-skill), so you can say "share this session" to
+  Claude Code and it runs the right command with the right rung.
 
 ---
 
@@ -69,8 +72,24 @@ herdr plugin install muthuishere/herdr-expose
 
 It shows you a preview of everything it will run, clones the repo into a managed
 checkout under `~/.config/herdr/plugins/github/`, runs `./scripts/build.sh`
-there, and registers the actions, panes, link handler and startup hook. The
-startup hook runs when Herdr next restores your session, not at install time —
+there, and registers the actions, panes, link handler and startup hook.
+
+**That one command installs all three parts**, and the build step prints every
+path it touches:
+
+| | |
+|---|---|
+| the **binary**, web UI embedded | `<managed checkout>/bin/herdr-expose` |
+| a **PATH symlink**, so `herdr-expose <verb>` works | `~/.local/bin/herdr-expose` |
+| the **agent skill** ([below](#the-agent-skill)) | `~/.claude/skills/herdr-share`, plus `~/.agents/skills/herdr-share` if that directory already exists |
+
+Both links point *into* the checkout, so a `git pull` or a rebuild updates them.
+Nothing real is ever overwritten: a file that is not a symlink, or a skill
+directory you wrote yourself, is reported and left alone. If you would rather
+the build touched nothing in your home directory, install with
+`HERDR_EXPOSE_NO_LINK=1` — you then get `bin/herdr-expose` and nothing else.
+
+The startup hook runs when Herdr next restores your session, not at install time —
 so right after installing, start it yourself:
 
 ```bash
@@ -84,14 +103,22 @@ Every id is namespaced `hex:` because `herdr plugin action invoke` takes
 defining one. (`:` is a legal id character in Herdr 0.9.0; `.` is not.) Pass
 `--plugin dev.deemwar.herdr-expose` if you want to be explicit.
 
-**The `herdr-expose` command is not on your PATH after a plugin install** — the
-binary lives inside the managed checkout, which Herdr owns and replaces on every
-reinstall. To use the CLI directly, either build from source (below) or link it
-once:
+The binary lives inside the managed checkout, which Herdr owns and replaces on
+every reinstall, so the install links it onto your PATH for you. If you skipped
+that (`HERDR_EXPOSE_NO_LINK=1`), or `~/.local/bin` is not on your `PATH`, do it
+yourself:
 
 ```bash
 ln -sf ~/.config/herdr/plugins/github/dev.deemwar.herdr-expose-*/bin/herdr-expose \
   ~/.local/bin/herdr-expose
+```
+
+Re-link the skill at any time — after moving the checkout, or on a machine whose
+`~/.claude` did not exist at build time:
+
+```bash
+herdr-expose skill install                        # or:
+herdr plugin action invoke hex:install-skill
 ```
 
 `herdr plugin uninstall dev.deemwar.herdr-expose` removes the checkout. It does
@@ -104,9 +131,13 @@ call.
 ```bash
 git clone https://github.com/muthuishere/herdr-expose
 cd herdr-expose
-./scripts/build.sh          # web app, then the Go binary with it embedded
+./scripts/build.sh          # web app, Go binary, PATH symlink, agent skill
 ./bin/herdr-expose serve    # http://127.0.0.1:21118
 ```
+
+`build.sh` is the install script: after the binary it links
+`~/.local/bin/herdr-expose` and installs the `herdr-share` skill, printing each
+path. `./scripts/build.sh --no-link` builds and links nothing.
 
 Link it into Herdr without installing from GitHub:
 
@@ -166,6 +197,7 @@ herdr-expose status
 | `share list\|extend\|pair\|revoke\|restore` | manage shares (every verb takes `--json`) |
 | `panic` | revoke every share and stop the main tunnel |
 | `service install\|uninstall\|status` | install, remove or report the launchd / systemd unit for crash recovery (also spelled `install-service` / `uninstall-service`) |
+| `skill install\|uninstall\|status` | link, unlink or report the `herdr-share` [agent skill](#the-agent-skill) |
 
 ---
 
@@ -427,6 +459,70 @@ ever created.
 
 ---
 
+## The agent skill
+
+`skill/` in this repository is a **Claude Code / agent skill** called
+`herdr-share`. It is how the owner of this tool actually drives it: you say what
+you want in English, the agent runs the CLI.
+
+It is a thin wrapper, on purpose — **the binary is the product.** The skill
+never reimplements a rung, never hand-rolls `cloudflared`, never touches DNS.
+What it adds is judgement: which rung the words you used actually asked for,
+what to read back before creating anything, and what never to paste into a
+channel.
+
+```
+you:    "share this session so I can watch it from my phone"
+agent:  herdr-expose share --json
+        -> http://192.168.1.24:49213, pairing code, expires in 1h
+
+you:    "I'm not on the same wifi"
+agent:  herdr-expose share --quick --json
+        -> https://<random>.trycloudflare.com, new pairing code
+
+you:    "is anything of mine exposed right now?"
+agent:  herdr-expose share list --json  +  herdr-expose expose status
+```
+
+The rules it works under are in [`skill/SKILL.md`](skill/SKILL.md), and two are
+worth knowing before you let an agent near this:
+
+- **It never climbs the ladder for you.** "Share this" is a LAN share. Getting a
+  public URL takes words that mean public — the agent is told, in as many words,
+  not to reach for `--quick` to be helpful.
+- **`share --all` needs your explicit yes, in the conversation.** Before running
+  it the agent must tell you how many sessions it covers and name them, state
+  the rung and the expiry, and wait. The CLI's own typed-`yes` prompt exists for
+  a human at a terminal; an agent runs non-interactively and would have to pass
+  `--yes`, so the skill forbids passing `--yes` to *skip* asking you. It is only
+  allowed after you have already said yes. A scoped share has no such
+  ceremony — its blast radius is one session.
+
+### Installing it
+
+The plugin install does this for you (see [Install](#install)). To do it by
+hand, or to re-link after moving the checkout:
+
+```bash
+herdr-expose skill install      # symlink skill/ -> ~/.claude/skills/herdr-share
+herdr-expose skill status       # where it is linked, and whether that resolves
+herdr-expose skill uninstall    # remove the links; the checkout is untouched
+```
+
+It links into `~/.claude/skills/`, creating it if needed, and into
+`~/.agents/skills/` only when that directory already exists.
+
+**It is a symlink, not a copy**, so a `git pull` or a rebuild updates the skill
+the agent reads — a copy would quietly fork from the binary it drives. `install`
+is idempotent: an already-correct link says so and does nothing, a link left
+over from an old checkout location is repointed, and a *real* directory in the
+way is refused with the path to move rather than clobbered. `uninstall` only
+ever removes symlinks that resolve to this skill.
+
+After installing, start a new agent session — skills are discovered at startup.
+
+---
+
 ## Configuration
 
 `~/.config/herdr-expose/config.toml`, always — the path does not change depending
@@ -572,8 +668,9 @@ Short version, with the details in the ADRs:
 
 | | |
 |---|---|
+| [`skill/SKILL.md`](skill/SKILL.md) | the agent skill: every rule an agent follows when it shares one of your sessions |
 | [`docs/api.md`](docs/api.md) | the full public API — build a client from this alone |
-| [`docs/adr/`](docs/adr/) | 33 architecture decision records, and why each cost was accepted |
+| [`docs/adr/`](docs/adr/) | 36 architecture decision records, and why each cost was accepted |
 | [`docs/troubleshooting.md`](docs/troubleshooting.md) | nine real failures from building this, and what `doctor` says for each |
 | [`docs/ATTRIBUTION.md`](docs/ATTRIBUTION.md) | prior art this design learned from |
 | [`SPEC.md`](SPEC.md) | the binding build contract |
@@ -640,6 +737,12 @@ device and browser — that probe has a device list to grow.
 **`cloudflare = true` refuses to start.** You need `domain` set — there is no
 ephemeral tunnel to fall back to, by design. Either set a domain, or use
 `lan = true`.
+
+**My agent does not know about `herdr-share`.** Skills are discovered when an
+agent session starts, so a skill installed mid-session is not visible until the
+next one. If a new session still cannot see it, run `herdr-expose skill status`:
+it says where the link is, whether it resolves, and whether it is pointing at an
+old checkout.
 
 **My settings keep reverting.** They should not: the config path is
 `~/.config/herdr-expose/config.toml` regardless of how the process was started.

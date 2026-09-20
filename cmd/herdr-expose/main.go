@@ -58,6 +58,8 @@ func main() {
 		err = cmdDevices(os.Args[2:])
 	case "service":
 		err = cmdService(os.Args[2:])
+	case "skill":
+		err = cmdSkill(os.Args[2:])
 	case "expose":
 		err = cmdExpose(os.Args[2:])
 	case "share":
@@ -104,6 +106,13 @@ func usage() {
   devices [--revoke ID] list or revoke paired devices
   service install [--force] | uninstall | status
                         install a supervised unit (launchd / systemd --user)
+  skill install | uninstall | status
+                        link this checkout's skill/ into ~/.claude/skills (and
+                        ~/.agents/skills when it exists) as the herdr-share
+                        agent skill, so an agent can drive share for you.
+                        A SYMLINK, so a rebuild or a git pull updates the skill.
+                        Idempotent; refuses to clobber a real directory;
+                        uninstall removes only links it made.
   expose start|stop|status|plan|destroy
                         tunnel control
   share [--local | --lan | --quick | --domain X]

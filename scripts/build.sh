@@ -13,6 +13,23 @@
 #   ./scripts/build.sh --download      always fetch the release asset
 #   ./scripts/build.sh --release       build the full matrix   -> dist/
 #   ./scripts/build.sh --skip-web      Go only (web/dist must already exist)
+#   ./scripts/build.sh --no-link       build only; link nothing into $HOME
+#
+# ONE INSTALL. Once the binary exists this script finishes the job that
+# "installed" actually means to a user, and PRINTS every path it touched:
+#
+#   ~/.local/bin/herdr-expose     -> this checkout's binary, so the CLI is on
+#                                    PATH. A plugin install otherwise leaves it
+#                                    inside Herdr's managed checkout while every
+#                                    example says `herdr-expose <verb>`.
+#   ~/.claude/skills/herdr-share  -> this checkout's skill/, so an agent can
+#                                    drive it. Also ~/.agents/skills, but only
+#                                    when that directory already exists.
+#
+# Both are SYMLINKS into the checkout, so a rebuild or a git pull updates them.
+# Neither is silent, neither clobbers anything real, and neither can fail the
+# build. `--no-link` (or HERDR_EXPOSE_NO_LINK=1) skips both; `herdr-expose
+# skill uninstall` reverses the skill half.
 #
 # Environment:
 #   VERSION     version string baked into the binary (default: git describe)
@@ -21,6 +38,7 @@
 #   REPO        OWNER/REPO to download release assets from
 #               (default: muthuishere/herdr-expose)
 #   REPO_API    GitHub API base for that repo (default: https://api.github.com)
+#   HERDR_EXPOSE_NO_LINK=1  same as --no-link
 #
 set -euo pipefail
 
@@ -42,13 +60,15 @@ LDFLAGS="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.build
 RELEASE=0
 SKIP_WEB=0
 MODE=auto
+NO_LINK="${HERDR_EXPOSE_NO_LINK:-0}"
 for arg in "$@"; do
   case "$arg" in
     --release)  RELEASE=1 ;;
     --skip-web) SKIP_WEB=1 ;;
     --source)   MODE=source ;;
     --download) MODE=download ;;
-    -h|--help)  sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --no-link)  NO_LINK=1 ;;
+    -h|--help)  sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
@@ -127,6 +147,53 @@ download_release() {
   "./bin/$BIN_NAME" version || true
 }
 
+# ------------------------------------------------------ the rest of it -----
+# A binary in a directory nobody has on PATH, and a skill nobody knows is
+# there, are both "installed" only in the sense that the bytes exist. This is
+# the step that makes one command mean one command.
+#
+# Everything here is best-effort and LOUD: it prints what it did, it never
+# clobbers a real file, and a failure warns instead of failing the build —
+# `herdr plugin install` aborts on a non-zero exit, and a skill link is not a
+# reason to lose the plugin.
+link_into_home() {
+  if [ "$NO_LINK" = "1" ]; then
+    log "--no-link: nothing linked into \$HOME (do it later with: $BIN_NAME skill install)"
+    return 0
+  fi
+
+  local bindir="$HOME/.local/bin"
+  local link="$bindir/$BIN_NAME"
+  local target="$REPO_ROOT/bin/$BIN_NAME"
+
+  log "putting ${BIN_NAME} on PATH and installing the agent skill"
+
+  mkdir -p "$bindir" 2>/dev/null || true
+  if [ -L "$link" ]; then
+    local points
+    points="$(readlink "$link")"
+    if [ "$points" = "$target" ]; then
+      echo "  $link -> $target (already)"
+    else
+      ln -sfn "$target" "$link" && echo "  $link -> $target (repointed, was $points)"
+    fi
+  elif [ -e "$link" ]; then
+    warn "$link exists and is not a symlink; leaving it alone. Call $target directly, or move that file."
+  else
+    ln -s "$target" "$link" && echo "  $link -> $target"
+  fi
+
+  case ":$PATH:" in
+    *":$bindir:"*) ;;
+    *) warn "$bindir is not on your PATH — add it, or call $target directly." ;;
+  esac
+
+  # The skill half lives in the binary (`skill install`), so there is exactly
+  # one implementation of "where does skill/ belong": this script, the
+  # hex:install-skill action and anyone typing the verb all run the same code.
+  "$target" skill install || warn "the agent skill was not linked (see above). Fix that, then run: $BIN_NAME skill install"
+}
+
 # ---------------------------------------------------------------- web ------
 # node is a BUILD-time dependency only. Nothing in the shipped binary needs it.
 build_web() {
@@ -141,6 +208,7 @@ build_web() {
 if [ "$MODE" = download ]; then
   [ "$RELEASE" -eq 0 ] || die "--download and --release are mutually exclusive."
   download_release
+  link_into_home
   exit 0
 fi
 
@@ -153,6 +221,7 @@ if [ "$MODE" = auto ] && [ "$RELEASE" -eq 0 ]; then
   if [ -n "$missing" ]; then
     warn "$missing not found on PATH; falling back to a published release binary."
     download_release
+    link_into_home
     exit 0
   fi
 fi
@@ -201,4 +270,5 @@ else
   log "building bin/${BIN_NAME}, version ${VERSION}"
   go_build "$("$GO" env GOOS)" "$("$GO" env GOARCH)" "bin/${BIN_NAME}"
   log "built bin/${BIN_NAME}"
+  link_into_home
 fi
