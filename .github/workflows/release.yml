@@ -48,6 +48,17 @@ jobs:
           go-version-file: go.mod
           check-latest: true
 
+      # webui.go carries `//go:embed all:web/dist`, so EVERY go command -- test,
+      # build, vet -- fails without it: "pattern all:web/dist: no matching files
+      # found". It is not a release-only step, and it has to come first. This
+      # passed locally for the same reason it failed here: a working tree
+      # already has web/dist, and a fresh checkout does not.
+      - name: Build the web app
+        run: |
+          cd web
+          npm ci
+          npm run build
+
       - name: Test
         run: go test ./...
 
