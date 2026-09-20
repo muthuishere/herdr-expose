@@ -164,6 +164,58 @@ func newJSTunnel(id, scriptPath, localURL string, adapterConfig map[string]strin
 func (j *jsTunnel) Name() string { return "js:" + j.id }
 func (j *jsTunnel) Mode() string { return "js" }
 
+// Footprint: an adapter is a black box by design, so the honest declaration is
+// "we do not know what it created, and therefore we will never claim to have
+// removed it". Teardown is confined to what the HOST can see and owns: every
+// process the adapter spawned through ctx.spawn, killed by process group.
+//
+// That asymmetry is deliberate and is the price of the escape hatch. It is
+// stated here rather than left for someone to discover, and it is why the
+// built-in providers are the happy path.
+func (j *jsTunnel) Footprint() Footprint {
+	return Footprint{
+		Provider:  j.Name(),
+		Ephemeral: true, // as far as the host can account for
+		StateFiles: []string{
+			j.script + " (adapter-owned; the host creates no state for it)",
+		},
+	}
+}
+
+// Destroy calls the adapter's optional destroy() — its chance to remove
+// whatever it provisioned — and then stops it either way.
+//
+// A destroy() that throws, hangs or was never defined must not leave a process
+// behind, so the host kills the adapter's process group regardless, exactly as
+// Stop does. The host never claims a remote resource was removed: only the
+// adapter knows what it made.
+func (j *jsTunnel) Destroy(ctx context.Context, logf func(string, ...any)) error {
+	if logf == nil {
+		logf = j.logf
+	}
+	var fn goja.Callable
+	if err := j.run(func(rt *goja.Runtime) error {
+		if f, ok := goja.AssertFunction(rt.GlobalObject().Get("destroy")); ok {
+			fn = f
+		}
+		return nil
+	}, jsCallTimeout); err != nil {
+		logf("adapter %s: could not look up destroy(): %v", j.id, j.red.scrub(err.Error()))
+	}
+	if fn != nil {
+		if err := j.run(func(rt *goja.Runtime) error {
+			_, err := fn(goja.Undefined(), j.ctxObj)
+			return err
+		}, jsStopTimeout); err != nil {
+			logf("adapter %s: destroy() failed (%v); stopping it anyway", j.id, j.red.scrub(err.Error()))
+		}
+	} else {
+		logf("adapter %s: no destroy() — the host removes only what it can see: "+
+			"the processes this adapter spawned", j.id)
+	}
+	return j.Stop()
+}
+
 // startLoop runs the single goroutine that owns the goja runtime.
 func (j *jsTunnel) startLoop() {
 	j.loop.Add(1)

@@ -38,6 +38,12 @@ type Options struct {
 	// permanent tag; a share passes expose.ShareDNSComment so that its
 	// ephemeral teardown can never delete the permanent deployment's record.
 	DNSComment string
+	// Exclusive declares that this deployment owns its tunnel NAME outright,
+	// which is true for a share and false for the permanent deployment. See
+	// CloudflareOptions.Exclusive: it decides whether an orphaned named tunnel
+	// with no recoverable credentials is deleted and recreated, or refused.
+	Exclusive bool
+
 	// Logf receives already-scrubbed log lines. Optional.
 	Logf func(format string, args ...any)
 }
@@ -48,7 +54,8 @@ type Manager struct {
 	mu     sync.Mutex
 	opts   Options
 	red    *redactor
-	cur    tunnel
+	cur    Provider
+	lock   *exposeLock
 	net    *netWatcher
 	logged bool
 }
@@ -132,8 +139,19 @@ func (m *Manager) SetExpose(e config.Expose, port int) Resolution {
 }
 
 // Start brings up the configured provider and blocks until a public URL is
-// known (or the attempt fails). Starting twice is an error, not a second
-// tunnel: exactly one adapter is active at a time.
+// known (or the attempt fails).
+//
+// IT IS IDEMPOTENT, at two levels, because `start` is the verb people re-run:
+//
+//   - IN PROCESS: a second Start while a tunnel is up returns THAT tunnel's
+//     status and nil. It does not raise a second one and it is not an error.
+//     Exactly one provider is active per Manager, and asking for the state you
+//     already have is not a failure.
+//   - ACROSS PROCESSES: an advisory flock on the deployment's state dir means
+//     `herdr-expose expose start` typed while the daemon supervises the tunnel
+//     reports the running exposure instead of provisioning a second connector
+//     against the same named tunnel. Cloudflare accepts two connectors without
+//     complaint, so nothing else would have caught it.
 func (m *Manager) Start(ctx context.Context) (Status, error) {
 	res := m.Resolution()
 	if !res.Remote {
@@ -151,27 +169,54 @@ func (m *Manager) Start(ctx context.Context) (Status, error) {
 	if m.cur != nil {
 		st := m.cur.Snapshot()
 		m.mu.Unlock()
-		return st, fmt.Errorf("a %s tunnel is already running (%s); stop it first", st.Provider, st.URL)
+		m.opts.Logf("expose: %s tunnel is already running (%s); nothing to do", st.Provider, st.URL)
+		return st, nil
 	}
 	opts := m.opts
 	m.mu.Unlock()
 
-	t, err := m.build(opts)
+	lock, held, lerr := tryExposeLock(opts.StateDir)
+	if lerr != nil {
+		st := m.Status()
+		st.LastError = m.red.scrub(lerr.Error())
+		return st, lerr
+	}
+	if !held {
+		// Another process in this deployment owns the exposure. Re-running
+		// `start` is a no-op, not a second tunnel and not an error.
+		m.opts.Logf("expose: another herdr-expose process already owns this exposure " +
+			"(state dir lock held); leaving it alone")
+		st := m.Status()
+		st.Running = true
+		return st, nil
+	}
+
+	plan, err := m.plan(opts)
 	if err != nil {
+		lock.release()
 		st := m.Status()
 		st.LastError = m.red.scrub(err.Error())
 		return st, err
 	}
+	t, err := plan.New()
+	if err != nil {
+		lock.release()
+		st := m.Status()
+		st.LastError = m.red.scrub(err.Error())
+		return st, err
+	}
+	m.opts.Logf("expose: %s", t.Footprint().Describe())
 
 	m.mu.Lock()
-	m.cur = t
+	m.cur, m.lock = t, lock
 	m.mu.Unlock()
 
 	if err := t.Launch(ctx); err != nil {
 		_ = t.Stop()
 		m.mu.Lock()
-		m.cur = nil
+		m.cur, m.lock = nil, nil
 		m.mu.Unlock()
+		lock.release()
 		st := m.Status()
 		st.Provider, st.Tunnel = t.Name(), t.Mode()
 		st.LastError = m.red.scrub(err.Error())
@@ -183,8 +228,9 @@ func (m *Manager) Start(ctx context.Context) (Status, error) {
 		st := m.Status()
 		_ = t.Stop()
 		m.mu.Lock()
-		m.cur = nil
+		m.cur, m.lock = nil, nil
 		m.mu.Unlock()
+		lock.release()
 		st.LastError = m.red.scrub(err.Error())
 		return st, err
 	}
@@ -192,28 +238,67 @@ func (m *Manager) Start(ctx context.Context) (Status, error) {
 	return m.Status(), nil
 }
 
-// build picks the provider. A quick tunnel wins when it is set — it can only
-// be set in memory by `share --quick`, never from the config file — then the
-// JS adapter, then cloudflare, then ngrok.
-func (m *Manager) build(opts Options) (tunnel, error) {
+// plan is the single place that maps a configuration onto a provider: which
+// one it is, what it CREATES, how it is built, and how it is torn down.
+//
+// Creation and teardown come out of the same function on purpose. `destroy`
+// runs when there may never have been a provider object — after a crash, from
+// a different process, against a half-finished provisioning — so teardown
+// cannot be a method that only exists once creation succeeded. Deriving both
+// from the same configuration is what makes them symmetric even then.
+//
+// The rungs map onto PROVIDERS, not onto cloudflare spellings: `Quick` means
+// "the ephemeral rung of whichever provider is selected", so `--quick
+// --provider ngrok` is an ngrok ephemeral tunnel and gets the same ladder and
+// the same guarantees as its cloudflare twin.
+func (m *Manager) plan(opts Options) (providerPlan, error) {
+	kind := opts.Expose.Provider()
+
 	if opts.Expose.Quick {
-		return newQuickTunnel(CloudflareOptions{Port: opts.Port}, opts.Logf, m.red)
+		switch kind {
+		case config.ProviderNgrok:
+			no := NgrokOptions{Port: opts.Port, Ephemeral: true}
+			return providerPlan{
+				Kind:      ModeQuick,
+				Footprint: ngrokFootprint(no),
+				New:       func() (Provider, error) { return newNgrok(no, opts.Logf, m.red) },
+				Destroy:   noDestroy,
+			}, nil
+		default:
+			co := CloudflareOptions{Port: opts.Port}
+			return providerPlan{
+				Kind:      ModeQuick,
+				Footprint: quickFootprint(),
+				New:       func() (Provider, error) { return newQuickTunnel(co, opts.Logf, m.red) },
+				Destroy:   noDestroy,
+			}, nil
+		}
 	}
-	switch opts.Expose.Provider() {
+
+	switch kind {
 	case config.ProviderCloudflare:
-		return newCloudflare(CloudflareOptions{
-			Port:       opts.Port,
-			Domain:     opts.Expose.Domain,
-			TunnelName: opts.Expose.TunnelID(),
-			StateDir:   opts.StateDir,
-			Comment:    opts.DNSComment,
-		}, opts.Logf, m.red)
+		co := m.cloudflareOptionsFrom(opts)
+		return providerPlan{
+			Kind:      ModeCloudflare,
+			Footprint: co.Footprint(),
+			New:       func() (Provider, error) { return newCloudflare(co, opts.Logf, m.red) },
+			Destroy: func(ctx context.Context, logf func(string, ...any)) error {
+				return DestroyCloudflare(ctx, co, logf)
+			},
+		}, nil
 
 	case config.ProviderNgrok:
-		return newNgrok(NgrokOptions{
-			Port:   opts.Port,
-			Domain: opts.Expose.Domain,
-		}, opts.Logf, m.red)
+		no := NgrokOptions{Port: opts.Port, Domain: opts.Expose.Domain}
+		return providerPlan{
+			Kind:      ModeNgrok,
+			Footprint: ngrokFootprint(no),
+			New:       func() (Provider, error) { return newNgrok(no, opts.Logf, m.red) },
+			// Nothing to destroy, and the footprint says why: a reserved
+			// domain lives in the user's ngrok account and was not created
+			// here. Deleting it would be this tool removing something it did
+			// not make.
+			Destroy: noDestroy,
+		}, nil
 
 	case config.ProviderJS:
 		id := opts.Expose.Adapter
@@ -226,32 +311,69 @@ func (m *Manager) build(opts Options) (tunnel, error) {
 			}
 		}
 		if !found {
-			return nil, fmt.Errorf("expose.adapter %q has no [[expose.adapters]] entry", id)
+			return providerPlan{}, fmt.Errorf("expose.adapter %q has no [[expose.adapters]] entry", id)
 		}
 		script := adapter.Script
 		if !filepath.IsAbs(script) {
 			script = filepath.Join(opts.Root, script)
 		}
 		local := fmt.Sprintf("http://127.0.0.1:%d", opts.Port)
-		return newJSTunnel(id, script, local, adapter.Env, opts.Logf, m.red)
+		newJS := func() (Provider, error) {
+			return newJSTunnel(id, script, local, adapter.Env, opts.Logf, m.red)
+		}
+		return providerPlan{
+			Kind:      ModeJS,
+			Footprint: Footprint{Provider: "js:" + id, Ephemeral: true},
+			New:       newJS,
+			Destroy: func(ctx context.Context, logf func(string, ...any)) error {
+				// The adapter is the only thing that knows what it made, so
+				// destroy has to go through it: load it, ask, stop it. The
+				// host still never claims to have removed a remote resource.
+				j, err := newJS()
+				if err != nil {
+					return err
+				}
+				return j.Destroy(ctx, logf)
+			},
+		}, nil
 
 	default:
-		return nil, fmt.Errorf("nothing to expose: set `cloudflare = true` with `domain = \"herdr.example.com\"`, " +
+		return providerPlan{}, fmt.Errorf("nothing to expose: set `cloudflare = true` with `domain = \"herdr.example.com\"`, " +
 			"or `ngrok = true` with a reserved domain, or `adapter = \"<id>\"` under [expose]")
 	}
+}
+
+// Footprint is what the configured provider creates in the world. It is
+// available BEFORE anything is started, which is what lets `plan` and the
+// teardown paths agree on the same set of resources.
+func (m *Manager) Footprint() Footprint {
+	m.mu.Lock()
+	opts := m.opts
+	m.mu.Unlock()
+	p, err := m.plan(opts)
+	if err != nil {
+		return Footprint{Provider: "none"}
+	}
+	return p.Footprint
 }
 
 // Stop tears the tunnel down. It is idempotent: calling it when nothing is
 // running, or twice in a row, returns nil and changes nothing.
 func (m *Manager) Stop() error {
 	m.mu.Lock()
-	t := m.cur
-	m.cur = nil
+	t, lock := m.cur, m.lock
+	m.cur, m.lock = nil, nil
 	m.mu.Unlock()
 	if t == nil {
+		lock.release()
 		return nil
 	}
-	return t.Stop()
+	err := t.Stop()
+	// The cross-process lock is released only after the process is actually
+	// down, so a `start` racing a `stop` cannot take the lock while the old
+	// cloudflared is still connected.
+	lock.release()
+	return err
 }
 
 // Status is the credential-free view: the resolved mode and bind address, plus
@@ -321,6 +443,14 @@ func (m *Manager) Plan(ctx context.Context) ([]PlanStep, error) {
 // if herdr-expose created it) and the named tunnel. `expose stop` deliberately
 // does NOT do this — the domain is static, and tearing DNS down on every stop
 // is the ephemeral behaviour that was removed.
+// Destroy works for EVERY provider, and is idempotent for every one of them.
+//
+// It stops first (Cloudflare refuses to delete a tunnel with a live connector,
+// so destroying while our own process is still connected is how a DNS record
+// gets deleted and a tunnel orphaned), then removes exactly what the plan's
+// Footprint declares. A provider that creates nothing has a Destroy that says
+// so and returns nil, rather than an error telling the user their provider is
+// second class.
 func (m *Manager) Destroy(ctx context.Context) error {
 	if err := m.Stop(); err != nil {
 		return err
@@ -328,10 +458,18 @@ func (m *Manager) Destroy(ctx context.Context) error {
 	m.mu.Lock()
 	opts := m.opts
 	m.mu.Unlock()
-	if opts.Expose.Provider() != config.ProviderCloudflare {
-		return fmt.Errorf("destroy is only implemented for the built-in Cloudflare provider")
+	plan, err := m.plan(opts)
+	if err != nil {
+		// Nothing configured is nothing to destroy: a second `destroy` after a
+		// successful one, or one against an unconfigured deployment, succeeds.
+		opts.Logf("expose: nothing configured to destroy")
+		return nil
 	}
-	return DestroyCloudflare(ctx, m.CloudflareOptions(), opts.Logf)
+	if plan.Footprint.Ephemeral && plan.Footprint.NamedTunnel == "" && plan.Footprint.DNSRecord == "" {
+		opts.Logf("expose: %s — nothing to destroy (%s)", plan.Footprint.Provider, plan.Footprint.Describe())
+		return nil
+	}
+	return plan.Destroy(ctx, opts.Logf)
 }
 
 // CloudflareOptions is the provider view of this manager's configuration, so
@@ -341,11 +479,19 @@ func (m *Manager) CloudflareOptions() CloudflareOptions {
 	m.mu.Lock()
 	opts := m.opts
 	m.mu.Unlock()
+	return m.cloudflareOptionsFrom(opts)
+}
+
+func (m *Manager) cloudflareOptionsFrom(opts Options) CloudflareOptions {
 	return CloudflareOptions{
 		Port:       opts.Port,
 		Domain:     opts.Expose.Domain,
 		TunnelName: opts.Expose.TunnelID(),
 		StateDir:   opts.StateDir,
 		Comment:    opts.DNSComment,
+		// A SHARE owns its tunnel name outright (`herdr-expose-share-<id>`),
+		// so it may delete and recreate an orphan whose secret was lost to a
+		// crash. The permanent deployment may not — see CloudflareOptions.
+		Exclusive: opts.Exclusive,
 	}
 }

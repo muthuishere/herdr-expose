@@ -46,8 +46,12 @@ WebSocket contract.
 ## Requirements
 
 - Herdr **0.9.0** or newer (`herdr --version`)
-- macOS or Linux
-- Build time only: Go 1.22+ and node 20+. **Neither is needed at run time.**
+- macOS or Linux (amd64 or arm64)
+- Optional, at build time only: Go 1.22+ and node 20+. **Neither is needed at
+  run time**, and neither is needed to install: without them the build step
+  downloads the prebuilt binary for your platform from the latest GitHub
+  release and checks it against the published SHA-256. With them, nothing is
+  downloaded and everything is built from the source you just cloned.
 
 ---
 
@@ -56,21 +60,44 @@ WebSocket contract.
 ### As a Herdr plugin (recommended)
 
 ```bash
-herdr plugin install github.com/muthuishere/herdr-expose
+herdr plugin install muthuishere/herdr-expose
 ```
 
-That clones it, runs the build, and registers a startup hook so the server comes
-up with Herdr. Then, from the TUI or the shell:
+`herdr plugin install` takes GitHub **shorthand only** — `OWNER/REPO`. A full
+`https://github.com/...` URL is not accepted and fails with a confusing
+"Repository not found".
+
+It shows you a preview of everything it will run, clones the repo into a managed
+checkout under `~/.config/herdr/plugins/github/`, runs `./scripts/build.sh`
+there, and registers the actions, panes, link handler and startup hook. The
+startup hook runs when Herdr next restores your session, not at install time —
+so right after installing, start it yourself:
 
 ```bash
-herdr plugin action invoke hex:open   # open the local UI
-herdr plugin action invoke hex:pair   # show a pairing QR for a phone
+herdr plugin action invoke hex:open     # starts nothing; opens the local UI
 herdr plugin action invoke hex:status   # what is running, and where
+herdr plugin action invoke hex:pair     # show a pairing QR for a phone
 ```
 
 Every id is namespaced `hex:` because `herdr plugin action invoke` takes
 `--plugin` as optional, so a bare `open` would collide with any other plugin
-defining one. (`:` is a legal id character in Herdr 0.9.0; `.` is not.)
+defining one. (`:` is a legal id character in Herdr 0.9.0; `.` is not.) Pass
+`--plugin dev.deemwar.herdr-expose` if you want to be explicit.
+
+**The `herdr-expose` command is not on your PATH after a plugin install** — the
+binary lives inside the managed checkout, which Herdr owns and replaces on every
+reinstall. To use the CLI directly, either build from source (below) or link it
+once:
+
+```bash
+ln -sf ~/.config/herdr/plugins/github/dev.deemwar.herdr-expose-*/bin/herdr-expose \
+  ~/.local/bin/herdr-expose
+```
+
+`herdr plugin uninstall dev.deemwar.herdr-expose` removes the checkout. It does
+**not** remove `~/.config/herdr-expose/` or `~/.local/state/herdr-expose/` —
+your config, device tokens and tunnel state are yours, and deleting them is your
+call.
 
 ### From source
 
@@ -84,8 +111,27 @@ cd herdr-expose
 Link it into Herdr without installing from GitHub:
 
 ```bash
-herdr plugin link .
+herdr plugin link .         # link does NOT run the build; build first
+herdr plugin unlink dev.deemwar.herdr-expose
 ```
+
+### From a release binary
+
+No Go, no node, no clone:
+
+```bash
+# pick your platform from https://github.com/muthuishere/herdr-expose/releases
+curl -LO .../herdr-expose_vX.Y.Z_darwin_arm64.tar.gz
+curl -LO .../herdr-expose_vX.Y.Z_SHA256SUMS
+shasum -a 256 -c herdr-expose_vX.Y.Z_SHA256SUMS   # do not skip this
+tar -xzf herdr-expose_vX.Y.Z_darwin_arm64.tar.gz
+./herdr-expose daemon
+```
+
+The binaries are **not signed or notarized**. On macOS, Gatekeeper quarantines
+anything downloaded with a browser; `xattr -d com.apple.quarantine
+./herdr-expose` clears it. If you would rather not trust a binary at all, build
+from source — it is one command and it is the default path.
 
 ---
 
@@ -119,7 +165,7 @@ herdr-expose status
 | `share [--lan\|--quick\|--domain X\|--local]` | expose ONE session on a time-boxed, self-destructing URL (no flag = LAN) |
 | `share list\|extend\|pair\|revoke\|restore` | manage shares (every verb takes `--json`) |
 | `panic` | revoke every share and stop the main tunnel |
-| `install-service` / `uninstall-service` | install or remove a launchd / systemd unit for crash recovery |
+| `service install\|uninstall\|status` | install, remove or report the launchd / systemd unit for crash recovery (also spelled `install-service` / `uninstall-service`) |
 
 ---
 
@@ -471,7 +517,8 @@ is a screenshot. So authentication here is the primary feature, not a checkbox.
   server keeps running on loopback.
 - **Do not leave `lan = true` on at a conference or a coffee shop.** It is meant
   for your own network.
-- **Revoke devices you no longer use.** `herdr-expose status` lists them.
+- **Revoke devices you no longer use.** `herdr-expose status` lists them;
+  `herdr-expose devices --revoke <id>` removes one.
 - **Your tunnel provider terminates TLS.** Cloudflare or ngrok can see the
   traffic. This is not end-to-end encrypted and nobody should imply otherwise.
 - **Treat the URL as a credential** even though it is not one. A public URL plus
@@ -514,7 +561,8 @@ Short version, with the details in the ADRs:
 | | |
 |---|---|
 | [`docs/api.md`](docs/api.md) | the full public API — build a client from this alone |
-| [`docs/adr/`](docs/adr/) | 25 architecture decision records, and why each cost was accepted |
+| [`docs/adr/`](docs/adr/) | 33 architecture decision records, and why each cost was accepted |
+| [`docs/troubleshooting.md`](docs/troubleshooting.md) | nine real failures from building this, and what `doctor` says for each |
 | [`docs/ATTRIBUTION.md`](docs/ATTRIBUTION.md) | prior art this design learned from |
 | [`SPEC.md`](SPEC.md) | the binding build contract |
 
@@ -524,13 +572,37 @@ Short version, with the details in the ADRs:
 
 ```bash
 ./scripts/build.sh              # bin/herdr-expose for this machine
+./scripts/build.sh --source     # same, but never fall back to a download
+./scripts/build.sh --download   # never build; fetch the release binary
 ./scripts/build.sh --release    # darwin/linux x amd64/arm64 tarballs in dist/
 ./scripts/build.sh --skip-web   # Go only, reusing an existing web/dist
 ```
 
 The web app is built first and embedded into the binary, so `go build ./...` on
-its own will not work from a clean checkout until `web/dist` exists. Use the
-script.
+its own will not work from a clean checkout until `web/dist` exists (`web/dist`
+is gitignored, and is a build product in every checkout). Use the script.
+
+With no flags the script builds from source when `go` and `npm` are on PATH, and
+otherwise falls back to the release asset for your platform — which is what makes
+`herdr plugin install` work on a machine with no toolchain. The fallback refuses
+to install anything whose SHA-256 does not match the release's `SHA256SUMS`.
+
+### Releases
+
+`./scripts/build.sh --release` produces, for `darwin` and `linux` x `amd64` and
+`arm64`:
+
+```
+dist/herdr-expose_<version>_<os>_<arch>.tar.gz
+dist/herdr-expose_<version>_SHA256SUMS
+```
+
+`CGO_ENABLED=0` means one machine cross-compiles all four, and the version,
+commit and build date are stamped in with `-ldflags`. Pushing a `vX.Y.Z` tag
+runs [`.github/workflows/release.yml`](.github/workflows/release.yml), which
+runs `go test ./...`, builds that matrix and publishes it as a GitHub release
+with `gh`. Nothing is signed or notarized, and the workflow does not pretend
+otherwise.
 
 ---
 
@@ -544,8 +616,9 @@ resolution fails you get a real error naming what we looked for
 ([ADR 0020](docs/adr/0020-absolute-path-herdr-binary.md)).
 
 **It dies and does not come back.** The Herdr startup hook is one-shot and
-unsupervised. Run `herdr-expose install-service` for a launchd / systemd unit
-with restart ([ADR 0019](docs/adr/0019-three-layer-supervision.md)).
+unsupervised. Run `herdr-expose service install` for a launchd / systemd unit
+with restart, and `herdr-expose service status` to confirm the manager picked it
+up ([ADR 0019](docs/adr/0019-three-layer-supervision.md)).
 
 **A pane is blank on my Android phone.** The terminal renderer probes the canvas
 after drawing and falls back to the DOM renderer when the surface comes back
@@ -564,4 +637,5 @@ If you see otherwise, that is a bug worth reporting.
 
 ## License
 
-MIT. See [`docs/ATTRIBUTION.md`](docs/ATTRIBUTION.md) for prior art.
+MIT — see [`LICENSE`](LICENSE). Prior art and what was learned from it:
+[`docs/ATTRIBUTION.md`](docs/ATTRIBUTION.md).

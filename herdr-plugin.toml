@@ -6,7 +6,12 @@ min_herdr_version = "0.9.0"
 platforms = ["macos", "linux"]
 
 # Builds the React app, then the Go binary with the app embedded in it.
-# Requires node and go at build time only; neither is needed at run time.
+# node and go are build-time only and OPTIONAL: with them the script builds from
+# the cloned source; without them it falls back to the prebuilt release asset for
+# this platform and verifies it against the release SHA256SUMS. Either way the
+# install ends with ./bin/herdr-expose in place, and nothing is needed at run
+# time. Herdr runs this once, at `plugin install`, before it registers anything;
+# a non-zero exit aborts the install.
 [[build]]
 command = ["./scripts/build.sh"]
 

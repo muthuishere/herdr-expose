@@ -51,9 +51,9 @@ func main() {
 	case "pair":
 		err = cmdPair(os.Args[2:])
 	case "install-service":
-		err = cmdService([]string{"install"})
+		err = cmdService(append([]string{"install"}, os.Args[2:]...))
 	case "uninstall-service":
-		err = cmdService([]string{"uninstall"})
+		err = cmdService(append([]string{"uninstall"}, os.Args[2:]...))
 	case "devices":
 		err = cmdDevices(os.Args[2:])
 	case "service":
@@ -94,21 +94,32 @@ func usage() {
   stop                  stop a running server
   pair [--name NAME] [--pane]
                         mint a one-time pairing code and show its QR LOCALLY
-  install-service       install and load the launchd / systemd --user unit
-  uninstall-service     remove it
+  install-service [--force]
+                        install and load the launchd / systemd --user unit.
+                        Idempotent: already healthy means nothing to do.
+                        --force is required to take over a server that is
+                        already running without a manager (it names the pid it
+                        will stop), and to rewrite a healthy unit.
+  uninstall-service     unload and remove it, and say what is left serving
   devices [--revoke ID] list or revoke paired devices
-  service install|uninstall|status
+  service install [--force] | uninstall | status
                         install a supervised unit (launchd / systemd --user)
   expose start|stop|status|plan|destroy
                         tunnel control
-  share [--domain X | --quick | --lan] [--session NAME] [--pane TARGET] [--hours N|--days N]
+  share [--local | --lan | --quick | --domain X] [--provider cloudflare|ngrok]
+        [--session NAME] [--pane TARGET] [--hours N|--days N]
                         expose ONE herdr session, time-boxed, self-destructing.
-                        --domain = public https on your own zone,
-                        --quick  = public https on a random *.trycloudflare.com
-                                   (no account, no DNS, nothing to clean up),
-                        --lan    = http://<lan-ip>:<port>,
-                        none     = auto: domain if usable, else quick if
-                                   cloudflared is installed, else lan (reason printed)
+                        FOUR RUNGS, each one an explicit request:
+                        none/--lan = http://<lan-ip>:<port>  (THE DEFAULT),
+                        --quick    = public https on a throwaway hostname
+                                     (no account, no DNS, nothing to clean up),
+                        --domain X = public https on a name you own,
+                        --local    = 127.0.0.1 only, an opt-IN for testing.
+                        Nothing ever escalates above what you asked for; an
+                        explicit tunnel request that cannot be honoured
+                        degrades to --lan and says why.
+                        --provider picks WHO carries the rung. It never moves
+                        the share up or down the ladder.
   share list|extend <id>|pair <id>|revoke <id>|revoke --all|restore
                         manage shares (every verb takes --json)
   panic                 revoke every share AND stop the main tunnel
@@ -638,39 +649,133 @@ func cmdDevices(args []string) error {
 
 func cmdService(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: herdr-expose service install|uninstall|status")
+		return errors.New("usage: herdr-expose service install|uninstall|status [--force]")
 	}
+	force := hasFlag(args, "--force") || hasFlag(args, "--yes") || hasFlag(args, "-y")
 	switch args[0] {
 	case "install":
-		exe, err := os.Executable()
-		if err != nil {
-			return err
-		}
-		state, err := StateDir()
-		if err != nil {
-			return err
-		}
-		path, err := installService(exe, state)
-		if err != nil {
-			return err
-		}
-		fmt.Println("installed", path)
-		return nil
+		return cmdServiceInstall(force)
 	case "uninstall":
-		if err := uninstallService(); err != nil {
-			return err
-		}
-		fmt.Println("uninstalled")
-		return nil
+		return cmdServiceUninstall()
 	case "status":
-		if managed, who := managerInCharge(); managed {
-			fmt.Println("supervised by", who)
-		} else {
-			fmt.Println("no service manager in charge")
-		}
+		printServiceState(readServiceState())
 		return nil
 	}
 	return fmt.Errorf("unknown service subcommand %q", args[0])
+}
+
+func printServiceState(st serviceState) {
+	switch {
+	case st.Healthy():
+		fmt.Printf("supervised by %s (pid %d), unit %s\n", st.Who, st.PID, st.UnitPath)
+	case st.Loaded:
+		fmt.Printf("unit %s is loaded under %s but nothing is running\n", st.UnitPath, st.Who)
+	case st.Installed:
+		fmt.Printf("unit %s exists on disk but is not loaded\n", st.UnitPath)
+	default:
+		fmt.Println("no service manager in charge")
+	}
+}
+
+// cmdServiceInstall is idempotent and, where it is not, LOUD.
+//
+// Two things went wrong before, and they are different problems:
+//
+//  1. Run twice, it rewrote and reloaded a unit that was already healthy —
+//     dropping every live WebSocket to reach a state the machine was already
+//     in. A second install now reads the manager first and says "nothing to
+//     do", because converging on the desired state is the whole job.
+//
+//  2. Run on a machine with an UNMANAGED daemon, it took the port over in
+//     silence. The unit's `serve` calls reclaimStrays, which SIGTERMs every
+//     pid in the ledger — on a real machine, the server carrying the owner's
+//     live sessions. Taking over is the correct end state (two copies fighting
+//     for one port is worse), but it is not something to do behind the
+//     operator's back, so it now needs --force and says exactly what it will
+//     stop.
+func cmdServiceInstall(force bool) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	state, err := StateDir()
+	if err != nil {
+		return err
+	}
+
+	st := readServiceState()
+	if st.Healthy() && !force {
+		fmt.Printf("already installed and healthy: %s is supervising pid %d\n", st.Who, st.PID)
+		fmt.Printf("  unit: %s\n", st.UnitPath)
+		fmt.Println("  nothing to do. Re-run with --force to rewrite the unit and restart it " +
+			"(that WILL drop every connected client).")
+		return nil
+	}
+
+	// The takeover. Say it before doing it, and name what will be stopped.
+	if pid := unmanagedDaemonPID(state); pid > 0 && !st.Loaded {
+		fmt.Printf("a herdr-expose server is already running WITHOUT a service manager (pid %d).\n", pid)
+		fmt.Println("  Installing the unit takes that server over: the supervised copy stops it, then")
+		fmt.Println("  serves the same port itself. Every connected client is dropped and reconnects.")
+		if !force {
+			fmt.Println("\n  Refusing to do that silently. Either:")
+			fmt.Printf("    herdr-expose service install --force   (stop pid %d and supervise it)\n", pid)
+			fmt.Println("    herdr-expose stop                      (stop it yourself first)")
+			return errors.New("not installing over a running unmanaged server without --force")
+		}
+		fmt.Printf("  --force given: taking over from pid %d.\n", pid)
+	}
+
+	path, err := installService(exe, state)
+	if err != nil {
+		return err
+	}
+	fmt.Println("installed", path)
+
+	// VERIFY. A loaded unit is not a running server: the failure mode this
+	// misses is a unit that loads and exits instantly, which launchd will
+	// happily retry forever while every other start path refuses because a
+	// manager is "in charge".
+	final := awaitServiceUp(15 * time.Second)
+	if !final.Healthy() {
+		return fmt.Errorf("the unit was installed at %s but is NOT running (loaded=%v active=%v pid=%d). "+
+			"Check `herdr-expose logs` and %s/serve.log; uninstall with `herdr-expose service uninstall`",
+			path, final.Loaded, final.Active, final.PID, state)
+	}
+	fmt.Printf("verified: %s is supervising pid %d\n", final.Who, final.PID)
+	return nil
+}
+
+// cmdServiceUninstall removes the unit and SAYS what that did to the server.
+//
+// "uninstalled" on its own is the least useful thing to print here: the
+// operator's actual question is whether anything is still serving their
+// sessions, and the answer is no — unloading the unit stops the process it was
+// supervising. Running it twice is success, because the desired state is
+// already reached.
+func cmdServiceUninstall() error {
+	before := readServiceState()
+	if !before.Installed && !before.Loaded {
+		fmt.Println("no service unit installed; nothing to do")
+		return nil
+	}
+	if err := uninstallService(); err != nil {
+		return err
+	}
+	after := readServiceState()
+	if after.Loaded || after.Installed {
+		return fmt.Errorf("the unit is still present after uninstall (loaded=%v on disk=%v at %s)",
+			after.Loaded, after.Installed, before.UnitPath)
+	}
+	fmt.Println("uninstalled", before.UnitPath)
+	if before.PID > 0 {
+		fmt.Printf("  the supervised server (pid %d) was stopped with the unit.\n", before.PID)
+	} else {
+		fmt.Println("  the unit was not running anything.")
+	}
+	fmt.Println("  NOTHING is serving now. Start one by hand with `herdr-expose daemon`,")
+	fmt.Println("  or reinstall the unit with `herdr-expose service install`.")
+	return nil
 }
 
 // exposeManagerFor builds a tunnel manager from config.
@@ -732,15 +837,15 @@ func cmdExpose(args []string) error {
 		return nil
 	case "stop":
 		// Raise the halt flag BEFORE killing anything, or the daemon's
-		// supervisor simply restarts cloudflared a second later.
+		// supervisor simply restarts the tunnel a second later. Writing it
+		// twice is harmless, which is the whole of `stop` being idempotent:
+		// the flag is a desired state, not an event.
 		if err := os.WriteFile(haltFilePath(state), []byte(time.Now().Format(time.RFC3339)+"\n"), 0o600); err != nil {
 			return err
 		}
-		killStrayCloudflared(filepath.Join(state, "cloudflare", "config.yml"))
-		if !waitForNoCloudflared(filepath.Join(state, "cloudflare", "config.yml"), 20*time.Second) {
-			return errors.New("cloudflared is STILL running for the main tunnel")
+		if err := stopMainTunnel(cfg, state); err != nil {
+			return err
 		}
-		fmt.Println("main tunnel stopped (DNS record and tunnel left in place — static domain)")
 		return mgr.Stop()
 	case "status":
 		printJSON(mgr.Status())
@@ -753,7 +858,46 @@ func cmdExpose(args []string) error {
 		printJSON(steps)
 		return nil
 	case "destroy":
-		return mgr.Destroy(ctx)
+		// STOP BEFORE DESTROY, and halt before both.
+		//
+		// Without the halt flag this verb is actively harmful rather than
+		// merely non-idempotent: the running daemon's supervisor re-provisions
+		// within five seconds, so `destroy` deletes the tunnel and the DNS
+		// record and then watches them be recreated — leaving a NEW tunnel id
+		// and a rewritten record, which is worse than having done nothing.
+		// With it, destroy converges: run it twice and the second run finds
+		// nothing to delete and says so.
+		if err := os.WriteFile(haltFilePath(state), []byte(time.Now().Format(time.RFC3339)+"\n"), 0o600); err != nil {
+			return err
+		}
+		fmt.Println("raised the exposure halt flag so the daemon cannot re-provision underneath this")
+		if err := stopMainTunnel(cfg, state); err != nil {
+			return err
+		}
+		fp := mgr.Footprint()
+		fmt.Println("destroying:", fp.Describe())
+		if err := mgr.Destroy(ctx); err != nil {
+			return err
+		}
+		// Verify against the source of truth rather than reporting intent.
+		if fp.NamedTunnel != "" || fp.DNSRecord != "" {
+			dnsGone, tunGone, rec, verr := expose.VerifyGone(ctx, mgr.CloudflareOptions())
+			if verr != nil {
+				return fmt.Errorf("destroy ran but could not be verified: %w", verr)
+			}
+			if !dnsGone || !tunGone {
+				return fmt.Errorf("destroy did NOT complete: dns_gone=%v tunnel_gone=%v (record %+v)",
+					dnsGone, tunGone, rec)
+			}
+			fmt.Printf("verified against the API: DNS record %s gone, tunnel %q gone\n",
+				fp.DNSRecord, fp.NamedTunnel)
+		}
+		// The generated config and credentials are part of the footprint, so
+		// they go too. Symmetry is the point: what a start created, a destroy
+		// removes, and nothing else.
+		_ = os.RemoveAll(filepath.Join(state, "cloudflare"))
+		fmt.Println("re-arm with: herdr-expose expose start")
+		return nil
 	}
 	return fmt.Errorf("unknown expose subcommand %q", sub)
 }
@@ -807,6 +951,33 @@ func parseScopeFlags(args []string) (*core.Scope, error) {
 // the state dir by construction, the running daemon is the thing that reads it,
 // and the daemon reports the result — which is the whole lesson of a halt that
 // writes where nothing reads.
+// stopMainTunnel takes down whatever process carries the PERMANENT deployment,
+// and is provider-aware rather than assuming cloudflared.
+//
+// Only the cloudflare providers leave a process this CLI can identify and kill
+// from outside (matched on the config path WE generated, never on a binary
+// name, so it can never reach somebody else's tunnel). For ngrok and a JS
+// adapter the child belongs to the daemon, and the halt flag the caller has
+// already raised is what stops it — within one supervisor tick. Saying which
+// of the two happened beats a cheerful message that fits only one provider.
+//
+// It is idempotent: with nothing running, every branch is already in the
+// desired state and returns nil.
+func stopMainTunnel(cfg *config.Config, state string) error {
+	cfConfig := filepath.Join(state, "cloudflare", "config.yml")
+	if cfg.Expose.Provider() == config.ProviderCloudflare || countCloudflared(cfConfig) > 0 {
+		killStrayCloudflared(cfConfig)
+		if !waitForNoCloudflared(cfConfig, 20*time.Second) {
+			return errors.New("cloudflared is STILL running for the main tunnel")
+		}
+		fmt.Println("main tunnel stopped (DNS record and tunnel left in place — static domain)")
+		return nil
+	}
+	fmt.Printf("halt flag raised; the daemon stops the %s exposure within ~5s "+
+		"(check with `herdr-expose status`)\n", cfg.Expose.Provider())
+	return nil
+}
+
 func superviseExposure(ctx context.Context, mgr *expose.Manager, state string, log *slog.Logger) {
 	halt := haltFilePath(state)
 	halted := true // force the first evaluation to act

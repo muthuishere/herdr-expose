@@ -63,6 +63,14 @@ type shareRecord struct {
 	SecureContext bool   `json:"secure_context"`
 	FellBack      string `json:"fell_back,omitempty"`
 
+	// Provider is WHICH implementation serves this share's rung —
+	// "cloudflare" (the default, and what every record written before
+	// providers were interchangeable means) or "ngrok". The rung and the
+	// provider are independent: Mode says how far this reaches, Provider says
+	// who carries it, and teardown needs BOTH, because only the cloudflare
+	// domain rung creates anything that has to be deleted.
+	Provider string `json:"provider,omitempty"`
+
 	Domain     string    `json:"domain,omitempty"`
 	TunnelName string    `json:"tunnel_name"`
 	Port       int       `json:"port"`
@@ -80,8 +88,10 @@ type shareRecord struct {
 // shareView is the stable `--json` projection. Field names here are an API:
 // an agent skill wraps every verb and parses this, so they do not churn.
 type shareView struct {
-	ID      string `json:"id"`
-	Mode    string `json:"mode"`
+	ID   string `json:"id"`
+	Mode string `json:"mode"`
+	// Provider is which implementation carries the rung: cloudflare | ngrok.
+	Provider string `json:"provider"`
 	Scope   string `json:"scope"`
 	Session string `json:"session"`
 	Domain  string `json:"domain"`
@@ -109,7 +119,7 @@ func (r *shareRecord) view() shareView {
 		left = 0
 	}
 	return shareView{
-		ID: r.ID, Mode: r.mode(), Scope: r.Scope, Session: r.Session, Domain: r.Domain,
+		ID: r.ID, Mode: r.mode(), Provider: r.provider(), Scope: r.Scope, Session: r.Session, Domain: r.Domain,
 		URL: r.CurrentURL(), SecureContext: r.SecureContext, FellBack: r.FellBack,
 		State: r.State, CreatedAt: r.CreatedAt, ExpiresAt: r.ExpiresAt,
 		Remaining: left.Round(time.Second).String(), Seconds: int64(left.Seconds()),
@@ -156,7 +166,24 @@ func (r *shareRecord) isQuick() bool { return r.mode() == string(config.ModeQuic
 // Cloudflare account that teardown has to delete. Only a named-tunnel share on
 // a real zone does.
 func (r *shareRecord) hasCloudflareResources() bool {
-	return !r.isLocal() && !r.isLAN() && !r.isQuick()
+	if r.isLocal() || r.isLAN() || r.isQuick() {
+		return false
+	}
+	// ngrok's domain rung uses a RESERVED domain that the user provisioned in
+	// their own ngrok account. This tool did not create it, so this tool never
+	// deletes it — teardown for an ngrok share is "stop the process", exactly
+	// as the provider's Footprint declares.
+	return r.provider() != "ngrok"
+}
+
+// provider names the implementation behind this share. An empty field means a
+// record written before providers were interchangeable, and those were all
+// cloudflare.
+func (r *shareRecord) provider() string {
+	if p := strings.TrimSpace(r.Provider); p != "" {
+		return p
+	}
+	return "cloudflare"
 }
 
 // CurrentURL re-resolves a LAN share's address every time it is asked for.
@@ -290,6 +317,47 @@ func updateShare(id string, fn func(*shareRecord)) (*shareRecord, error) {
 	return rec, nil
 }
 
+// --- the share's run lock ---------------------------------------------------
+//
+// `share restore` (and the daemon's startup reconciliation) respawns a share
+// whose process is gone. Run it twice in the second before the child has
+// written its new pid and you get TWO instances for one share id: two
+// processes racing for one port, two teardowns, two tunnels. pidAlive cannot
+// close that window — the pid in share.json is stale by definition at exactly
+// the moment it matters, and pids are reused.
+//
+// An advisory flock held by the child for its whole life answers the question
+// without the race and without trusting anything on disk: the kernel drops it
+// when the process dies, however it dies, so "is this share running?" is
+// decided by the same primitive that decides who is allowed to run it. The
+// second spawn takes the lock, fails, and exits — which is what makes a double
+// restore converge on ONE instance rather than compound into two.
+
+// tryShareRunLock takes the share's run lock, or reports that someone holds it.
+func tryShareRunLock(dir string) (*os.File, bool) {
+	f, err := os.OpenFile(filepath.Join(dir, "run.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, false
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		return nil, false
+	}
+	return f, true
+}
+
+// shareIsRunning reports whether a live instance holds this share's run lock.
+// It takes the lock and immediately drops it, so it is a read, not a claim.
+func shareIsRunning(dir string) bool {
+	f, ok := tryShareRunLock(dir)
+	if !ok {
+		return true
+	}
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	_ = f.Close()
+	return false
+}
+
 // listShareRecords reads every share on disk, newest first.
 func listShareRecords() ([]*shareRecord, error) {
 	root, err := sharesRoot()
@@ -362,8 +430,8 @@ func cmdShare(args []string) error {
 func shareUsage() {
 	fmt.Fprint(os.Stderr, `herdr-expose share — one scoped, time-boxed, self-destructing tunnel
 
-  share [--local | --lan | --quick | --domain X] [--session NAME] [--pane TARGET]
-        [--hours N] [--days N] [--json]
+  share [--local | --lan | --quick | --domain X] [--provider cloudflare|ngrok]
+        [--session NAME] [--pane TARGET] [--hours N] [--days N] [--json]
         expose ONE herdr session (default: this one) for N hours (default 1)
 
         FOUR RUNGS. Every rung above the default is an explicit request.
@@ -382,6 +450,17 @@ func shareUsage() {
         cloudflared installed falls back to --lan). Nothing ever escalates
         above what you asked for: a bare 'share' never becomes a tunnel just
         because [expose] has a domain configured.
+
+        --provider cloudflare|ngrok  WHO carries the rung (default cloudflare).
+        The ladder is the same for both, and picking a provider can never move
+        a share up or down it:
+          --quick    --provider ngrok  a throwaway ngrok hostname
+          --domain X --provider ngrok  a domain RESERVED in your ngrok account
+        Both verify before publishing, both are supervised and restarted, and
+        both tear down only what they created — which for ngrok is nothing,
+        because the reserved domain is yours and was not made here.
+        $NGROK_AUTHTOKEN is read by NAME at the point a child process is
+        started, and never stored, logged or returned.
   share list [--json]              list shares; reaps any whose deadline passed
   share extend <id> --hours N|--days N [--json]
   share pair <id> [--name NAME] [--json]
@@ -403,11 +482,17 @@ type shareFlags struct {
 	// none is, the share is LAN: this machine and this network, and not one
 	// hop further. Every rung above that is an explicit request, and `--local`
 	// is the explicit way DOWN, for testing.
-	local   bool
-	lan     bool
-	quick   bool
-	domain  string
-	session string
+	local  bool
+	lan    bool
+	quick  bool
+	domain string
+	// provider is WHO carries the rung: "cloudflare" (default) or "ngrok".
+	// It is deliberately orthogonal to the rung flags — AMENDMENTS 16/17 are
+	// about REACH, and reach must mean the same thing whichever provider is
+	// asked for. Picking a provider can therefore never move a share up or
+	// down the ladder; it only changes which binary carries it.
+	provider string
+	session  string
 	panes   []string
 	hours   float64
 	days    float64
@@ -463,6 +548,8 @@ func parseShareFlags(args []string) (shareFlags, error) {
 			f.lan = true
 		case "--quick":
 			f.quick = true
+		case "--provider":
+			f.provider, err = next()
 		case "--json":
 			f.asJSON = true
 		default:
@@ -475,8 +562,20 @@ func parseShareFlags(args []string) (shareFlags, error) {
 	if !f.hoursSet && f.days == 0 {
 		f.hours = 1 // G1 default
 	}
+	switch strings.ToLower(strings.TrimSpace(f.provider)) {
+	case "", "cloudflare", "cloudflared", "cf":
+		f.provider = "cloudflare"
+	case "ngrok":
+		f.provider = "ngrok"
+	default:
+		return f, fmt.Errorf("unknown --provider %q: the built-in providers are `cloudflare` and `ngrok` "+
+			"(a JS adapter is configured under [expose] instead)", f.provider)
+	}
 	return f, nil
 }
+
+// isNgrok reports which provider carries this share's rung.
+func (f shareFlags) isNgrok() bool { return f.provider == "ngrok" }
 
 // namedARung reports whether the command line asked for a specific rung.
 // `--local` counts: saying "local" out loud is how somebody with a different
@@ -696,7 +795,11 @@ func resolveShareModeUnchecked(ctx context.Context, f shareFlags, port int, tunn
 	// made; the ONLY precondition is cloudflared. Missing it degrades to lan
 	// with the reason printed, because the ask was "make this reachable".
 	case f.quick:
-		e := config.Expose{Quick: true}
+		// The ephemeral rung of whichever provider was asked for. Both
+		// flavours create nothing in any account, so the only precondition is
+		// that provider's binary; a missing one degrades to lan with the
+		// reason printed, exactly as it does for the other provider.
+		e := config.Expose{Quick: true, Ngrok: f.isNgrok()}
 		res := expose.Resolve(e, port, shareBinaryFound)
 		if res.Mode != config.ModeQuick {
 			return lanFallback("you asked for a quick tunnel, but " + res.FellBack)
@@ -710,6 +813,21 @@ func resolveShareModeUnchecked(ctx context.Context, f shareFlags, port int, tunn
 	// the fix in it: silently putting that share on the wifi instead would not
 	// be what the person meant by `--domain`.
 	d := strings.TrimSpace(f.domain)
+
+	if f.isNgrok() {
+		// ngrok's analogue of a named tunnel: a RESERVED domain, provisioned
+		// by the user in their own ngrok account. There is no zone to check
+		// and nothing to provision, because there is nothing this tool
+		// creates — which is also why its teardown deletes nothing. Same rung,
+		// same reach, same verify-before-publish, different paperwork.
+		e := config.Expose{Ngrok: true, Domain: d}
+		res := expose.Resolve(e, port, shareBinaryFound)
+		if res.Mode != config.ModeNgrok {
+			return lanFallback(fmt.Sprintf("you asked to share on %s via ngrok, but %s", d, res.FellBack))
+		}
+		return res, e, nil
+	}
+
 	e := config.Expose{Cloudflare: true, Domain: d, TunnelName: tunnelName}
 	res := expose.Resolve(e, port, shareBinaryFound)
 	if res.Mode != config.ModeCloudflare {
@@ -723,6 +841,42 @@ func resolveShareModeUnchecked(ctx context.Context, f shareFlags, port int, tunn
 			d, rec.Comment, expose.ShareDNSComment)
 	}
 	return res, e, nil
+}
+
+// hostnameOwner reports the id of a LIVE share already holding this hostname.
+//
+// THE `share --domain X` TWICE RULE, decided and enforced here: REUSE NOTHING,
+// REFUSE. Two shares on one hostname is the worst of the three options — the
+// second PATCHes the DNS record onto its own tunnel, silently breaking the
+// first, and then whichever is revoked first deletes the record out from under
+// the other. Creating a second share on a different hostname is not what the
+// person typed. So the answer is a refusal that names the share in the way and
+// the two commands that resolve it (`share extend` to keep it, `share revoke`
+// to replace it), which is deterministic and loses nothing.
+//
+// An ORPHANED record — tagged as ours but with no live share record behind it —
+// is not a collision: it is the residue of a crash, and the upsert adopts it,
+// which is what makes an interrupted `share --domain` converge on a re-run
+// instead of blocking that hostname forever.
+func hostnameOwner(domain, exceptID string) string {
+	domain = strings.TrimSpace(strings.ToLower(domain))
+	if domain == "" {
+		return ""
+	}
+	recs, err := listShareRecords()
+	if err != nil {
+		return ""
+	}
+	for _, r := range recs {
+		if r.ID == exceptID || !strings.EqualFold(strings.TrimSpace(r.Domain), domain) {
+			continue
+		}
+		if time.Now().After(r.ExpiresAt) {
+			continue // already due for reaping; the sweep will take it
+		}
+		return r.ID
+	}
+	return ""
 }
 
 func cmdShareCreate(args []string) (err error) {
@@ -784,6 +938,20 @@ func cmdShareCreate(args []string) (err error) {
 		}
 	}
 
+	// `share --domain X` twice: REFUSE, before a port is taken or a directory
+	// is made. See hostnameOwner for why refusing beats reusing or creating a
+	// second one. This runs before ANY resource exists, so the refusal leaves
+	// the machine exactly as it found it.
+	if d := strings.TrimSpace(f.domain); d != "" {
+		if owner := hostnameOwner(d, ""); owner != "" {
+			return fmt.Errorf("share %s is already live on %s. Two shares on one hostname would fight over "+
+				"the same DNS record and the first revoke would break the other, so this is refused rather "+
+				"than guessed at.\n  keep it:    herdr-expose share extend %s --hours 1\n"+
+				"  replace it: herdr-expose share revoke %s   (then run this again)\n"+
+				"  or share on a different hostname with --domain", owner, d, owner, owner)
+		}
+	}
+
 	// Each share gets its own ephemeral port whatever the mode; the bind
 	// address is then decided by the RESOLVED mode, never by a flag.
 	port, err := freeLoopbackPort()
@@ -814,13 +982,24 @@ func cmdShareCreate(args []string) (err error) {
 
 	now := time.Now()
 	share := &shareRecord{
-		ID: id, Mode: string(res.Mode), Bind: res.Bind,
+		ID: id, Mode: string(res.Mode), Provider: f.provider, Bind: res.Bind,
 		SecureContext: res.SecureContext, FellBack: res.FellBack,
 		Port: port, Session: f.session, Panes: scope.Panes, Scope: scope.String(),
 		CreatedAt: now, ExpiresAt: now.Add(ttl), State: "starting",
 	}
-	if res.Mode == config.ModeCloudflare {
+	switch res.Mode {
+	case config.ModeCloudflare:
 		share.Domain, share.TunnelName = strings.TrimSuffix(strings.TrimPrefix(res.URL, "https://"), "/"), shareTunnelName(id)
+	case config.ModeNgrok:
+		// The reserved domain is recorded so `share list` and the collision
+		// check see it, but NO tunnel name: there is nothing named to create
+		// and therefore nothing named to delete.
+		share.Domain = strings.TrimSuffix(strings.TrimPrefix(res.URL, "https://"), "/")
+	}
+	if res.Mode != config.ModeCloudflare && res.Mode != config.ModeNgrok {
+		// A fallback landed us below the rung that uses a hostname; make sure
+		// no stale domain survives into the record and into teardown.
+		share.Domain, share.TunnelName = "", ""
 	}
 	if err := writeShareFile(dir, share); err != nil {
 		return err
@@ -889,8 +1068,8 @@ func cmdShareCreate(args []string) (err error) {
 	// The RUNG and its reach, stated plainly, at the top of the block. Which
 	// of the four ladders this share is on is the single most consequential
 	// fact about it, so it is never left to be inferred from the URL.
-	fmt.Printf("\n  url:           %s\n  exposure:      %s — %s\n  pairing code:  %s  (valid until %s)\n",
-		url, final.mode(), final.rung().Reach(), code, codeExp.Format(time.Kitchen))
+	fmt.Printf("\n  url:           %s\n  exposure:      %s via %s — %s\n  pairing code:  %s  (valid until %s)\n",
+		url, final.mode(), final.provider(), final.rung().Reach(), code, codeExp.Format(time.Kitchen))
 	fmt.Printf("  scope:         %s  (nothing else on this machine is in this instance's tree)\n", scope.String())
 	switch {
 	case final.isLocal():
@@ -1093,15 +1272,31 @@ func cmdShareExtend(args []string) error {
 	if err != nil {
 		return err
 	}
+	// `extend` is CUMULATIVE by definition — that is what the verb means, and
+	// AMENDMENTS 10 requires it to be an explicit, logged, revocable act. So
+	// running it twice deliberately extends twice; the idempotency that
+	// matters here is a different one: no number of extensions may add up to a
+	// share that is effectively permanent. The ceiling is the same one ttl()
+	// enforces on a single call, applied to the RESULT.
+	const maxLifetime = 365 * 24 * time.Hour
+	var clamped bool
 	rec, err := updateShare(id, func(r *shareRecord) {
 		base := time.Now()
 		if r.ExpiresAt.After(base) {
 			base = r.ExpiresAt
 		}
-		r.ExpiresAt = base.Add(d)
+		want := base.Add(d)
+		if ceiling := time.Now().Add(maxLifetime); want.After(ceiling) {
+			want, clamped = ceiling, true
+		}
+		r.ExpiresAt = want
 	})
 	if err != nil {
 		return err
+	}
+	if clamped {
+		fmt.Fprintf(os.Stderr, "  NOTE: clamped to a year out — every share is time-boxed and there is no "+
+			"permanent one (AMENDMENTS 10)\n")
 	}
 	// The tokens must move WITH the share, or they expire underneath a share
 	// that is still running. The live instance re-reads share.json and does the
@@ -1211,6 +1406,7 @@ func cmdSharePair(args []string) error {
 type teardownResult struct {
 	ID          string `json:"id"`
 	Mode        string `json:"mode"`
+	Provider    string `json:"provider"`
 	Domain      string `json:"domain"`
 	ProcessGone bool   `json:"process_gone"`
 	// DNSGone / TunnelGone are true when there is nothing left in Cloudflare.
@@ -1261,7 +1457,26 @@ func cmdShareRevoke(args []string) error {
 				}
 				return nil
 			}
-			return err
+			// The record is THERE but unreadable — a share.json truncated by a
+			// crash mid-write, say. Refusing here would make that share
+			// unrevocable forever, which is the opposite of what `revoke` is
+			// for, so the directory is wiped instead. There is nothing else to
+			// go on: with no parseable record there is no tunnel name and no
+			// hostname to address, and anything this tool DID create carries
+			// its own tag and is reachable from `share revoke --all` on the
+			// records that survived.
+			dir, derr := shareDirFor(id)
+			if derr != nil {
+				return err
+			}
+			fmt.Fprintf(os.Stderr, "share %s: its record is unreadable (%v); wiping the state dir\n", id, err)
+			if rerr := os.RemoveAll(dir); rerr != nil {
+				return rerr
+			}
+			if asJSON {
+				printJSON(map[string]any{"revoked": []teardownResult{{ID: id, StateWiped: true}}, "ok": true})
+			}
+			return nil
 		}
 		targets = []*shareRecord{rec}
 	}
@@ -1311,6 +1526,9 @@ func printTeardown(r teardownResult) {
 		fmt.Printf("  dns/tunnel   n/a (LAN share: nothing was ever created)\n")
 	case r.Mode == string(config.ModeQuick):
 		fmt.Printf("  dns/tunnel   n/a (quick tunnel: no DNS record and no named tunnel ever existed)\n")
+	case r.CloudflareNA:
+		fmt.Printf("  dns/tunnel   n/a (%s created nothing in any account: a reserved domain\n"+
+			"               belongs to you, not to this tool, so it is never deleted)\n", r.Provider)
 	default:
 		fmt.Printf("  dns record   %s\n", mark(r.DNSGone))
 		fmt.Printf("  tunnel       %s\n", mark(r.TunnelGone))
@@ -1352,7 +1570,7 @@ func revokeShareRecord(rec *shareRecord) teardownResult {
 		}
 	}
 
-	res := teardownResult{ID: rec.ID, Mode: rec.mode(), Domain: rec.Domain}
+	res := teardownResult{ID: rec.ID, Mode: rec.mode(), Provider: rec.provider(), Domain: rec.Domain}
 	dir, err := shareDirFor(rec.ID)
 	if err != nil {
 		res.Error = err.Error()
@@ -1374,16 +1592,22 @@ func revokeShareRecord(rec *shareRecord) teardownResult {
 	// share's own port and killed. Matching on a derived argument rather than
 	// on the binary name is what keeps this away from the permanent
 	// deployment's cloudflared, which runs with --config.
-	if rec.isLocal() || rec.isLAN() || rec.isQuick() {
+	if !rec.hasCloudflareResources() {
 		res.DNSGone, res.TunnelGone, res.CloudflareNA = true, true, true
 		bindAddr := fmt.Sprintf("0.0.0.0:%d", rec.Port)
-		if rec.isLocal() {
+		switch {
+		case rec.isLocal():
 			bindAddr = fmt.Sprintf("127.0.0.1:%d", rec.Port)
-		}
-		if rec.isQuick() {
+		case rec.isQuick() && rec.provider() != "ngrok":
 			pattern := expose.QuickURLPattern(rec.Port)
 			killStrayCloudflared(pattern)
 			waitForNoCloudflared(pattern, 10*time.Second)
+			bindAddr = fmt.Sprintf("127.0.0.1:%d", rec.Port)
+		case !rec.isLAN():
+			// An ngrok share (either rung): the agent is a child of the share
+			// process and dies with it, and there is nothing in the user's
+			// ngrok account that this tool created, so there is nothing to
+			// delete. The reserved domain stays exactly where the user put it.
 			bindAddr = fmt.Sprintf("127.0.0.1:%d", rec.Port)
 		}
 		res.PortFree = rec.Port == 0 || portFree(bindAddr)
@@ -1554,6 +1778,9 @@ func sweepShares(log *slog.Logger) []string {
 			continue
 		}
 		alive := pidAlive(rec.PID)
+		if dir, err := shareDirFor(rec.ID); err == nil && shareIsRunning(dir) {
+			alive = true
+		}
 		// Give a live instance a grace period to destroy itself properly.
 		if alive && time.Since(rec.ExpiresAt) < 2*time.Minute {
 			continue
@@ -1589,6 +1816,12 @@ func restoreShares(log *slog.Logger) {
 		}
 		dir, err := shareDirFor(rec.ID)
 		if err != nil {
+			continue
+		}
+		// The authoritative check, after the cheap one: a share that holds its
+		// run lock is running, whatever share.json's pid field says. This is
+		// what makes `share restore` twice in a row converge on one instance.
+		if shareIsRunning(dir) {
 			continue
 		}
 		log.Info("restoring share after restart", "id", rec.ID, "domain", rec.Domain,
@@ -1668,6 +1901,18 @@ func cmdShareRun(args []string) error {
 	if err != nil {
 		return err
 	}
+	// ONE instance per share, enforced by the kernel. A second spawn — from a
+	// double `share restore`, from the daemon reconciling while an operator
+	// runs it by hand — exits here quietly instead of fighting the first for
+	// the port. Quietly, and with status 0, because the desired state has
+	// already been reached: that is what makes restore safe to run twice.
+	runLock, ok := tryShareRunLock(dir)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "share %s is already running; nothing to do\n", id)
+		return nil
+	}
+	defer runLock.Close()
+
 	// A share logs to its OWN file inside its own state dir, so revoking the
 	// share takes the log with it.
 	log, logCloser := shareLogger(dir, id)
@@ -1695,6 +1940,11 @@ func cmdShareRun(args []string) error {
 	// never tries a tunnel, and a tunnel share never silently degrades to LAN.
 	// Nothing here consults the config file, so editing [expose] under a live
 	// share cannot move it up the ladder either.
+	// The PROVIDER is reconstructed from the record too, not just the rung: a
+	// share restored after a reboot must come back on the same binary as well
+	// as the same rung, or its teardown and its footprint no longer describe
+	// what is actually running.
+	ngrok := rec.provider() == "ngrok"
 	exp := config.Expose{LAN: true}
 	switch {
 	case rec.isLocal():
@@ -1705,7 +1955,9 @@ func cmdShareRun(args []string) error {
 		// stays quick and never silently acquires a domain — and, just as
 		// importantly, a domain share can never silently degrade to an
 		// ephemeral hostname on restart.
-		exp = config.Expose{Quick: true}
+		exp = config.Expose{Quick: true, Ngrok: ngrok}
+	case ngrok && !rec.isLAN():
+		exp = config.Expose{Ngrok: true, Domain: rec.Domain}
 	case !rec.isLAN():
 		exp = config.Expose{Cloudflare: true, Domain: rec.Domain, TunnelName: rec.TunnelName}
 	}
@@ -1714,7 +1966,11 @@ func cmdShareRun(args []string) error {
 		Expose:     exp,
 		StateDir:   dir,
 		DNSComment: expose.ShareDNSComment,
-		Logf:       func(f string, a ...any) { log.Info(fmt.Sprintf(f, a...)) },
+		// A share owns `herdr-expose-share-<id>` outright, so it is allowed to
+		// delete and recreate that tunnel when a crash lost its credentials.
+		// The permanent deployment is not, and does not set this.
+		Exclusive: true,
+		Logf:      func(f string, a ...any) { log.Info(fmt.Sprintf(f, a...)) },
 	})
 	cfg := shareServeConfig{mgr: mgr}
 	res := mgr.Resolution()

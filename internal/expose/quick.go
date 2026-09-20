@@ -37,7 +37,7 @@ var quickURLRe = regexp.MustCompile(`https://[a-z0-9][a-z0-9-]*(?:-[a-z0-9]+)*\.
 //
 // Only Port and Bin are read from opts; a quick tunnel has no domain, no tunnel
 // name, no state dir and no DNS tag, and passing one would be a lie.
-func newQuickTunnel(opts CloudflareOptions, logf func(string, ...any), red *redactor) (tunnel, error) {
+func newQuickTunnel(opts CloudflareOptions, logf func(string, ...any), red *redactor) (Provider, error) {
 	bin, err := resolveBinary(opts.Bin, "cloudflared")
 	if err != nil {
 		return nil, fmt.Errorf("%w\ninstall it with `brew install cloudflared` (macOS) or from "+
@@ -68,7 +68,18 @@ func newQuickTunnel(opts CloudflareOptions, logf func(string, ...any), red *reda
 		Log:            logf,
 		Redact:         red,
 		HealthInterval: 30 * time.Second,
+		Print:          quickFootprint(),
+		// No Teardown, and the Footprint says why: there is no account
+		// resource, no DNS record and no named tunnel, so "stop the process"
+		// IS the complete teardown. An empty Destroy here is the truth, not an
+		// omission.
+		Teardown: nil,
 	}), nil
+}
+
+// quickFootprint declares the whole of what a TryCloudflare tunnel creates.
+func quickFootprint() Footprint {
+	return Footprint{Provider: "cloudflare-quick", Ephemeral: true}
 }
 
 // QuickURLPattern is the argument shape a quick cloudflared is started with,

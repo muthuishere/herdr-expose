@@ -271,6 +271,12 @@ func installLaunchAgent(exePath, state string) (string, error) {
   <key>EnvironmentVariables</key><dict>
     <key>PATH</key><string>%s/.local/bin:%s/.cargo/bin:%s/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
     <key>HERDR_PLUGIN_STATE_DIR</key><string>%s</string>
+    <!-- Without this, the unit is a KeepAlive loop of instant no-op exits:
+         serve refuses to start when a manager is in charge (main.go), which is
+         exactly what this unit IS. Worse, while the unit is loaded every other
+         start path refuses too - including the plugin's own daemon hook - so
+         installing the service silently disables the product. -->
+    <key>HERDR_EXPOSE_SUPERVISED</key><string>1</string>
   </dict>
   <key>StandardOutPath</key><string>%s/serve.log</string>
   <key>StandardErrorPath</key><string>%s/serve.log</string>
@@ -307,6 +313,8 @@ Restart=always
 RestartSec=2
 Environment=PATH=%s/.local/bin:%s/.cargo/bin:%s/bin:/usr/local/bin:/usr/bin:/bin
 Environment=HERDR_PLUGIN_STATE_DIR=%s
+# Without this the unit never actually serves: see the plist comment above.
+Environment=HERDR_EXPOSE_SUPERVISED=1
 
 [Install]
 WantedBy=default.target
@@ -330,14 +338,144 @@ func uninstallService() error {
 		}
 		plistPath := filepath.Join(home, "Library", "LaunchAgents", serviceLabel+".plist")
 		_ = exec.Command("launchctl", "unload", plistPath).Run()
-		return os.Remove(plistPath)
+		// Uninstalling twice is success: the desired state is "no unit", and
+		// it is already reached. An ENOENT here used to make the second run
+		// exit 1 on a machine that was in exactly the state asked for.
+		if err := os.Remove(plistPath); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
 	case "linux":
 		_ = exec.Command("systemctl", "--user", "disable", "--now", "herdr-expose.service").Run()
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return err
 		}
-		return os.Remove(filepath.Join(home, ".config", "systemd", "user", "herdr-expose.service"))
+		// Same rule as launchd above: already-absent is the desired state.
+		if err := os.Remove(filepath.Join(home, ".config", "systemd", "user",
+			"herdr-expose.service")); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
 	}
 	return fmt.Errorf("service uninstall is not supported on %s", runtime.GOOS)
+}
+
+// --- service state, so install/uninstall can CONVERGE rather than repeat ----
+//
+// `service install` used to be a blind sequence: write the unit, unload it,
+// load it. Run twice it dropped a healthy supervised server and brought it
+// back; run on a machine with an unmanaged daemon it took the port over
+// SILENTLY, because the unit's `serve` calls reclaimStrays, which SIGTERMs
+// every pid in the ledger. On this machine that ledger is the daemon serving
+// the owner's live sessions.
+//
+// Taking over an unmanaged daemon is the right behaviour — two copies fighting
+// for one port is worse — but it has to be a thing the operator is TOLD about
+// and can decline. So install now reads the world first, says what it is about
+// to do, and verifies afterwards that the unit genuinely came up.
+
+// serviceState is what the platform's service manager says right now.
+type serviceState struct {
+	Installed bool   // the unit file exists on disk
+	Loaded    bool   // the manager knows about it
+	Active    bool   // it is actually running something
+	PID       int    // the supervised process, when there is one
+	Who       string // "launchd:<label>" / "systemd:herdr-expose.service"
+	UnitPath  string
+}
+
+// Healthy is the only state in which a second `service install` is a no-op.
+func (s serviceState) Healthy() bool { return s.Loaded && s.Active && s.PID > 0 }
+
+func readServiceState() serviceState {
+	st := serviceState{}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return st
+	}
+	switch runtime.GOOS {
+	case "darwin":
+		st.Who = "launchd:" + serviceLabel
+		st.UnitPath = filepath.Join(home, "Library", "LaunchAgents", serviceLabel+".plist")
+		if _, err := os.Stat(st.UnitPath); err == nil {
+			st.Installed = true
+		}
+		out, err := exec.Command("launchctl", "list", serviceLabel).Output()
+		if err != nil {
+			return st
+		}
+		st.Loaded = true
+		// `launchctl list <label>` prints a plist-ish dict with "PID" = N;
+		// when something is actually running, and omits it when it is not.
+		for _, line := range strings.Split(string(out), "\n") {
+			if !strings.Contains(line, "\"PID\"") {
+				continue
+			}
+			f := strings.FieldsFunc(line, func(r rune) bool { return r < '0' || r > '9' })
+			if len(f) > 0 {
+				if n, err := strconv.Atoi(f[len(f)-1]); err == nil && n > 0 {
+					st.PID, st.Active = n, true
+				}
+			}
+		}
+	case "linux":
+		st.Who = "systemd:herdr-expose.service"
+		st.UnitPath = filepath.Join(home, ".config", "systemd", "user", "herdr-expose.service")
+		if _, err := os.Stat(st.UnitPath); err == nil {
+			st.Installed = true
+		}
+		out, err := exec.Command("systemctl", "--user", "show", "herdr-expose.service",
+			"-p", "MainPID", "-p", "ActiveState", "-p", "LoadState").Output()
+		if err != nil {
+			return st
+		}
+		for _, line := range strings.Split(string(out), "\n") {
+			k, v, ok := strings.Cut(strings.TrimSpace(line), "=")
+			if !ok {
+				continue
+			}
+			switch k {
+			case "LoadState":
+				st.Loaded = v == "loaded"
+			case "ActiveState":
+				st.Active = v == "active"
+			case "MainPID":
+				if n, err := strconv.Atoi(v); err == nil {
+					st.PID = n
+				}
+			}
+		}
+	}
+	return st
+}
+
+// awaitServiceUp polls for the unit to actually be running something, so
+// install VERIFIES rather than assumes. A unit that loads and then exits
+// instantly (the KeepAlive-flapping failure mode) is caught here.
+func awaitServiceUp(timeout time.Duration) serviceState {
+	deadline := time.Now().Add(timeout)
+	var st serviceState
+	for {
+		st = readServiceState()
+		if st.Healthy() || time.Now().After(deadline) {
+			return st
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+}
+
+// unmanagedDaemonPID reports a herdr-expose server that is running WITHOUT a
+// service manager — the one that installing a unit is about to take over.
+func unmanagedDaemonPID(state string) int {
+	self := os.Getpid()
+	if pid := readPid(state); pid > 0 && pid != self && pidAlive(pid) {
+		return pid
+	}
+	for _, e := range readLedger(state) {
+		if e.PID != self && pidAlive(e.PID) {
+			return e.PID
+		}
+	}
+	return 0
 }

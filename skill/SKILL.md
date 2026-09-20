@@ -1,6 +1,6 @@
 ---
 name: herdr-share
-description: Expose ONE Herdr agent session as a private web URL — on this network by default, or (only when asked) on a throwaway *.trycloudflare.com hostname or a domain you own — for a bounded time, then have it destroy itself. Use when the owner says "expose this session", "share this agent", "give me a URL for this pane", "put this agent on <domain>", "quick share this", "share it without a domain", "let someone see this agent", "share my terminal", "list my shares", "extend that share", "revoke the share", "stop all shares", or "panic / kill every exposure". Wraps the herdr-expose CLI: one scoped detached server plus a lan address, a quick tunnel or a Cloudflare named tunnel, always time-boxed, always pairing-gated.
+description: Turn a Herdr terminal session — a running coding agent, a shell, one pane — into a private web URL somebody can open on a phone, scoped to that session alone, time-boxed, pairing-gated, and gone when it expires. Use when the owner says "share this", "share this session/pane/agent/terminal", "expose this agent", "give someone access to this", "let X see what this agent is doing", "put this on a URL", "I want to watch this from my phone", "give me a link for this", "put this agent on <hostname>", "quick share this", "share it without a domain", or "share it on the wifi" — and for the whole lifecycle afterwards, "list my shares", "how long has that share got", "extend that share", "revoke the share", "stop sharing", "stop all shares", "kill every exposure", "panic", or "is anything of mine exposed right now". Do NOT use it for exposing a port or a web service in general (it shares Herdr panes only), for publishing or deploying code, for npm or PyPI publishing, for exposure in the photographic, financial or risk sense, or for granting access to a repo, a document or a cloud account. Wraps the herdr-expose CLI — one scoped detached server on a LAN address, a throwaway *.trycloudflare.com tunnel, or a Cloudflare named tunnel on a domain you own.
 ---
 
 # herdr-share
@@ -17,12 +17,24 @@ and knows how to clean up after itself.
 
 ```bash
 command -v herdr-expose || echo "build it: cd ~/muthu/gitworkspace/herdr-plugins/herdr-expose && ./scripts/build.sh"
-herdr-expose status --json | jq -r '.mode, .listen'
+herdr-expose status                          # human-readable: mode, listen, url, devices, sessions
+herdr-expose expose status | jq -r '.mode, .url, .running, .healthy'
+herdr-expose doctor                          # pass/fail per dependency, with a fix hint on each failure
 ```
 
+**`status` has no `--json`** — its only flag is `--watch`. For a machine-readable
+answer use `herdr-expose expose status`, which always prints JSON
+(`mode`, `bind`, `port`, `lan_ip`, `url`, `secure_context`, `fell_back`,
+`running`, `healthy`, `provider`, `tunnel`, `pid`, `restarts`, `last_error`), or
+`herdr-expose doctor --json`. Piping `status --json` into `jq` silently feeds it
+human text and fails.
+
 - The **default (LAN) rung and `--local` need nothing at all**, and `--quick`
-  needs nothing but cloudflared. No Cloudflare account, no zone, no token, no
-  DNS. If all you need is a URL, that is the whole precondition.
+  needs nothing but the tunnel helper binary (`cloudflared`; on a build that
+  supports it, `ngrok` when that provider is selected). No account, no zone, no
+  token, no DNS. If all you need is a URL, that is the whole precondition — and
+  if the helper is missing, the CLI says which binary it wanted, so quote that
+  rather than guessing.
 - `--domain` is the only rung with real preconditions:
   - The **domain's zone must live in the Cloudflare account** the token reaches.
     `*.deemwar.com` works. An arbitrary domain does not. The CLI checks zone
@@ -75,17 +87,47 @@ herdr-expose share --domain agent1.deemwar.com --json
 # A specific session, or a single pane, for longer.
 herdr-expose share --domain review.deemwar.com --session crypto-desk --days 7 --json
 herdr-expose share --quick --pane herdr-plugins/w2:p1 --hours 4 --json
+
+# --pane is REPEATABLE: several panes, one share, one scope.
+herdr-expose share --pane herdr-plugins/w2:p1 --pane herdr-plugins/w2:p3 --json
 ```
 
-Defaults: the session you are running in, `--hours 1`, and the **LAN** rung.
-`--local`, `--lan`, `--quick` and `--domain` are mutually exclusive. `[share]
-default_mode` in the config (`local | lan | quick | domain`, shipped `lan`) sets
-the rung when no flag is given.
+Full flag set for a create — there are no others, and an unknown flag is a hard
+error: `--local` · `--lan` · `--quick` · `--domain X` · `--session NAME` (`-s`)
+· `--pane TARGET` (`-p`, also spelled `--only-target`, **repeatable**) ·
+`--hours N` · `--days N` · `--name NAME` · `--json`.
+
+Defaults: the session you are running in (`$HERDR_SESSION`, else resolved from
+`$HERDR_SOCKET_PATH`), `--hours 1`, and the **LAN** rung. `--hours` and `--days`
+**add together**; the TTL must be positive and under a year. `--local`, `--lan`,
+`--quick` and `--domain` are mutually exclusive, and passing two is an error
+rather than a precedence puzzle.
+
+`--name` is a label. It only becomes part of a hostname in one narrow case:
+`[share] default_mode = "domain"` **plus** a configured `[share] domain_suffix`,
+where `--name review` resolves to `review.<suffix>`. A suffix on its own never
+promotes a share to the internet. `[share] default_mode`
+(`local | lan | quick | domain`, shipped `lan`) is the **only** config key that
+can move a bare `share` off the LAN, and an unrecognised value reads as `lan`.
+
+`[share] max_concurrent` (default 10) refuses a create once that many shares are
+live, naming the fix. `[share] default_hours` overrides the one-hour default.
 
 **Nothing escalates on its own.** A bare `share` never becomes a tunnel because
 `[expose] domain` happens to be configured — that auto-escalation was withdrawn
 precisely because it published sessions nobody asked to publish. Report the rung
-you got (`.share.mode` in the JSON) rather than assuming.
+you **got**, not the one you asked for:
+
+```bash
+herdr-expose share --json | jq -r '.share.mode, .share.url, .share.fell_back, .share.secure_context'
+```
+
+**`.share.mode` is the resolved TRANSPORT, not the rung name.** It is one of
+`local`, `lan`, `quick`, `cloudflare` — so a `--domain` share reports
+`"cloudflare"`, never `"domain"`. A non-empty `.share.fell_back` means an
+explicit tunnel request degraded; its absence means you got what was asked for.
+The create output is
+`{"share": {...}, "pairing_code": "...", "pairing_expires_at": "..."}`.
 
 **Fallback only goes down, loudly.** An explicit `--quick` or `--domain` with no
 cloudflared installed degrades to LAN and prints why. If the owner needed the
@@ -113,14 +155,29 @@ QR off the screen.
 
 ```bash
 herdr-expose share list --json          # id, scope, domain, url, expires_at, remaining, alive
-herdr-expose share extend <id> --hours 2 | --days N
-herdr-expose share pair <id> --json     # another pairing code for a share already running
-herdr-expose share revoke <id>          # immediate, idempotent
+herdr-expose share extend <id> --hours 2 | --days N   # [--json]
+herdr-expose share pair <id> [--name NAME] --json     # another code for a LIVE share
+herdr-expose share revoke <id> --json   # immediate, idempotent (aliases: stop, destroy)
 herdr-expose share restore --json       # reap expired, respawn crashed (daemon does this on boot)
 ```
 
+`share list` also accepts `ls`, and it **reaps** any share whose deadline passed
+as a side effect of listing — so a `list` that returns `[]` is a stronger
+statement than a cached view. Per-share fields: `id`, `mode`, `scope`,
+`session`, `domain`, `url`, `secure_context`, `fell_back`, `state`,
+`created_at`, `expires_at`, `remaining`, `remaining_seconds`, `pid`, `alive`,
+`expired`, `error`.
+
 `share pair` is how you add a second person without restarting the share. Each
 code is single-use, so mint one per device rather than resending the same one.
+
+**Read a share's own log** when one misbehaves — it is a separate file that dies
+with the share:
+
+```bash
+herdr-expose logs --share <id> -n 100 [--json] [--follow]
+herdr-expose logs --path                       # where the daemon's own log lives
+```
 
 ## Stop everything
 
@@ -134,9 +191,18 @@ Use `panic` when the owner says stop/kill/shut it down and means all of it.
 what you attempted:
 
 ```bash
-herdr-expose share list --json          # expect []
-herdr-expose status --json | jq -r '.mode, .url'
+herdr-expose share list --json                       # expect []
+herdr-expose expose status | jq -r '.mode, .url, .running'
+herdr-expose status                                  # human-readable; NO --json flag exists
 ```
+
+`panic --json` returns
+`{"shares_revoked": [...], "main_tunnel": {"stopped": bool, "halt_file": "...",
+"note": "..."}, "ok": bool}`. It stops the main tunnel but deliberately does
+**not** destroy it — the permanent DNS record and named tunnel stay, because
+that endpoint is meant to be static. **Re-arm with `herdr-expose expose start`**,
+which also clears the halt flag; the daemon picks it up within about five
+seconds.
 
 Teardown reports per component — `process_gone`, `dns_gone`, `tunnel_gone`,
 `port_free`, `state_wiped` — and both commands exit non-zero if anything
@@ -164,9 +230,13 @@ The owner's permanent deployment keeps running untouched.
 - **Every share is time-based. There is no permanent mode.** A long-lived share
   is a long TTL (`--days 30`), not a different thing. Do not look for a flag to
   disable expiry; there isn't one, by design.
-- **A share is pairing-gated**, never open, because it is on the public
-  internet and drives a real agent. No endpoint mints a pairing code — it is
-  shown only on this machine.
+- **A share is pairing-gated**, never open, at **every** rung — because it
+  drives a real agent and can run arbitrary commands. No HTTP endpoint mints or
+  reveals a pairing code; it is displayed only on the physically present
+  machine. That is the whole reason a LAN address is defensible: somebody on the
+  same wifi can reach the port and get precisely nowhere without looking at your
+  screen. (The one exception is `--local`, where loopback plus Origin/Host
+  pinning replaces the token — and loopback already implies shell on the box.)
 - **A LAN share is not "trusted because it is local".** Coffee-shop wifi is a
   LAN. Pairing is required there exactly as it is on a public URL, and scope is
   enforced identically. There is no LAN bypass and you should not ask for one.
@@ -199,8 +269,40 @@ The owner's permanent deployment keeps running untouched.
 - **Confirm before sharing a session that is not the current one**, and always
   before sharing anything touching money or production — `crypto-desk` runs a
   live trading desk. Read back the scope and the TTL and get a yes.
+- **Confirm scope AND TTL out loud before creating anything above `--local`.**
+  Read back which session or panes, which rung, and until when — then get a yes.
+  A share is not a link, it is a live control channel into a running agent.
 - Prefer the shortest TTL that does the job. Extending is one command; a share
   that outlived its purpose is an open door nobody is watching.
+- **Never paste a pairing code, a share URL or a device token into a public
+  channel, an issue, a commit or a log.** The code is a credential with a
+  ten-minute life; hand it over the way you would a password, or let the person
+  scan the QR off the screen.
+- **Never read or echo `$CLOUDFLARE_ALLPURPOSE_TOKEN` / `$CLOUDFLARE_ACCOUNT_ID`.**
+  Reference them by name; the CLI reads them at point of use and never logs,
+  stores or returns them.
+
+## Answering "is anything of mine exposed right now?"
+
+```bash
+herdr-expose share list --json | jq -r '.[] | "\(.id)  \(.mode)  \(.scope)  \(.url)  \(.remaining)"'
+herdr-expose expose status | jq -r '.mode, .url, .running, .healthy'
+herdr-expose doctor
+```
+
+`doctor`'s `shares` and `exposure` checks answer this in one screen, and its
+other checks (`cloudflared`, `cloudflare token`, `dns`, `port`,
+`service manager`, `log`, `herdr socket`) are where to look when a share will
+not start. Every failing check carries a hint naming the fix — quote the hint
+rather than guessing.
+
+## Verbs this skill does NOT cover
+
+`serve`, `daemon`, `stop`, `open`, `pair`, `devices`, `install-service`,
+`uninstall-service`, `service`, `config`, `version` — those are the **permanent
+deployment**, not sharing. Touch them only when the owner is clearly talking
+about the daemon itself. In particular `herdr-expose stop` stops the main
+server for everybody; it is not how you end a share (`share revoke <id>` is).
 
 ## Two behaviours that look like bugs and are not
 
@@ -218,3 +320,22 @@ otherwise just make the supervisor respawn it. If `panic` reports
 `cloudflared STILL RUNNING` and exits non-zero, the daemon is on an older build:
 restart it (`herdr-expose stop && herdr-expose daemon`) and run `panic` again.
 That output is honest, not cosmetic — treat non-zero as "still exposed".
+
+## Known stale text in the CLI itself
+
+The **top-level** `herdr-expose --help` still describes the withdrawn
+auto-escalating ladder (`none = auto: domain if usable, else quick if
+cloudflared is installed, else lan`) and omits `--local`. **The binary does not
+behave that way.** `herdr-expose share --help` is correct and matches this
+skill. If you are reasoning from `--help` output, use the subcommand's.
+
+## Where the details live
+
+- `docs/troubleshooting.md` — the failures that look like bugs and are not:
+  a stale NXDOMAIN cache making a live tunnel look dead, a quick hostname
+  changing under a paired device, no PWA install on a LAN IP, `panic` reporting
+  `cloudflared STILL RUNNING`.
+- `docs/api.md` — the wire contract, if you are building a client rather than
+  driving the CLI.
+- `docs/adr/0026`–`0029` — why a share is a separate scoped process, why quick
+  tunnels exist only for shares, and why the ladder is never climbed for you.

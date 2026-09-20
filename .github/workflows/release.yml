@@ -1,0 +1,72 @@
+# Publish a release when a vX.Y.Z tag is pushed.
+#
+# One runner builds all four targets: the binary is CGO-free, so Go
+# cross-compiles them and the embedded web app is identical in each.
+#
+# The artifacts are NOT signed or notarized. macOS Gatekeeper will quarantine a
+# downloaded build; `xattr -d com.apple.quarantine ./herdr-expose` clears it.
+# Anyone who would rather not trust a binary can build from source in one
+# command — that is the default path in scripts/build.sh.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and publish (must already exist)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0 # scripts/build.sh stamps the version from git describe
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          check-latest: true
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build the release matrix
+        run: ./scripts/build.sh --release
+        env:
+          VERSION: ${{ github.event.inputs.tag || github.ref_name }}
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          {
+            echo "Prebuilt binaries for macOS and Linux (amd64 + arm64), with the"
+            echo "web UI embedded. Not signed or notarized."
+            echo
+            echo "Install as a Herdr plugin. That builds from source when Go and"
+            echo "node are present, and falls back to these binaries when they are"
+            echo "not:"
+            echo
+            echo '    herdr plugin install muthuishere/herdr-expose'
+            echo
+            echo "Or take a binary directly:"
+            echo
+            echo "    shasum -a 256 -c herdr-expose_${TAG}_SHA256SUMS"
+            echo "    tar -xzf herdr-expose_${TAG}_darwin_arm64.tar.gz"
+            echo "    ./herdr-expose daemon"
+          } > release-notes.md
+          gh release create "$TAG" --title "$TAG" --notes-file release-notes.md \
+            dist/*.tar.gz dist/*_SHA256SUMS

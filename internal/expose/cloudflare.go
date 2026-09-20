@@ -28,6 +28,41 @@ type CloudflareOptions struct {
 	// permanent tag ("herdr-expose"); a share passes ShareDNSComment so that
 	// its teardown can never touch the permanent record.
 	Comment string
+
+	// Exclusive declares that this tunnel NAME belongs solely to this
+	// invocation — true for a share, whose tunnel name is derived from its own
+	// share id and can collide with nothing else.
+	//
+	// It decides one thing: what to do about the half-provisioned case where
+	// the named tunnel exists but its credentials file does not. The secret is
+	// issued once, at creation, and cannot be recovered, so the tunnel is
+	// unusable and the state is stuck.
+	//
+	//   Exclusive=false (the PERMANENT deployment): refuse, and say how to fix
+	//   it. Deleting a tunnel that someone may have pointed other things at,
+	//   on the strength of a missing local file, is not a decision this tool
+	//   gets to make silently.
+	//
+	//   Exclusive=true (a SHARE): delete the orphan and create a fresh one.
+	//   Nothing else can be using `herdr-expose-share-<id>`, so converging is
+	//   strictly better than leaving an unusable tunnel and a live DNS record
+	//   behind for a crash that happened between two API calls.
+	Exclusive bool
+}
+
+// Footprint declares what a NAMED Cloudflare tunnel creates: this is the only
+// provider in the binary that creates anything in an account, and therefore
+// the only one whose teardown deletes anything.
+func (o CloudflareOptions) Footprint() Footprint {
+	return Footprint{
+		Provider:      "cloudflare",
+		RemoteAccount: true,
+		SecretEnv:     []string{CloudflareTokenEnv, CloudflareAccountEnv},
+		NamedTunnel:   o.tunnelName(),
+		DNSRecord:     o.Domain,
+		DNSTag:        o.comment(),
+		StateFiles:    []string{"<state>/cloudflare/<tunnel-id>.json", "<state>/cloudflare/config.yml"},
+	}
 }
 
 // comment is the DNS tag for this options set.
@@ -68,7 +103,7 @@ type provisioned struct {
 // newCloudflare builds the supervised tunnel. Provisioning happens on every
 // launch because every step is idempotent — that is what makes `expose start`
 // safe to re-run and self-healing after a restart.
-func newCloudflare(opts CloudflareOptions, logf func(string, ...any), red *redactor) (tunnel, error) {
+func newCloudflare(opts CloudflareOptions, logf func(string, ...any), red *redactor) (Provider, error) {
 	if strings.TrimSpace(opts.Domain) == "" {
 		return nil, fmt.Errorf("expose.domain is required: the Cloudflare tunnel is static, on a hostname you own " +
 			"(there is no ephemeral *.trycloudflare.com path)")
@@ -106,6 +141,10 @@ func newCloudflare(opts CloudflareOptions, logf func(string, ...any), red *redac
 		Log:            logf,
 		Redact:         red,
 		HealthInterval: 30 * time.Second,
+		Print:          opts.Footprint(),
+		Teardown: func(ctx context.Context, l func(string, ...any)) error {
+			return DestroyCloudflare(ctx, opts, l)
+		},
 	}), nil
 }
 
@@ -156,15 +195,30 @@ func provisionCloudflare(ctx context.Context, opts CloudflareOptions, logf func(
 
 	if tun != nil {
 		p.TunnelID = tun.ID
-		logf("cloudflare: reusing tunnel %q (%s)", name, tun.ID)
 		p.CredsPath = filepath.Join(stateDir, tun.ID+".json")
 		if _, err := os.Stat(p.CredsPath); err != nil {
-			// The tunnel exists but we have no credentials for it — the secret
-			// is only returned at creation time, so it cannot be recovered.
-			return nil, fmt.Errorf("cloudflare tunnel %q already exists but its credentials file %s is missing; "+
-				"the tunnel secret is only issued at creation, so either restore that file or run "+
-				"`herdr-expose expose destroy` and start again (or pick another tunnel_name)", name, p.CredsPath)
+			// THE HALF-PROVISIONED CASE: the tunnel exists but its credentials
+			// file does not. The secret is issued exactly once, at creation,
+			// so it cannot be recovered and this tunnel can never be run.
+			// Re-running must CONVERGE rather than fail forever — but only
+			// where deleting is unambiguously safe.
+			if !opts.Exclusive {
+				return nil, fmt.Errorf("cloudflare tunnel %q already exists but its credentials file %s is missing; "+
+					"the tunnel secret is only issued at creation, so either restore that file or run "+
+					"`herdr-expose expose destroy` and start again (or pick another tunnel_name)", name, p.CredsPath)
+			}
+			logf("cloudflare: tunnel %q exists but its credentials are gone (a crash between creating the "+
+				"tunnel and writing its secret); the name belongs only to this share, so deleting and "+
+				"recreating it", name)
+			if err := api.deleteTunnel(ctx, account, tun.ID); err != nil {
+				return nil, fmt.Errorf("cloudflare tunnel %q has no recoverable credentials and could not be "+
+					"deleted to recreate it: %w", name, err)
+			}
+			tun = nil
 		}
+	}
+	if tun != nil {
+		logf("cloudflare: reusing tunnel %q (%s)", name, tun.ID)
 	} else {
 		secret, err := newTunnelSecret()
 		if err != nil {

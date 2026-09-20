@@ -22,13 +22,15 @@ type mockCF struct {
 	calls    []string
 	tunnels  map[string]map[string]any // name -> tunnel
 	records  map[string]map[string]any // name -> record
+	creates  map[string]int
 	failDNS  bool
 	tokenBad bool
 	deleted  []string
 }
 
 func newMockCF(t *testing.T) (*mockCF, *httptest.Server) {
-	m := &mockCF{t: t, tunnels: map[string]map[string]any{}, records: map[string]map[string]any{}}
+	m := &mockCF{t: t, tunnels: map[string]map[string]any{}, records: map[string]map[string]any{},
+		creates: map[string]int{}}
 	srv := httptest.NewServer(http.HandlerFunc(m.serve))
 	t.Cleanup(srv.Close)
 	return m, srv
@@ -89,7 +91,16 @@ func (m *mockCF) serve(w http.ResponseWriter, r *http.Request) {
 			m.t.Errorf("tunnel_secret looks wrong: %q", s)
 		}
 		name, _ := body["name"].(string)
-		tun := map[string]any{"id": "tun-" + name, "name": name, "account_tag": "acct1"}
+		// A REAL tunnel id is new on every creation, and that matters: a
+		// deleted-and-recreated tunnel must not be mistaken for the one it
+		// replaced. The first creation of a name keeps the readable id the
+		// other tests assert on; later ones are distinct.
+		m.creates[name]++
+		id := "tun-" + name
+		if n := m.creates[name]; n > 1 {
+			id = fmt.Sprintf("tun-%s-%d", name, n)
+		}
+		tun := map[string]any{"id": id, "name": name, "account_tag": "acct1"}
 		m.tunnels[name] = tun
 		m.ok(w, tun)
 
@@ -321,6 +332,9 @@ func TestMissingDomainIsRefused(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "domain is required") {
 		t.Fatalf("a domainless cloudflare config must be refused, got: %v", err)
 	}
+	// C4 on ngrok: a domainless PERMANENT ngrok config is a mistake, not an
+	// invitation to hand back a hostname that changes on every restart. The
+	// ephemeral rung exists, but only when it is asked for by name.
 	_, err = newNgrok(NgrokOptions{Port: 21118}, func(string, ...any) {}, &redactor{})
 	if err == nil || !strings.Contains(err.Error(), "domain is required") {
 		t.Fatalf("a domainless ngrok config must be refused, got: %v", err)

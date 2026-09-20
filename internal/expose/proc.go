@@ -40,6 +40,14 @@ type procSpec struct {
 	// probe is reported, never acted on: the tunnel edge rate-limiting us is
 	// not a reason to kill a working process.
 	HealthInterval time.Duration
+
+	// Print is what this provider CREATES outside the process, declared up
+	// front so teardown is symmetric with creation even when creation was
+	// interrupted (see Footprint).
+	Print Footprint
+	// Teardown removes Print. nil means there is nothing to remove, which is
+	// the honest answer for every ephemeral provider.
+	Teardown func(ctx context.Context, logf func(format string, args ...any)) error
 }
 
 // procTunnel supervises one external process: it restarts it with backoff when
@@ -87,6 +95,29 @@ func newProcTunnel(spec procSpec) *procTunnel {
 
 func (p *procTunnel) Name() string { return p.spec.Name }
 func (p *procTunnel) Mode() string { return p.spec.Mode }
+
+// Footprint is what this provider creates outside the process.
+func (p *procTunnel) Footprint() Footprint { return p.spec.Print }
+
+// Destroy stops the process and then removes exactly what Footprint declares.
+//
+// Stopping FIRST is not tidiness: Cloudflare refuses to delete a tunnel that
+// still has a connector registered, so a Destroy that raced its own process
+// would delete the DNS record and orphan the tunnel — the precise half-teardown
+// this is meant to prevent. It is idempotent at both halves: Stop is a no-op
+// the second time, and every Teardown re-reads the world and treats "already
+// absent" as success.
+func (p *procTunnel) Destroy(ctx context.Context, logf func(string, ...any)) error {
+	if logf == nil {
+		logf = p.spec.Log
+	}
+	_ = p.Stop()
+	if p.spec.Teardown == nil {
+		logf("%s: nothing to destroy — %s", p.spec.Name, p.spec.Print.Describe())
+		return nil
+	}
+	return p.spec.Teardown(ctx, logf)
+}
 
 // Launch starts the supervision loop. It returns as soon as the first process
 // has been spawned; use WaitForURL to block until a public URL is known.

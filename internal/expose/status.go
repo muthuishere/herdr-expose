@@ -36,17 +36,6 @@ type Status struct {
 	LastError string    `json:"last_error,omitempty"`
 }
 
-// tunnel is what the Manager supervises: a built-in process-backed provider or
-// a JS adapter. Stop must always be idempotent.
-type tunnel interface {
-	Name() string
-	Mode() string
-	Launch(ctx context.Context) error
-	WaitForURL(ctx context.Context, timeout time.Duration) (string, error)
-	Snapshot() Status
-	Stop() error
-}
-
 // probe does a liveness GET against <url>/healthz. Only a 200 counts: the
 // Cloudflare edge answers 502/530 with a perfectly good HTTP response while the
 // tunnel is not actually routing, and "the process started" is not "the tunnel

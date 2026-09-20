@@ -52,6 +52,16 @@ import (
 // pairing code is shown ONLY on the physically-present machine: no HTTP
 // endpoint mints or displays one. A neighbour on the wifi can reach the port
 // and gets nowhere without looking at the owner's screen.
+// quickBinary names the helper the ephemeral rung needs for the selected
+// provider, so that `--quick --provider ngrok` checks for ngrok rather than
+// silently checking for cloudflared and reporting the wrong missing tool.
+func quickBinary(e config.Expose) (bin, label string) {
+	if e.Provider() == config.ProviderNgrok {
+		return "ngrok", "ngrok"
+	}
+	return "cloudflared", "cloudflare"
+}
+
 const (
 	ModeCloudflare = config.ModeCloudflare
 	ModeQuick      = config.ModeQuick
@@ -151,19 +161,29 @@ func Resolve(e config.Expose, port int, binaryFound func(string) bool) Resolutio
 
 	// Quick (AMENDMENTS 15) is checked FIRST and is deliberately unreachable
 	// from the config file: `Quick` has no TOML key, so only `share --quick`
-	// can set it. There is nothing to provision — no zone, no DNS record, no
-	// API token — so the only question is whether cloudflared is installed.
+	// can set it.
+	//
+	// It is a RUNG, not a cloudflare spelling: "the ephemeral tunnel of
+	// whichever provider was selected". cloudflared's TryCloudflare and
+	// ngrok's unreserved tunnel are the same rung — a throwaway public
+	// hostname with nothing reserved, nothing provisioned in an account and
+	// nothing to clean up — so a user who picks ngrok gets the same ladder,
+	// and the same guarantees, as one who picks cloudflare. There is nothing
+	// to provision either way, so the only question is whether the selected
+	// provider's binary is installed.
 	if e.Quick {
-		if binaryFound("cloudflared") {
+		bin, label := quickBinary(e)
+		if binaryFound(bin) {
 			r.Mode, r.Remote = ModeQuick, true
-			// The hostname is assigned by Cloudflare when the process starts
-			// and scraped from its output, so there is no URL to predict here.
+			// The hostname is assigned by the provider's edge when the process
+			// starts and scraped from its output, so there is no URL to
+			// predict here.
 			r.Bind, r.SecureContext, r.LANIP = config.BindLoopback, true, PrimaryLANIP()
 			return r
 		}
 		r.Mode = ModeLAN
-		r.FellBack = "cloudflared is not installed, so no quick tunnel can be started; " +
-			"falling back to LAN mode (install cloudflared to get a public https URL)"
+		r.FellBack = bin + " is not installed, so no quick tunnel can be started; " +
+			"falling back to LAN mode (install " + bin + " to get a public https URL from " + label + ")"
 	}
 
 	switch e.Provider() {

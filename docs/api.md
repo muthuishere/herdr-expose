@@ -70,8 +70,11 @@ bind address and whether you need a token.
 flag or config key, never automatically: the daemon defaults to `local`, a
 `share` defaults to `lan`, and nothing escalates above what was requested. A
 failed explicit request for a tunnel may degrade DOWN to `lan`, with the reason
-in `fell_back`. As a client, read `mode` and `secure_context` from
-`GET /v1/config` and `status`; never infer reach from the URL you were handed.
+in `fell_back`. As a client, read `mode` from `GET /v1/config`; never infer
+reach from the URL you were handed. **`secure_context` is NOT a field on
+`/v1/config`** — it is reported by `herdr-expose status`, `herdr-expose expose
+status --json` and `herdr-expose share list --json`, and in a browser you simply
+read `window.isSecureContext`.
 
 | mode | bind | device token | Origin + Host pinning | secure context |
 |---|---|---|---|---|
@@ -90,7 +93,8 @@ in `fell_back`. As a client, read `mode` and `secure_context` from
 - **`lan`** — bound to `0.0.0.0`, reachable by anyone on the wifi, and the
   **default for `herdr-expose share`** (AMENDMENTS 16). A device token is
   mandatory. **Plain HTTP on a LAN IP is not a secure context**, so
-  `status.secure_context` is `false`, **the service worker does not register and
+  `secure_context` is `false` in `status` / `share list --json`, **the service
+  worker does not register and
   the PWA cannot be installed**. Your client must detect this and not offer an
   install prompt that cannot work. A native mobile client is unaffected.
 - **`quick`** — loopback plus an ephemeral TryCloudflare tunnel on a random
@@ -108,7 +112,9 @@ in `fell_back`. As a client, read `mode` and `secure_context` from
   origin-bound device tokens, which is precisely why `quick` is confined to
   time-boxed shares.
 
-Read `mode` and `secure_context` from `/v1/config`; never infer them.
+Read `mode` from `/v1/config`; never infer it from the URL. For secure-context,
+use `window.isSecureContext` (browser) or the `secure_context` field of
+`herdr-expose status` / `share list --json` (tooling).
 
 A client author's obligations:
 
@@ -125,59 +131,109 @@ A client author's obligations:
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| `GET` | `/healthz` | none | Liveness |
-| `GET` | `/v1/config` | required | Client bootstrap. Contains no secrets. |
+| `GET` | `/healthz` | none (detail requires it) | Liveness |
+| `GET` | `/v1/config` | **none** | Client bootstrap. It is how you discover whether auth is required, so it can never require it. |
 | `POST` | `/v1/pair` | pairing code | Exchange a pairing code for a device token |
+| `GET` | `/v1/metrics` | required | Latency histograms for the budgeted paths |
 | `GET` | `/v1/stream` | required | WebSocket upgrade |
 | `GET` | `/*` | none | The embedded web app |
 
 ### `GET /healthz`
 
-Unauthenticated liveness. Use it to decide whether the server is up before
-showing a connection error.
+Liveness, and it answers **two different bodies** depending on who is asking.
+That is deliberate: an anonymous prober behind a tunnel learns only that
+something herdr-shaped is alive, while an authenticated client (or a loopback
+caller under the local-mode bypass, which is what `status` and `doctor` use)
+gets the operational detail.
 
 ```http
 GET /healthz HTTP/1.1
 ```
 
+Anonymous — exactly these two fields, and nothing else ever appears here:
+
 ```json
-{ "ok": true, "version": "0.1.0", "herdr_version": "0.9.0" }
+{ "ok": true, "api": "2" }
 ```
+
+Authenticated (`Authorization: Bearer <token>`), or from loopback in `local`
+mode:
+
+```json
+{
+  "ok": true,
+  "api": "2",
+  "version": "0.1.0",
+  "upstream": true,
+  "herdr_version": "0.9.0",
+  "herdr_protocol": 22,
+  "sessions": 3,
+  "sessions_connected": 2,
+  "tree_rev": 41,
+  "web_ui": true
+}
+```
+
+Present a token only when you have one: an anonymous probe is never logged as a
+rejection and consumes no rate-limit budget, whereas a probe carrying a dead
+token is.
 
 ### `GET /v1/config`
 
-Bootstrap for a connected client. **Never contains a token or any secret.**
+Bootstrap for a client. **Unauthenticated, and never contains a token or any
+secret.** Send your bearer token anyway when you have one — it is what makes
+`authenticated` meaningful.
 
 ```json
 {
   "api": "2",
-  "server_version": "0.1.0",
-  "herdr_version": "0.9.0",
-  "herdr_protocol": 22,
-  "features": ["binary_frames", "pairing", "expose"],
+  "version": "0.1.0",
+  "stream": "/v1/stream",
   "mode": "local",
-  "secure_context": true,
   "auth_required": false,
-  "public_url": null,
-  "limits": {
-    "max_frame_bytes": 65536,
-    "min_cols": 20,
-    "min_rows": 6
+  "authenticated": true,
+  "multi_session": true,
+  "targets": {
+    "format": "<session>/<pane_id>",
+    "separator": "/",
+    "default_session": "herdr-plugins"
   },
-  "ui": { "theme": "auto", "default_view": "grid" }
+  "limits": { "min_cols": 20, "min_rows": 6 },
+  "ui": { "theme": "auto", "default_view": "grid" },
+  "scope": "",
+  "exposure": { "url": "https://herdr.example.com", "healthy": true }
 }
 ```
 
-`mode` is `local`, `lan`, `quick` or `cloudflare`. `secure_context` is `false`
-only in `lan` mode — when it is, skip service-worker registration and hide any
-install affordance. `auth_required` is `false` only in `local` mode.
-`public_url` is the tunnel URL in `quick` and `cloudflare` mode and `null`
-otherwise; in `quick` mode it is assigned by the edge at start, so read it, do
-not remember it.
+- `mode` is `local`, `lan`, `quick`, `cloudflare`, `ngrok` or `js`.
+- **`auth_required` and `authenticated` are the two fields that matter most**,
+  and they exist for one reason: a browser **cannot read the status of a failed
+  WebSocket handshake**. The WebSocket API surfaces no close code when the
+  upgrade is rejected with `401`, so a client that only retries the socket can
+  never learn it needs to pair, and loops "reconnecting" forever. Read these
+  two before you open the socket. `auth_required` is `false` only in `local`
+  mode; `authenticated` reports whether the token you sent (if any) works.
+- `scope` is present and non-empty on a **share-scoped instance**
+  (`herdr-expose share`): it names the one session this instance can see. The
+  rest of the machine is not hidden from you, it is absent.
+- `exposure` is present only when a tunnel is up, and `exposure.url` is the
+  public URL. In `quick` mode the edge assigns that hostname at start, so read
+  it and do not remember it.
+- There is **no `features` array, no `secure_context` and no `public_url`** in
+  this body — earlier drafts of this document claimed all three. Secure-context
+  is something you determine yourself (`window.isSecureContext`, or simply:
+  plain HTTP on a LAN IP is not one); the public URL is `exposure.url`.
 
-`features` is an open-ended array of strings. **Ignore entries you do not
-recognise** — new capabilities are announced here rather than by bumping the API
-version.
+**Ignore fields you do not recognise.** New capabilities are announced by new
+fields here rather than by bumping the API version.
+
+### `GET /v1/metrics`
+
+Authenticated. Returns the measured latency histograms for the paths the
+performance budget names — decode-to-queued, queued-to-written — as
+`{"<name>_us": {...}}` objects. It tells a caller how busy the machine is,
+which is why it is not public. Its exact shape is diagnostic and may change;
+do not build a client feature on it.
 
 ---
 
@@ -188,7 +244,7 @@ There are **two kinds of secret**, with different jobs.
 | | Server token | Device token |
 |---|---|---|
 | What it authorises | talking to this instance at all | one specific device |
-| Where it comes from | generated at first run, shown by `herdr-expose status` | issued by pairing |
+| Where it comes from | generated at first run and printed **once**, on the daemon's first `serve` (it is stored only as a hash, so there is no way to show it again — `herdr-expose status` does NOT print it) | issued by pairing |
 | Lifetime | until rotated | sliding 30 days from last use |
 | Revocable individually | no | yes |
 
@@ -292,8 +348,16 @@ error to probe which codes exist.
 
 Pairing parameters, all enforced server-side:
 
-- Code is **6 characters**, single-use, **TTL 10 minutes**.
-- Attempts are **rate-limited per source address**. Expect `429`.
+- Code is **6 characters** from Crockford base32
+  (`0123456789ABCDEFGHJKMNPQRSTVWXYZ` — no `I`, `L`, `O` or `U`, so it survives
+  being read aloud), single-use, **TTL 10 minutes**.
+- **Comparison is case-insensitive and whitespace-trimmed.** Uppercase it for
+  display; accept whatever the user types.
+- Attempts are **rate-limited per source address**, and a rate-limited attempt
+  returns the same bare **`401`** as a wrong code — not a `429`. That is
+  deliberate: a distinguishable response is an oracle. Back off on repeated
+  `401`s rather than waiting for a status that will not come. (`429` exists,
+  but on the WebSocket handshake, not here.)
 - Device token is 32 random bytes, base64url-encoded.
 - **Sliding 30-day expiry**: every successful use extends `expires_at`. A device
   used weekly never needs re-pairing; one left in a drawer expires.
@@ -301,9 +365,12 @@ Pairing parameters, all enforced server-side:
 
 ### Revocation
 
-`herdr-expose status` lists devices with user-agent and last-seen IP — never the
-token or its hash — and revokes them individually. A revoked device's next
-request gets `401`; its open WebSocket is closed with code `4401`.
+`herdr-expose devices` lists devices with user-agent and last-seen IP — never
+the token or its hash — and `herdr-expose devices --revoke <id>` revokes one.
+(`herdr-expose status` also lists them, as part of a wider report.) A revoked
+device's next request gets `401`. Its **already-open WebSocket is not
+proactively closed** with an application code — see
+[Reconnection](#reconnection) for how a client detects this reliably.
 
 ### Browser-specific hardening
 
@@ -336,8 +403,10 @@ The full inventory, and it is exactly this — there is nothing else on the wire
 
 ```
 control (JSON text)
-  client -> server   hello · subscribe · unsubscribe · viewport · resize · command · ping
-  server -> client   welcome · tree · agent · closed · result · pong
+  client -> server   hello · subscribe · unsubscribe · viewport · resize ·
+                     repaint · scroll · seen · command · ping
+  server -> client   welcome · tree · agent · geometry · transcript ·
+                     closed · result · error · pong
 
 data (binary)
   server -> client   1 = frame · 2 = snapshot · 3 = gap
@@ -401,46 +470,89 @@ arrives.
 Declare interest in targets. A `target` is a **session-qualified** Herdr pane
 identifier, ASCII, exactly as it appears in `tree`: `<session>/<pane_id>`.
 
+**`subscribe` and `viewport` are the same message.** The server handles them
+identically, and `data.targets` is an **object mapping target to render mode**,
+not an array. A `subscribe` carrying an array is parsed as an empty map and
+does nothing at all — silently, with no error frame — which is the single
+easiest way to build a client that connects, renders a tree and then shows a
+blank pane forever.
+
 ```json
-{ "type": "subscribe",   "data": { "targets": ["herdr-plugins/w1:p1", "crypto-desk/w1:p1"] } }
+{ "type": "subscribe", "data": { "targets": {
+  "herdr-plugins/w1:p1": "transcript",
+  "crypto-desk/w1:p1":   "summary"
+}}}
 ```
+
+The map is the **complete** statement of what this connection is rendering;
+anything absent from it is dropped to `none`. `unsubscribe` is sugar for
+setting those targets to `none`, and it is the one place a plain array is
+correct:
 
 ```json
 { "type": "unsubscribe", "data": { "targets": ["crypto-desk/w1:p1"] } }
 ```
 
-#### `resize` — required before the first frame
-
-Terminal geometry, **per target, per connection**.
+#### `resize` — NOT required, and it mutates the pane for everyone
 
 ```json
 { "type": "resize", "data": { "target": "herdr-plugins/w1:p1", "cols": 80, "rows": 24 } }
+```
+
+> **Looking must not touch.** Earlier drafts of this document said `resize` was
+> required before the first frame and that a target with no geometry produced no
+> output. **Both were withdrawn** (SPEC AMENDMENTS 14). They were what made
+> merely opening a pane in a browser declare a size for it — SIGWINCHing the
+> owner's agent into throwing away the screen you opened it to read, under their
+> hands, while they were typing in it. `welcome.geometry.resize_required` is
+> `false` on the wire for exactly this reason.
+
+- **You do not send `resize` to view a pane.** A `live` attach passes no size
+  upstream, Herdr uses the pane's own geometry and reports it, and the server
+  relays it to you as a [`geometry`](#geometry) control frame. Render **at** that
+  grid and scale your font to fit your box.
+- `resize` is the **explicit, user-initiated "fit this pane to my window"
+  action**, and it is the only thing in this product that changes a pane for
+  every client attached to it, including the owner's local terminal.
+  `welcome.geometry.resize_mutates_pane` is `true`. **Confirm with the user
+  before you send one.**
+- **`{"match": true}` gives the geometry back** to the pane — it is the undo, and
+  it is how you leave a pane as you found it. A zero or negative `cols`/`rows`
+  means the same thing.
+
+```json
+{ "type": "resize", "data": { "target": "herdr-plugins/w1:p1", "match": true } }
 ```
 
 - **Floor: 20 cols by 6 rows.** Smaller values are clamped.
 - Geometry is **per connection**. Your phone at 40 columns does not resize the
   laptop looking at the same pane; each connection gets its own upstream stream
   with its own size.
-- **A target with no geometry produces no output.** Send `resize` before, or
-  immediately after, `subscribe` — before you expect the first frame.
-- Send it again on every layout change (rotation, soft keyboard, window resize).
-  Coalesce: one `resize` per settled layout, not one per animation frame.
+- A `resize` for a `transcript` target is **dropped**: a transcript declares no
+  geometry, and that is the entire point of the mode.
 - Geometry must be derived from **measured cell metrics**, not from a CSS
   transform and not from browser zoom. Client-local font size must never change
   the PTY size.
 
 #### `viewport`
 
-Declare what you are **rendering**. This is a statement, not a request — see
+Declare what you are **rendering**. Identical in shape and handling to
+`subscribe` — the two names exist for readability, not for different behaviour.
+This is a statement, not a request; see
 [section 8](#8-viewport-modes-and-geometry).
 
 ```json
 { "type": "viewport", "data": { "targets": {
   "herdr-plugins/w1:p1": "live",
   "herdr-plugins/w1:p2": "summary",
-  "crypto-desk/w3:p1":   "summary"
+  "crypto-desk/w3:p1":   "transcript"
 }}}
 ```
+
+Valid modes are `live`, `transcript`, `summary` and `none`. **An unrecognised
+mode string is read as `none`**, so a typo is a silently blank pane — the
+server never rejects it. The modes are also enumerated on the wire in
+`welcome.viewport.modes`, which is the authoritative list.
 
 #### `repaint`
 
@@ -459,6 +571,44 @@ has no grid to be misaligned with.
 
 Rate-limit yourself. The server does not throttle this, and a repaint loop is
 indistinguishable from flicker.
+
+#### `scroll`
+
+Scroll a target's **own** buffer, for a client that holds control.
+
+```json
+{ "type": "scroll", "data": { "target": "herdr-plugins/w1:p1", "delta": -10 } }
+```
+
+`delta` is in lines; negative scrolls back. On failure the server replies with
+an [`error`](#error) frame carrying `code: "scroll_failed"` — there is no
+`result`, because a `scroll` carries no `id`.
+
+**Scroll is dropped under backpressure.** If your connection is backlogged the
+server discards `scroll` and keeps delivering keystrokes. That is the policy in
+both directions: degrade scrolling, never typing.
+
+A viewer with no control scrolls their **own** local scrollback and sends
+nothing. `pane.scroll` moves the shared viewport for everybody attached — it is
+not on the read path and must not be put there.
+
+#### `seen`
+
+Clear the `done` badge for one target, **for this connection only**.
+
+```json
+{ "type": "seen", "data": { "target": "herdr-plugins/w1:p1" } }
+```
+
+This is the **only** way to mark a pane seen, and a fresh `tree` follows
+immediately with the recomputed `done`. Send it when the user actually looks at
+a pane.
+
+**Do not use `pane.focus` or `agent.focus` for this.** Herdr's own focus marks
+panes seen *globally*, which would wipe the machine owner's Done badges from
+under them — a remote viewer glancing at a pane is not the owner having dealt
+with it. Unseen state lives per connection inside this server and never leaves
+it.
 
 #### `command`
 
@@ -505,16 +655,65 @@ the socket out.
 
 First server message after `hello`.
 
+`welcome` is **self-describing on purpose**: the framing, the limits, the
+geometry contract and the render modes are all stated on the wire so a
+hand-written client never has to infer them from this page. Read them from
+`welcome` rather than hardcoding the values below.
+
 ```json
 { "seq": 1, "type": "welcome", "data": {
+  "protocol": "v2",
   "api": "2",
+  "session": "c_01HQ8R2K9M",
+  "connection_id": "c_01HQ8R2K9M",
   "server_version": "0.1.0",
   "herdr_version": "0.9.0",
   "herdr_protocol": 22,
-  "connection_id": "c_01HQ8R2K9M",
-  "features": ["binary_frames", "expose"]
+  "identity": { "kind": "device", "name": "Pixel 8" },
+  "binary": {
+    "server_header": "type:u8 seq:u64be tlen:u16be target:ascii payload:raw",
+    "client_header": "type:u8 tlen:u16be target:ascii payload:raw",
+    "types": { "frame": 1, "snapshot": 2, "gap": 3, "input": 16 }
+  },
+  "limits": { "min_cols": 20, "min_rows": 6, "max_write_bytes": 65536 },
+  "geometry": {
+    "frame": "geometry",
+    "defaults_to_pane": true,
+    "resize_required": false,
+    "resize_mutates_pane": true,
+    "match_supported": true,
+    "sources": ["pane", "client"]
+  },
+  "viewport": {
+    "modes": ["live", "transcript", "summary", "none"],
+    "transcript": {
+      "plane": "control", "frame": "transcript", "geometry": false,
+      "ansi_stripped": true, "interval_ms": 1000, "sends_on_change": true,
+      "sources": ["recent_unwrapped", "detection"], "is_screen_buffer": true
+    }
+  },
+  "scope": "",
+  "targets": {
+    "format": "<session>/<pane_id>", "separator": "/",
+    "multi_session": true, "default_session": "herdr-plugins"
+  }
 }}
 ```
+
+- `protocol` is **this wire's** version (`"v2"`); `herdr_protocol` is
+  **upstream Herdr's** (`22`). They are unrelated numbers and confusing them is
+  a classic first-day bug.
+- `session` and `connection_id` are the same value — this connection's id, not a
+  Herdr session name.
+- `identity.kind` is `device` for a paired client and `local` for one admitted
+  by the loopback bypass.
+- **`geometry.resize_required` is `false` and `geometry.resize_mutates_pane` is
+  `true`.** Honour both; see [`resize`](#resize--not-required-and-it-mutates-the-pane-for-everyone).
+- `scope` is non-empty only on a share-scoped instance, and names the one
+  session it can see.
+- There is **no `features` array in `welcome`** — an earlier draft claimed one.
+  Capability discovery is the `binary` / `geometry` / `viewport` / `targets`
+  objects above.
 
 Surface `herdr_version` somewhere in your UI. When Herdr is upgraded under a
 client, this is the only visible sign before things start parsing oddly.
@@ -627,8 +826,10 @@ Client rules:
 
 - **Render `done`. Do not recompute it**, and do not cache it as a property of
   the pane shared across connections.
-- A pane is marked seen for your connection when **the user focuses it** — reads
-  do not mark seen. Focus travels as a `command`.
+- A pane is marked seen for your connection when you send the
+  [`seen`](#seen) control frame — reads do not mark seen, and neither does
+  rendering. **Never call `pane.focus` / `agent.focus` to do it**: Herdr's focus
+  marks the pane seen globally and would wipe the machine owner's own badges.
 - A new connection starts with currently-idle panes already seen, so you will not
   open to a wall of stale badges.
 
@@ -644,10 +845,19 @@ Response to a `command`, correlated by `id`.
 
 ```json
 { "seq": 89, "type": "result", "data": {
-  "id": "c-18", "ok": false,
-  "error": { "code": "CONTROL_HELD", "message": "another client holds control" }
+  "id": "c-18", "session": "herdr-plugins", "ok": false,
+  "error": "unknown or disconnected herdr session: crypto-desk"
 }}
 ```
+
+**`error` on a `result` is a plain STRING, not an object.** There is no `code`
+and no `message` field to read — an earlier draft of this document claimed a
+`{code, message}` object with a fixed code vocabulary, and a client that does
+`result.error.message` gets `undefined`. Render the string.
+
+`result.result` is Herdr's own reply, passed through verbatim and unvalidated.
+`result.session` echoes the session the call was dispatched to, which is worth
+showing when you did not name one explicitly.
 
 #### `closed`
 
@@ -657,17 +867,66 @@ A target is gone: the pane exited, or control was lost.
 { "seq": 120, "type": "closed", "data": { "target": "herdr-plugins/w1:p1", "reason": "exited" } }
 ```
 
-`reason` is one of `exited`, `released`, `error`, `upstream_lost`. Stop rendering
-that target; a `tree` reflecting the removal follows.
+**`reason` is free text for a human, not an enum.** It is Herdr's own close
+reason, or this server's explanation of why a stream could not be kept alive
+(e.g. `upstream stream could not be kept alive after 5 restarts: ...`). An
+earlier draft of this document listed four fixed values; do not switch on it.
+Stop rendering that target, show the reason, and expect a `tree` reflecting the
+removal.
+
+#### `geometry`
+
+The size a `live` target is actually being streamed at, and **where that size
+came from**. Sent when a stream attaches and whenever the size changes.
+
+```json
+{ "seq": 44, "type": "geometry", "data": {
+  "target": "herdr-plugins/w1:p1",
+  "cols": 120,
+  "rows": 40,
+  "source": "pane"
+}}
+```
+
+- `source: "pane"` — we attached with **no** size, Herdr used the pane's own
+  geometry and reported it back. **Nothing of the user's moved.** This is the
+  normal case, and it is what makes opening a pane non-destructive.
+- `source: "client"` — somebody explicitly sent a `resize`, so the pane is now
+  that size **for everyone attached to it**, including the owner's local
+  terminal.
+
+Render at `cols` x `rows` and scale your font to fit your box. Never resize the
+pane to fit the browser. Surfacing `source` in the UI is worth it: it is the
+difference between "you are watching" and "you moved somebody's terminal".
+
+#### `error`
+
+An out-of-band failure on a message that carried no `id`, so there is no
+`result` to put it in.
+
+```json
+{ "seq": 91, "type": "error", "data": {
+  "target": "herdr-plugins/w1:p1",
+  "code": "input_failed",
+  "detail": "target is not live"
+}}
+```
+
+Current codes are `input_failed` (binary input to a target that cannot take it —
+a `transcript` target refuses raw bytes; use `agent.prompt` or `agent.send_keys`
+instead) and `scroll_failed`. **More will appear.** Show `detail` and carry on;
+never treat an unknown `code` as fatal.
 
 #### `pong`
 
 ```json
-{ "seq": 90, "type": "pong", "data": { "t": 1789459200123 } }
+{ "seq": 90, "type": "pong", "data": { "t": 1789459200123, "server_t": 1789459200140 } }
 ```
 
-RTT is `now - t`. Show a degraded indicator above ~250ms rather than pretending
-everything is fine.
+`t` is **your** value echoed back verbatim, so RTT is `now - t` and needs no
+clock synchronisation. `server_t` is the server's wall clock in milliseconds,
+for a clock-skew readout; do not use it to compute RTT. Show a degraded
+indicator above ~250ms rather than pretending everything is fine.
 
 ---
 
@@ -707,6 +966,10 @@ protobuf.
 - Maximum payload is 64KB; longer output arrives as multiple frames.
 
 ### Worked example
+
+> The hex below uses the short target `w1:p1` to keep the byte counts readable.
+> **On the wire every target is session-qualified** (`herdr-plugins/w1:p1`), so
+> a real frame's `tlen` is larger by `len(session) + 1`. Nothing else changes.
 
 A `frame` on target `w1:p1` carrying the four bytes `l`, `s`, CR, LF, with
 `seq = 258`:
@@ -860,9 +1123,18 @@ Your unseen set (for DONE) is client-side and survives your own reconnect
 whenever you choose to keep it. A brand-new install should treat currently-idle
 panes as already seen, so the app does not open with a wall of stale badges.
 
-**Close codes.** `1000` normal, `1001` server shutting down, `4401` token revoked
-or expired — wipe the stored token and return to pairing, do not retry — `4429`
-rate-limited, back off hard.
+**Close codes.** Do not build logic on them. Authentication is enforced
+**before** the upgrade — a bad, revoked or expired token gets an HTTP `401` and
+the socket is never established — and the server closes a live connection
+abruptly rather than sending an application close code. There is no `4401` and
+no `4429` on this wire today, despite an earlier draft of this document
+promising both.
+
+So the reliable way to tell "re-pair" from "network down", on every reconnect,
+is: **re-read `GET /v1/config` and look at `auth_required` / `authenticated`.**
+That endpoint needs no auth precisely so this check always works. `401` from it,
+or `authenticated: false` while `auth_required: true`, means wipe the stored
+token and return to pairing.
 
 ---
 
@@ -878,6 +1150,14 @@ and pinning a laptop's CPU, and it is not negotiable from the client side.
 | `summary` | periodic `snapshot` frames at 1-2 Hz | shared across clients |
 | `transcript` | `transcript` **control-plane** frames at ~1Hz, on change only | shared across clients, **no geometry** |
 | `none` | nothing but control-plane state | free |
+
+**`transcript` is the right default for every pane, agent or not** (SPEC
+AMENDMENTS 14 K2). A shell is output like any other output and reads fine as
+text, and a transcript never attaches to the pane, so opening one is provably
+non-destructive. Offer `live` as an opt-in the user takes deliberately, having
+been told in one line what it costs — that is what the shipped web UI does
+(consent per pane, per session). A client that opens everything `live` by
+default recreates the exact problem this mode exists to prevent.
 
 Rules a client must honour:
 
@@ -976,7 +1256,7 @@ Commonly useful:
 { "type": "command", "data": {
   "id": "c-31",
   "method": "agent.read",
-  "params": { "pane_id": "w1:p1", "source": "detection" }
+  "params": { "pane_id": "herdr-plugins/w1:p1", "source": "detection" }
 }}
 ```
 
@@ -998,24 +1278,40 @@ HTTP:
 | `401` | missing, invalid, expired or revoked token |
 | `403` | origin not allowlisted, or `Host` did not match the pinned value |
 | `404` | no such route |
-| `429` | rate-limited (pairing attempts, handshakes) |
-| `503` | server up, Herdr socket unavailable |
+| `405` | wrong method (a non-`POST` to `/v1/pair`) |
+| `429` | rate-limited — the **WebSocket handshake** only; a rate-limited pairing attempt returns `401` |
 
-```json
-{ "error": { "code": "invalid_token", "message": "token not recognised" } }
-```
+HTTP error bodies are **plain text**, not JSON — `unauthorized`,
+`forbidden origin`, `forbidden host`, `origin required`, `bad request`,
+`method not allowed`. Read the status code; the body is for a human reading a
+curl transcript. Do not write a JSON parser for it, and in particular do not
+expect an `{"error": {...}}` envelope, which an earlier draft of this document
+showed.
 
-Control plane, in a `result` with `"ok": false`:
+There is no `503`: when the Herdr socket is down the HTTP surface still answers
+and the condition shows up as `connected: false` in `tree` and `upstream: false`
+in an authenticated `/healthz`.
 
-| `code` | Meaning |
-|---|---|
-| `CONTROL_HELD` | another client holds control; retry with explicit takeover |
-| `NO_SUCH_TARGET` | the target is gone (a `tree` update is coming) |
-| `UPSTREAM_ERROR` | Herdr returned an error; `message` carries it verbatim |
-| `UPSTREAM_DOWN` | the Herdr socket is disconnected; retry after reconnect |
-| `BAD_REQUEST` | malformed frame or parameters |
+Control plane, two shapes and they are **not** the same:
 
-Unrecognised codes will appear over time. Show `message` and carry on.
+| Frame | Field | Type | When |
+|---|---|---|---|
+| `result` with `"ok": false` | `error` | **string** | a `command` failed — it carried an `id`, so the failure comes back correlated |
+| `error` | `code` + `detail` | strings | `scroll` or binary `input` failed — neither carries an `id`, so there is nowhere else to put it |
+
+A `result.error` string is either this server's own message (scope refusal,
+`unknown or disconnected herdr session: <name>`, a 15-second call timeout) or
+Herdr's error text passed through verbatim. **There is no code vocabulary and
+no machine-readable classification.** Match on it at your peril; show it to the
+user instead.
+
+`error` frame codes today are `input_failed` and `scroll_failed`. More will
+appear. Show `detail` and carry on.
+
+A **scoped instance** (`herdr-expose share`) refuses out-of-scope methods and
+out-of-scope sessions here, as an `ok: false` result. That refusal is the
+server enforcing the share's boundary — it is not a transient failure and
+retrying will not help.
 
 ---
 
@@ -1044,8 +1340,8 @@ For as long as `/v1` is served:
 - **New `type` bytes** in the binary plane. **Ignore any binary frame whose type
   byte you do not recognise** — the header is fixed, so you can always skip it
   cleanly.
-- **New entries in `features`** on `/v1/config` and `welcome`, and new values of
-  `mode`.
+- **New fields on `/v1/config` and `welcome`**, and new values of `mode`. There
+  is no `features` array; capabilities are announced as new fields.
 - Anything under `/*` — the embedded web app is not API surface.
 
 ### Client requirements
@@ -1062,8 +1358,8 @@ A conforming client **must**:
 ### Breaking changes
 
 A breaking change is `/v2`, served **alongside** `/v1` from the same binary. `v1`
-keeps working. When `v2` exists it will be announced in `features` and in
-`welcome`, so a client can detect it without a probe.
+keeps working. When `v2` exists it will be announced in the `api` field of
+`/v1/config` and `welcome`, so a client can detect it without a probe.
 
 The likely shape of `v2` is protobuf on both planes, and it will happen only when
 a second independently-built client makes codegen pay for itself, not before.
@@ -1074,15 +1370,20 @@ Until then this document is the schema.
 ## 12. A minimal client, end to end
 
 ```js
-// 1. bootstrap. In local mode cfg.auth_required is false and the header is
-//    simply ignored; in lan, quick and cloudflare mode a device token is
-//    mandatory.
+// 1. bootstrap. /v1/config needs NO auth - it is how you find out whether auth
+//    is required at all. Send the token anyway if you have one, so that
+//    `authenticated` means something.
 const auth = token ? { Authorization: `Bearer ${token}` } : {};
 const cfg  = await fetch("/v1/config", { headers: auth }).then(r => r.json());
 
+// These two fields are the only way to tell "pair me" from "network down":
+// a browser cannot read the status of a REJECTED WebSocket upgrade.
+if (cfg.auth_required && !cfg.authenticated) return showPairingScreen();
+
 // lan mode is plain HTTP on a LAN IP: not a secure context, so no service
-// worker and no install prompt. Check, do not assume.
-if (!cfg.secure_context) hideInstallPrompt();
+// worker and no install prompt. There is no secure_context field on /v1/config
+// - ask the browser.
+if (!window.isSecureContext) hideInstallPrompt();
 
 // 2. connect
 const q  = token ? `?token=${token}` : "";
@@ -1091,16 +1392,22 @@ ws.binaryType = "arraybuffer";
 
 ws.onopen = () => send({ type: "hello", data: { client: "demo", protocol: 1 } });
 
+let grid = {};                                  // target -> {cols, rows}
+
 ws.onmessage = (ev) => {
   if (typeof ev.data === "string") {
     const msg = JSON.parse(ev.data);
     switch (msg.type) {
-      case "welcome": break;
-      case "tree":    render(msg.data); break;   // render done, do not recompute
-      case "agent":   agentUpdate(msg.data); break;
-      case "pong":    rtt = Date.now() - msg.data.t; break;
-      case "closed":  drop(msg.data.target); break;
-      case "result":  resolve(msg.data.id, msg.data); break;
+      case "welcome":  readContract(msg.data); break;  // limits, modes, framing
+      case "tree":     render(msg.data); break;        // render done, never recompute
+      case "agent":    agentUpdate(msg.data); break;
+      case "geometry": // the PANE's size, reported to us. Render AT it.
+                       grid[msg.data.target] = msg.data; fitFont(msg.data); break;
+      case "transcript": showText(msg.data); break;    // plain text, NOT for an emulator
+      case "pong":     rtt = Date.now() - msg.data.t; break;
+      case "closed":   drop(msg.data.target); break;
+      case "result":   resolve(msg.data.id, msg.data); break;
+      case "error":    toast(msg.data.code, msg.data.detail); break;
       // anything else: ignore, on purpose
     }
     return;
@@ -1112,13 +1419,25 @@ ws.onmessage = (ev) => {
   // unknown type byte: ignore
 };
 
-// 3. attach to a pane - resize BEFORE you expect output
-function attach(target, cols, rows) {
-  send({ type: "subscribe", data: { targets: [target] } });
-  send({ type: "resize",    data: { target, cols: Math.max(20, cols),
-                                            rows: Math.max(6, rows) } });
-  send({ type: "viewport",  data: { targets: { [target]: "live" } } });
+// 3. attach to a pane. `targets` is an OBJECT of target -> mode. An array is
+//    parsed as an empty map and silently does nothing.
+//    NO resize: that would move the pane for everyone attached, including the
+//    person sitting at the machine. Wait for the `geometry` frame instead.
+function attach(target, mode = "transcript") {
+  send({ type: "subscribe", data: { targets: { [target]: mode } } });
 }
+
+// The ONLY thing that changes a pane for everybody. Ask the user first, and
+// offer the undo.
+function fitToMyWindow(target, cols, rows) {
+  send({ type: "resize", data: { target, cols: Math.max(20, cols),
+                                         rows: Math.max(6, rows) } });
+}
+const giveItBack = (target) => send({ type: "resize", data: { target, match: true } });
+
+// Clear this connection's `done` badge. Never pane.focus - that marks the pane
+// seen for the machine's owner too.
+const markSeen = (target) => send({ type: "seen", data: { target } });
 
 // 4. type - binary, no JSON on this path
 function input(target, bytes) {
@@ -1135,11 +1454,17 @@ function input(target, bytes) {
 const send = (o) => ws.send(JSON.stringify(o));
 ```
 
-That is a working client. Everything beyond it — summary tiles, the
-blocked-agent Q&A view, a mobile key bar — is presentation built on the same five
-message kinds.
+That is a working client, and the three lines most likely to be wrong in one
+that is not are all above: `targets` is an **object**, `/v1/config` takes **no
+auth**, and you **do not send `resize`** to look at something. Everything
+beyond this — summary tiles, the blocked-agent Q&A view, a mobile key bar — is
+presentation built on the same message kinds.
 
 ---
 
-See also: [`adr/`](adr/) for why each of these decisions was made, and
-[`ATTRIBUTION.md`](ATTRIBUTION.md) for prior art this design learned from.
+See also: [`adr/`](adr/) for why each of these decisions was made,
+[`troubleshooting.md`](troubleshooting.md) for the failures that look like bugs
+and are not, and [`ATTRIBUTION.md`](ATTRIBUTION.md) for prior art this design
+learned from.
+
+herdr-expose is MIT-licensed; see [`../LICENSE`](../LICENSE).
