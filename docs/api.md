@@ -196,10 +196,7 @@ secret.** Send your bearer token anyway when you have one — it is what makes
   "targets": {
     "format": "<session>/<pane_id>",
     "separator": "/",
-    "default_session": "herdr-plugins"   // AUTHENTICATED ONLY - omitted for an
-                                         // unauthenticated caller, along with
-                                         // "scope". They tell a scanner what is
-                                         // behind a public URL.
+    "default_session": "herdr-plugins"
   },
   "limits": { "min_cols": 20, "min_rows": 6 },
   "ui": { "theme": "auto", "default_view": "grid" },
@@ -207,6 +204,13 @@ secret.** Send your bearer token anyway when you have one — it is what makes
   "exposure": { "url": "https://herdr.example.com", "healthy": true }
 }
 ```
+
+> **`/v1/config` is two-tier, like `/healthz`.** `scope` and
+> `targets.default_session` are **omitted for an unauthenticated caller** — on a
+> public URL they tell a scanner which session is behind it. `auth_required`,
+> `authenticated`, `targets.format` and `targets.separator` are always present,
+> because a client needs them *before* it can pair. Do not treat a missing
+> `scope` as "one session": it means either unauthenticated, or no restriction.
 
 - `mode` is `local`, `lan`, `quick`, `cloudflare` or `js` (`js` is a JS
   adapter — the escape hatch for any transport that is not built in).
