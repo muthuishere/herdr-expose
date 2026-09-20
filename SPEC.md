@@ -1050,3 +1050,60 @@ some unrelated structural event happened to fire a resync. The hub now re-reads
 the tree every 1.5s **while at least one client is connected**, and not at all
 otherwise — `session.snapshot` is read-only, and an empty room generates no
 upstream traffic.
+
+---
+
+# AMENDMENTS 15 — quick tunnels come back, for SHARES only
+
+Owner: "sometimes just cloudflare is enough and sometimes domain."
+
+AMENDMENTS 3 (C1) deleted the quick-tunnel path outright. That was right for the
+PERMANENT deployment and wrong as a blanket rule. The objections — a hostname
+that changes on restart breaks PWA install, bookmarks and origin-bound device
+tokens — are all about an endpoint you return to daily. A share is disposable by
+construction, so none of them bind.
+
+Cloudflare's own description of TryCloudflare is the share contract almost word
+for word: no account, no DNS, no open ports, ~3s setup, automatic HTTPS and edge
+DDoS mitigation, "ephemeral by design — the tunnel dies with the process,
+nothing to revoke, nothing to clean up."
+
+## K1. Three share transports, one ladder
+
+```
+herdr-expose share --lan                 http://<lan-ip>:<port>     no internet
+herdr-expose share --quick               https://<random>.trycloudflare.com
+herdr-expose share --domain x.you.com    https://x.you.com          stable, your zone
+```
+
+Auto (no flag) resolves: `--domain` if `[share].domain_suffix` or `[expose].domain`
+gives a usable hostname AND cloudflared resolves -> else `--quick` if cloudflared
+resolves -> else `--lan`. Print one line naming the choice and the reason.
+
+**`--quick` should be the default for a share on a machine with no configured
+domain**, because it is the only transport that works with zero setup, zero
+account and zero cleanup. It also removes today's hard limitation that a share
+requires a zone in the owner's Cloudflare account — with `--quick`, anyone can
+run this.
+
+## K2. What stays true for a quick share
+
+Scope enforced server-side, pairing required, time-boxed with the same three-way
+expiry, `share list/extend/pair/revoke/restore` all identical. A quick tunnel is
+on the public internet, so it is NOT more trusted than a domain share.
+
+Teardown is simpler, not weaker: no DNS record and no named tunnel exist, so
+expiry stops the process and wipes the state. Nothing to delete in Cloudflare,
+and `revoke --all` must handle lan + quick + domain shares in one pass.
+
+## K3. Say the trade-off out loud
+
+A quick share's hostname is new every time, so **device tokens do not carry
+over** — they are origin-bound. Each quick share needs a fresh pairing scan.
+That is fine for a throwaway and unacceptable for the daily driver, which is
+exactly why `[expose]` keeps its static domain and `--quick` is confined to
+shares. The CLI should say this once, on create, rather than letting the user
+discover it by re-pairing.
+
+Permanent deployment: unchanged. `[expose] cloudflare = true` still REQUIRES
+`domain`, still refuses to be ephemeral. C1 stands where it was aimed.

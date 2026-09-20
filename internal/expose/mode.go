@@ -25,6 +25,7 @@ import (
 // and gets nowhere without looking at the owner's screen.
 const (
 	ModeCloudflare = config.ModeCloudflare
+	ModeQuick      = config.ModeQuick
 	ModeNgrok      = config.ModeNgrok
 	ModeJS         = config.ModeJS
 	ModeLAN        = config.ModeLAN
@@ -76,7 +77,9 @@ func (r Resolution) AllowedOrigins(configured []string) []string {
 		add(strings.TrimSpace(o))
 	}
 	switch r.Mode {
-	case ModeCloudflare, ModeNgrok, ModeJS:
+	case ModeCloudflare, ModeNgrok, ModeJS, ModeQuick:
+		// For a quick tunnel r.URL is empty until the hostname is scraped;
+		// Manager.AllowedOrigins appends the live one as soon as it is known.
 		add(r.URL)
 	case ModeLAN:
 		if r.LANIP != "" {
@@ -99,6 +102,23 @@ func Resolve(e config.Expose, port int, binaryFound func(string) bool) Resolutio
 		}
 	}
 	r := Resolution{Port: port, Bind: config.BindLoopback, Mode: ModeLocal}
+
+	// Quick (AMENDMENTS 15) is checked FIRST and is deliberately unreachable
+	// from the config file: `Quick` has no TOML key, so only `share --quick`
+	// can set it. There is nothing to provision — no zone, no DNS record, no
+	// API token — so the only question is whether cloudflared is installed.
+	if e.Quick {
+		if binaryFound("cloudflared") {
+			r.Mode, r.Remote = ModeQuick, true
+			// The hostname is assigned by Cloudflare when the process starts
+			// and scraped from its output, so there is no URL to predict here.
+			r.Bind, r.SecureContext, r.LANIP = config.BindLoopback, true, PrimaryLANIP()
+			return r
+		}
+		r.Mode = ModeLAN
+		r.FellBack = "cloudflared is not installed, so no quick tunnel can be started; " +
+			"falling back to LAN mode (install cloudflared to get a public https URL)"
+	}
 
 	switch e.Provider() {
 	case config.ProviderCloudflare:
@@ -153,7 +173,11 @@ func Resolve(e config.Expose, port int, binaryFound func(string) bool) Resolutio
 // LAN warning when it applies.
 func (r Resolution) Describe() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "expose: mode=%s bind=%s:%d url=%s", r.Mode, r.Bind, r.Port, r.URL)
+	url := r.URL
+	if url == "" && r.Mode == ModeQuick {
+		url = "<assigned by cloudflare at start>"
+	}
+	fmt.Fprintf(&b, "expose: mode=%s bind=%s:%d url=%s", r.Mode, r.Bind, r.Port, url)
 	if r.FellBack != "" {
 		fmt.Fprintf(&b, " (fallback: %s)", r.FellBack)
 	}

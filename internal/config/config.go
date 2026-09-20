@@ -66,6 +66,7 @@ type Mode string
 
 const (
 	ModeCloudflare Mode = "cloudflare" // public static domain; binds loopback
+	ModeQuick      Mode = "quick"      // ephemeral *.trycloudflare.com; SHARES ONLY (AMENDMENTS 15)
 	ModeNgrok      Mode = "ngrok"      // public reserved domain; binds loopback
 	ModeJS         Mode = "js"         // JS adapter escape hatch; binds loopback
 	ModeLAN        Mode = "lan"        // binds 0.0.0.0; anyone on the wifi can reach the port
@@ -123,7 +124,7 @@ type Share struct {
 	DomainSuffix string `toml:"domain_suffix" json:"domain_suffix"`
 	// DefaultHours is the TTL used when neither --hours nor --days is given.
 	DefaultHours float64 `toml:"default_hours" json:"default_hours"`
-	// DefaultMode is auto | lan | domain.
+	// DefaultMode is auto | lan | quick | domain.
 	DefaultMode string `toml:"default_mode" json:"default_mode"`
 	// MaxConcurrent caps live shares.
 	MaxConcurrent int `toml:"max_concurrent" json:"max_concurrent"`
@@ -190,6 +191,16 @@ type Expose struct {
 	// shown ONLY on this machine: no HTTP endpoint mints or displays one, so a
 	// neighbour on the network can reach the port and get nowhere.
 	LAN bool `toml:"lan" json:"lan"`
+
+	// Quick selects an ephemeral TryCloudflare tunnel (*.trycloudflare.com):
+	// no account, no zone, no DNS record, no API token, nothing to clean up.
+	//
+	// It is DELIBERATELY not a TOML key (`toml:"-"`). AMENDMENTS 15 brings the
+	// quick tunnel back for SHARES ONLY; the permanent deployment still
+	// requires a static domain (C1), and a key in the config file would be an
+	// invitation to make the daily driver ephemeral again. `herdr-expose share
+	// --quick` constructs this table in memory instead.
+	Quick bool `toml:"-" json:"quick,omitempty"`
 
 	// Domain is REQUIRED whenever a provider is enabled (C1). There is no
 	// ephemeral/quick tunnel path: a hostname that changes on restart breaks
@@ -508,9 +519,9 @@ func (c *Config) Validate() error {
 
 func (c *Config) validateShare() error {
 	switch c.Share.DefaultMode {
-	case "auto", "lan", "domain":
+	case "auto", "lan", "quick", "domain":
 	default:
-		return fmt.Errorf("share.default_mode %q is not one of auto|lan|domain", c.Share.DefaultMode)
+		return fmt.Errorf("share.default_mode %q is not one of auto|lan|quick|domain", c.Share.DefaultMode)
 	}
 	if c.Share.DefaultHours <= 0 {
 		return fmt.Errorf("share.default_hours must be positive, got %v — every share is time-boxed (AMENDMENTS 10); "+

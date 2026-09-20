@@ -116,20 +116,27 @@ herdr-expose status
 | `pair` | mint a single-use pairing code and show a QR |
 | `expose start\|stop\|status` | bring the tunnel up or down |
 | `expose destroy` | remove the DNS record and delete the tunnel (explicit, and only what it created) |
+| `share [--lan\|--quick\|--domain X]` | expose ONE session on a time-boxed, self-destructing URL |
+| `share list\|extend\|pair\|revoke\|restore` | manage shares (every verb takes `--json`) |
+| `panic` | revoke every share and stop the main tunnel |
 | `install-service` / `uninstall-service` | install or remove a launchd / systemd unit for crash recovery |
 
 ---
 
 ## Exposing it
 
-Three modes. The mode decides the bind address — **`bind` is not a setting you
+Four modes. The mode decides the bind address — **`bind` is not a setting you
 control**, which is deliberate, because this binary runs commands.
 
 | mode | reachable from | device token | installable PWA |
 |---|---|---|---|
 | `local` (default) | this machine only | not required | yes |
 | `lan` | anyone on your wifi | **required** | **no** (see below) |
+| `quick` | the internet, on a throwaway hostname | **required** | not usefully (see below) |
 | `cloudflare` | the internet, on your domain | **required** | yes |
+
+`local`, `lan` and `cloudflare` are what the long-lived server runs in. `quick`
+belongs to [`share`](#sharing-one-session) alone and cannot be configured here.
 
 ### local — the default
 
@@ -201,13 +208,32 @@ never written to config, state, or a log.
 the domain is meant to be static. `expose destroy` is the explicit verb that
 removes them, and it only ever touches records it created.
 
-> **There is no quick tunnel.** No `*.trycloudflare.com`, not even as a fallback.
-> A hostname that changes on every restart breaks PWA installs, bookmarks and
-> origin-bound device tokens — which makes it worse than useless for the mobile
-> product this exists to serve. `cloudflare = true` without `domain` is a startup
-> error. Use `lan` if you want zero setup.
+> **The permanent deployment is never ephemeral.** `cloudflare = true` without
+> `domain` is a startup error, and there is no key that makes this server run on
+> a `*.trycloudflare.com` hostname. A hostname that changes on every restart
+> breaks PWA installs, bookmarks and origin-bound device tokens — which makes it
+> worse than useless for the endpoint you open every day. A throwaway hostname
+> is available where it actually fits: `herdr-expose share --quick`.
 
 Needs `cloudflared` on your PATH (`brew install cloudflared`).
+
+### quick — a throwaway public URL, for shares only
+
+`herdr-expose share --quick` runs `cloudflared tunnel --url` and gets a random
+`https://<words>.trycloudflare.com` hostname from Cloudflare's edge. **No
+account, no zone, no DNS record, no API token is read** — the whole Cloudflare
+API path is never entered — and there is nothing left to clean up afterwards:
+the tunnel dies with the process. Measured cold start on a laptop: about ten
+seconds from the command to a URL that answers.
+
+The trade-off, which the CLI prints once at create time: **the hostname is new
+every time.** Device tokens are origin-bound, so every quick share needs a fresh
+pairing scan, and an installed PWA would be pinned to a hostname that stops
+existing. Right for a throwaway, wrong for a daily driver — which is exactly why
+`[expose]` keeps a static domain.
+
+A quick tunnel is on the public internet, so it is **not** more trusted than a
+domain share: same mandatory pairing, same server-side scope, same expiry.
 
 ### ngrok
 
@@ -274,6 +300,51 @@ safe to call twice. Copy `adapters/template.js` to start.
 
 ---
 
+## Sharing one session
+
+`expose` puts the whole machine's Herdr tree behind one long-lived URL. `share`
+does the opposite: **one session, one URL, one deadline, then gone.**
+
+```bash
+herdr-expose share --lan                    # http://<lan-ip>:<port>   no internet
+herdr-expose share --quick                  # https://<random>.trycloudflare.com
+herdr-expose share --domain x.example.com   # https://x.example.com    your zone
+herdr-expose share                          # auto — prints which it chose and why
+```
+
+| transport | needs | teardown at expiry |
+|---|---|---|
+| `--lan` | nothing | stop the process, wipe the state |
+| `--quick` | `cloudflared` | stop the process, wipe the state (nothing exists in Cloudflare) |
+| `--domain` | `cloudflared` + a zone your token reaches | the above **plus** delete the DNS record and the named tunnel |
+
+The three flags are mutually exclusive. With none of them, auto picks the
+configured domain if it is usable, else `--quick`, else `--lan` — and prints one
+line naming the choice and the reason. `--quick` is what makes this usable
+without a Cloudflare account at all.
+
+Everything else is identical across the three: **scope is enforced in the
+server** (the shared instance's tree contains only that session — other sessions
+are absent from the tree, from subscribe, and rejected at the hub), **pairing is
+mandatory**, and every share is time-boxed three ways (an in-process timer, a
+token deadline, and a `share.json` the daemon sweeps). There is no permanent
+share; a long one is `--days 30`.
+
+```bash
+herdr-expose share list [--json]            # also reaps anything past its deadline
+herdr-expose share extend <id> --hours 2
+herdr-expose share pair <id>                # another code for a share already running
+herdr-expose share revoke <id> | --all      # immediate, idempotent, verified against the API
+herdr-expose panic                          # every share down AND the main tunnel stopped
+```
+
+`revoke --all` and `panic` handle a mix of lan + quick + domain shares in one
+pass; one transport's failure never aborts the others. Teardown reports per
+component and exits non-zero if anything survived — for `lan` and `quick` the
+DNS and tunnel lines read as not-applicable, because nothing was ever created.
+
+---
+
 ## Configuration
 
 `~/.config/herdr-expose/config.toml`, always — the path does not change depending
@@ -301,7 +372,17 @@ domain      = ""             # REQUIRED when cloudflare = true
 tunnel_name = "herdr-expose"
 lan         = false          # also the automatic fallback if cloudflared is missing
 autostart   = false
+
+[share]
+domain_suffix  = ""          # `share --name review` -> review.<suffix>
+default_hours  = 1           # TTL when neither --hours nor --days is given
+default_mode   = "auto"      # auto | lan | quick | domain
+max_concurrent = 10
 ```
+
+`default_mode = "auto"` resolves: your configured domain when it is usable and
+`cloudflared` is installed, else `quick` when `cloudflared` is installed, else
+`lan`. There is no `quick` key under `[expose]`, on purpose.
 
 **There are no secrets in this file.** Tokens live as SHA-256 hashes in the state
 directory at mode 0600; the Cloudflare token is read from the environment. See

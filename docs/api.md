@@ -62,13 +62,14 @@ and disappear while the server runs — a session going down marks its entry
 This API can run arbitrary commands on the machine hosting it. `pane.run` and
 `agent.prompt` are, by design, remote code execution as the logged-in user.
 
-The server runs in one of **three exposure modes**, and the mode decides both the
+The server runs in one of **four exposure modes**, and the mode decides both the
 bind address and whether you need a token:
 
 | mode | bind | device token | Origin + Host pinning | secure context |
 |---|---|---|---|---|
 | `local` | `127.0.0.1` | **not** required | required | yes (`localhost` is exempt) |
 | `lan` | `0.0.0.0` | **required** | required | **no** |
+| `quick` | `127.0.0.1` + tunnel | **required** | required | yes |
 | `cloudflare` | `127.0.0.1` + tunnel | **required** | required | yes |
 
 - **`local`** — the default. Anyone who can reach loopback already has shell on
@@ -82,10 +83,20 @@ bind address and whether you need a token:
   `status.secure_context` is `false`, **the service worker does not register and
   the PWA cannot be installed**. Your client must detect this and not offer an
   install prompt that cannot work. A native mobile client is unaffected.
+- **`quick`** — loopback plus an ephemeral TryCloudflare tunnel on a random
+  `*.trycloudflare.com` hostname. https, so a secure context, and a device token
+  is mandatory exactly as everywhere else: **an unguessable hostname is not a
+  credential.** It exists only for `herdr-expose share`, never for the permanent
+  deployment. The hostname is **new on every share**, and device tokens are
+  origin-bound, so a client that stored one for a previous quick URL must pair
+  again rather than retry — treat the `401` as "return to pairing". Do not offer
+  a persistent "Add to Home Screen" for a `quick` URL: the install would be
+  pinned to a hostname that stops existing when the share expires.
 - **`cloudflare`** — loopback plus a static, API-provisioned tunnel on the user's
-  own domain. There is no ephemeral `*.trycloudflare.com` URL in this product:
+  own domain. The permanent deployment is ALWAYS this mode and never ephemeral:
   a hostname that changes on restart breaks PWA installs, bookmarks and
-  origin-bound device tokens.
+  origin-bound device tokens, which is precisely why `quick` is confined to
+  time-boxed shares.
 
 Read `mode` and `secure_context` from `/v1/config`; never infer them.
 
@@ -147,10 +158,12 @@ Bootstrap for a connected client. **Never contains a token or any secret.**
 }
 ```
 
-`mode` is `local`, `lan` or `cloudflare`. `secure_context` is `false` only in
-`lan` mode — when it is, skip service-worker registration and hide any install
-affordance. `auth_required` is `false` only in `local` mode. `public_url` is the
-tunnel URL in `cloudflare` mode and `null` otherwise.
+`mode` is `local`, `lan`, `quick` or `cloudflare`. `secure_context` is `false`
+only in `lan` mode — when it is, skip service-worker registration and hide any
+install affordance. `auth_required` is `false` only in `local` mode.
+`public_url` is the tunnel URL in `quick` and `cloudflare` mode and `null`
+otherwise; in `quick` mode it is assigned by the edge at start, so read it, do
+not remember it.
 
 `features` is an open-ended array of strings. **Ignore entries you do not
 recognise** — new capabilities are announced here rather than by bumping the API
@@ -219,12 +232,14 @@ follows the mode:
 
 ```
 cloudflare   https://herdr.example.com/?pair=7K2QX9
+quick        https://mid-ancient-stuff-tokyo.trycloudflare.com/?pair=7K2QX9
 lan          http://192.168.1.24:21118/?pair=7K2QX9
 local        http://127.0.0.1:21118/?pair=7K2QX9
 ```
 
 In `lan` mode the IP is re-resolved on network change, so a DHCP lease change
-does not leave a stale URL behind.
+does not leave a stale URL behind. In `quick` mode the hostname belongs to that
+one share and is gone when it expires.
 
 **`POST /v1/pair`**
 
@@ -1050,7 +1065,8 @@ Until then this document is the schema.
 
 ```js
 // 1. bootstrap. In local mode cfg.auth_required is false and the header is
-//    simply ignored; in lan and cloudflare mode a device token is mandatory.
+//    simply ignored; in lan, quick and cloudflare mode a device token is
+//    mandatory.
 const auth = token ? { Authorization: `Bearer ${token}` } : {};
 const cfg  = await fetch("/v1/config", { headers: auth }).then(r => r.json());
 

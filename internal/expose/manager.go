@@ -102,7 +102,20 @@ func (m *Manager) Refresh() Resolution {
 // whatever the user pinned in [server].allowed_origins. In lan mode the LAN
 // origin MUST be in this list or the browser refuses the WebSocket.
 func (m *Manager) AllowedOrigins(configured []string) []string {
-	return m.Resolution().AllowedOrigins(configured)
+	res := m.Resolution()
+	m.mu.Lock()
+	t := m.cur
+	m.mu.Unlock()
+	if t != nil {
+		// A quick tunnel's hostname is not known until the edge assigns it, so
+		// the Resolution cannot carry it. internal/serve re-reads this list on
+		// every request, so appending the live URL here is what makes the
+		// browser's Origin AND the Host pin match a *.trycloudflare.com share.
+		if u := t.Snapshot().URL; u != "" && u != res.URL {
+			configured = append(append([]string{}, configured...), u)
+		}
+	}
+	return res.AllowedOrigins(configured)
 }
 
 // SetExpose swaps in a new [expose] table (SIGHUP reload) and re-resolves the
@@ -179,8 +192,13 @@ func (m *Manager) Start(ctx context.Context) (Status, error) {
 	return m.Status(), nil
 }
 
-// build picks the provider. JS adapter wins, then cloudflare, then ngrok.
+// build picks the provider. A quick tunnel wins when it is set — it can only
+// be set in memory by `share --quick`, never from the config file — then the
+// JS adapter, then cloudflare, then ngrok.
 func (m *Manager) build(opts Options) (tunnel, error) {
+	if opts.Expose.Quick {
+		return newQuickTunnel(CloudflareOptions{Port: opts.Port}, opts.Logf, m.red)
+	}
 	switch opts.Expose.Provider() {
 	case config.ProviderCloudflare:
 		return newCloudflare(CloudflareOptions{

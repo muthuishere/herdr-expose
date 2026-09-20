@@ -24,9 +24,13 @@ type procSpec struct {
 	ScanURL   func(line string) string // returns a public URL found in a log line, or ""
 	StaticURL string                   // known up front (named tunnels)
 
-	// Verify delays publishing StaticURL until https://<domain>/healthz
-	// actually answers (C2 step 7): a process that started is not a tunnel
-	// that works.
+	// Verify delays publishing a URL until https://<host>/healthz actually
+	// answers (C2 step 7): a process that started is not a tunnel that works.
+	//
+	// With StaticURL set it verifies that hostname. With only ScanURL set (a
+	// quick tunnel, whose hostname is assigned by the edge at start) it
+	// verifies whatever the scanner scraped, and re-verifies a NEW hostname
+	// after a restart — a quick tunnel does not come back on the same name.
 	Verify        bool
 	VerifyTimeout time.Duration
 	Log           func(format string, args ...any)
@@ -57,6 +61,13 @@ type procTunnel struct {
 	done     chan struct{}
 	urlReady chan struct{}
 	stopOnce sync.Once
+
+	// candidates carries scraped-but-unverified URLs to verifyLoop. Buffered
+	// so the output scanner never blocks on it.
+	candidates chan string
+	// offered is the last URL handed to verifyLoop, so a hostname repeated on
+	// every log line is not re-probed.
+	offered string
 }
 
 func newProcTunnel(spec procSpec) *procTunnel {
@@ -67,9 +78,10 @@ func newProcTunnel(spec procSpec) *procTunnel {
 		spec.Redact = &redactor{}
 	}
 	return &procTunnel{
-		spec:     spec,
-		done:     make(chan struct{}),
-		urlReady: make(chan struct{}),
+		spec:       spec,
+		done:       make(chan struct{}),
+		urlReady:   make(chan struct{}),
+		candidates: make(chan string, 4),
 	}
 }
 
@@ -108,7 +120,7 @@ func (p *procTunnel) Launch(parent context.Context) error {
 	}
 
 	go p.supervise(ctx, wait)
-	if p.spec.Verify && p.spec.StaticURL != "" {
+	if p.spec.Verify {
 		go p.verifyLoop(ctx)
 	}
 	if p.spec.HealthInterval > 0 {
@@ -167,7 +179,7 @@ func (p *procTunnel) scan(r io.Reader) {
 		line := sc.Text()
 		if p.spec.ScanURL != nil {
 			if u := p.spec.ScanURL(line); u != "" {
-				p.setURL(u)
+				p.offerURL(u)
 			}
 		}
 		p.spec.Log("%s: %s", p.spec.Name, p.spec.Redact.scrub(strings.TrimSpace(line)))
@@ -239,34 +251,108 @@ func (p *procTunnel) supervise(ctx context.Context, wait func() error) {
 	}
 }
 
-// verifyLoop polls the public URL until the edge actually routes to us, and
-// only then publishes it. Until that happens `expose start` has not succeeded.
+// offerURL takes a URL scraped from the child's output. Without verification
+// it is published immediately; with it, verifyLoop probes it first, because a
+// hostname cloudflared has printed is not yet a hostname the edge routes.
+func (p *procTunnel) offerURL(u string) {
+	if !p.spec.Verify {
+		p.setURL(u)
+		return
+	}
+	p.mu.Lock()
+	if p.offered == u {
+		p.mu.Unlock()
+		return // the same hostname repeated across log lines
+	}
+	p.offered = u
+	p.mu.Unlock()
+	select {
+	case p.candidates <- u:
+	default: // verifyLoop is busy with one; it re-reads the latest on its next pass
+	}
+}
+
+// verifyLoop publishes a URL only once <url>/healthz answers through it.
+//
+// A static hostname is known up front, so it is probed straight away. A quick
+// tunnel's is not: the loop waits for the scanner to scrape one, probes that,
+// and then keeps waiting — a restarted quick tunnel is assigned a DIFFERENT
+// hostname, and continuing to advertise the dead one is worse than briefly
+// having none.
 func (p *procTunnel) verifyLoop(ctx context.Context) {
 	timeout := p.spec.VerifyTimeout
 	if timeout <= 0 {
 		timeout = 90 * time.Second
 	}
+	target := p.spec.StaticURL
 	deadline := time.Now().Add(timeout)
-	p.spec.Log("%s: waiting for %s to answer", p.spec.Name, p.spec.StaticURL)
+	published := false
+	if target != "" {
+		p.spec.Log("%s: waiting for %s to answer", p.spec.Name, target)
+	}
+
 	for {
-		if probe(ctx, p.spec.StaticURL) {
-			p.setURL(p.spec.StaticURL)
+		if ctx.Err() != nil {
 			return
 		}
-		if ctx.Err() != nil || time.Now().After(deadline) {
-			p.mu.Lock()
-			if p.lastErr == "" {
-				p.lastErr = fmt.Sprintf("%s did not answer within %s", p.spec.StaticURL, timeout)
+		if target == "" {
+			// Nothing to probe yet. Before the first publish this is on the
+			// clock (a tunnel that never names itself is a failed start);
+			// afterwards it simply waits for the next restart's hostname.
+			var giveUp <-chan time.Time
+			if !published {
+				giveUp = time.After(time.Until(deadline))
 			}
-			p.mu.Unlock()
-			return
+			select {
+			case <-ctx.Done():
+				return
+			case u := <-p.candidates:
+				target = u
+				deadline = time.Now().Add(timeout)
+				p.spec.Log("%s: edge assigned %s; waiting for it to answer", p.spec.Name, u)
+			case <-giveUp:
+				p.noteVerifyTimeout("no public hostname was reported", timeout)
+				return
+			}
+			continue
 		}
+
+		if probe(ctx, target) {
+			p.setURL(target)
+			if p.spec.ScanURL == nil {
+				return // a static hostname is verified once and stays put
+			}
+			published, target = true, ""
+			continue
+		}
+
+		// A newer hostname supersedes the one being probed: after a restart
+		// the old one will never answer again.
 		select {
 		case <-ctx.Done():
 			return
+		case u := <-p.candidates:
+			target = u
+			deadline = time.Now().Add(timeout)
+			continue
 		case <-time.After(2 * time.Second):
 		}
+		if time.Now().After(deadline) {
+			p.noteVerifyTimeout(target+" did not answer", timeout)
+			if !published {
+				return
+			}
+			target = "" // go back to waiting for a fresh hostname
+		}
 	}
+}
+
+func (p *procTunnel) noteVerifyTimeout(what string, timeout time.Duration) {
+	p.mu.Lock()
+	if p.lastErr == "" {
+		p.lastErr = fmt.Sprintf("%s within %s", what, timeout)
+	}
+	p.mu.Unlock()
 }
 
 // healthLoop probes the public URL. It never kills the process; it only marks

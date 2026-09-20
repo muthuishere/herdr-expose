@@ -108,10 +108,22 @@ autostart = false                   # bring the tunnel up when the server starts
 # Defaults for 'herdr-expose share' — one scoped, time-boxed, self-destructing
 # tunnel onto ONE session. Every share expires; there is no permanent share, a
 # long one is just --days 30 (AMENDMENTS 10).
+#
+# Three transports, one ladder (AMENDMENTS 15):
+#   --lan      http://<lan-ip>:<port>        no internet, no secure context
+#   --quick    https://<random>.trycloudflare.com
+#              no account, no zone, no DNS, no API token, nothing to clean up.
+#              The hostname is NEW every time, so paired device tokens (which
+#              are origin-bound) do not carry over to the next quick share.
+#   --domain   https://x.you.com             stable, your zone, your token
+# The quick tunnel is confined to shares on purpose: [expose] keeps its static
+# domain so the daily driver stays installable and paired (C1).
 [share]
 domain_suffix = ""                  # 'share --name review' -> review.<suffix>; empty = pass --domain explicitly
 default_hours = 1                   # TTL when neither --hours nor --days is given
-default_mode = "auto"               # auto | lan | domain
+default_mode = "auto"               # auto | lan | quick | domain
+                                    # auto: configured domain if usable and cloudflared is installed,
+                                    #       else quick if cloudflared is installed, else lan
 max_concurrent = 10                 # refuse to create more than this many live shares
 `},
 
