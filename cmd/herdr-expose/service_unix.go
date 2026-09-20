@@ -16,8 +16,8 @@ import (
 // VERBATIM when Windows support landed, so the platform that has been in
 // production cannot have changed behaviour in the port.
 //
-// serviceInstallOpts.Task is meaningless here and ignored; the CLI rejects
-// --task before it reaches this file.
+// These stay exactly as they were. See ADR 0037: the asymmetry with Windows is
+// the platforms genuinely being different, not an inconsistency to clean up.
 
 // --- layer 2: real service units -------------------------------------------
 
@@ -41,7 +41,7 @@ func managerInCharge() (bool, string) {
 }
 
 // installService writes and loads a real supervised unit for this platform.
-func installService(exePath, state string, _ bool) (string, error) {
+func installService(exePath, state string) (string, error) {
 	switch runtime.GOOS {
 	case "darwin":
 		return installLaunchAgent(exePath, state)

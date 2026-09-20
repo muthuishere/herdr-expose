@@ -31,17 +31,6 @@ import (
 var version = "dev"
 
 func main() {
-	// Started BY a service manager that speaks a control protocol rather than
-	// signals (the Windows SCM), this process is the service, not the CLI, and
-	// never sees an argv. No-op everywhere else.
-	if handled, serr := runUnderServiceManager(); handled {
-		if serr != nil {
-			fmt.Fprintln(os.Stderr, "error:", serr)
-			os.Exit(1)
-		}
-		return
-	}
-
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
@@ -462,6 +451,18 @@ func cmdOpen() error {
 		return err
 	}
 	url := exposeManager(cfg).Resolution().URL
+
+	// The user has just reached for the UI. If nothing is serving, opening the
+	// browser hands them a connection error and no idea what to do about it.
+	// This is the ONE moment a prompt is earned: user-initiated, not a timer,
+	// and silent whenever the server is up. On macOS and Linux it is a no-op,
+	// because a LaunchAgent or systemd --user has already restarted the server.
+	if state, serr := StateDir(); serr == nil {
+		if pid := readPid(state); pid <= 0 || !pidAlive(pid) {
+			notifyServerDown(upstream.BinPath())
+		}
+	}
+
 	fmt.Println(url)
 	switch runtime.GOOS {
 	case "darwin":
@@ -676,19 +677,12 @@ func cmdDevices(args []string) error {
 
 func cmdService(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: herdr-expose service install|uninstall|status [--force] [--task]")
+		return errors.New("usage: herdr-expose service install|uninstall|status [--force]")
 	}
 	force := hasFlag(args, "--force") || hasFlag(args, "--yes") || hasFlag(args, "-y")
-	// --task selects the weaker, no-admin supervisor on Windows. It is a real
-	// difference in the promise `service install` makes, so it is opt-in and
-	// named, never a silent fallback. Nothing else has a second supervisor.
-	task := hasFlag(args, "--task")
-	if task && runtime.GOOS != "windows" {
-		return errors.New("--task is a Windows-only option (Scheduled Task instead of a Service)")
-	}
 	switch args[0] {
 	case "install":
-		return cmdServiceInstall(force, task)
+		return cmdServiceInstall(force)
 	case "uninstall":
 		return cmdServiceUninstall()
 	case "status":
@@ -727,7 +721,7 @@ func printServiceState(st serviceState) {
 //     for one port is worse), but it is not something to do behind the
 //     operator's back, so it now needs --force and says exactly what it will
 //     stop.
-func cmdServiceInstall(force, task bool) error {
+func cmdServiceInstall(force bool) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return err
@@ -760,9 +754,16 @@ func cmdServiceInstall(force, task bool) error {
 		fmt.Printf("  --force given: taking over from pid %d.\n", pid)
 	}
 
-	path, err := installService(exe, state, task)
+	path, err := installService(exe, state)
 	if err != nil {
 		return err
+	}
+	// An empty path with no error means the platform installs NOTHING on
+	// purpose (Windows — see service_windows.go). There is no unit to announce
+	// and nothing to verify came up; saying "installed" and then failing the
+	// verification would be two lies in a row.
+	if path == "" {
+		return nil
 	}
 	fmt.Println("installed", path)
 

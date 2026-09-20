@@ -1782,7 +1782,7 @@ func revokeShareRecord(rec *shareRecord) teardownResult {
 			// its owner put it.
 			bindAddr = fmt.Sprintf("127.0.0.1:%d", rec.Port)
 		}
-		res.PortFree = rec.Port == 0 || portFree(bindAddr)
+		res.PortFree = rec.Port == 0 || portFreeWithin(bindAddr, 5*time.Second)
 		if err := os.RemoveAll(dir); err != nil {
 			res.Error = err.Error()
 		}
@@ -1801,7 +1801,7 @@ func revokeShareRecord(rec *shareRecord) teardownResult {
 		// Already clean (a retry of a partial teardown): do not spend a
 		// 100-second delete window proving it again.
 		res.DNSGone, res.TunnelGone = true, true
-		res.PortFree = rec.Port == 0 || portFree(fmt.Sprintf("127.0.0.1:%d", rec.Port))
+		res.PortFree = rec.Port == 0 || portFreeWithin(fmt.Sprintf("127.0.0.1:%d", rec.Port), 5*time.Second)
 		_ = os.RemoveAll(dir)
 		_, statErr := os.Stat(dir)
 		res.StateWiped = os.IsNotExist(statErr)
@@ -1838,7 +1838,7 @@ func revokeShareRecord(rec *shareRecord) teardownResult {
 	}
 
 	// 4. the port must actually be released
-	res.PortFree = rec.Port == 0 || portFree(fmt.Sprintf("127.0.0.1:%d", rec.Port))
+	res.PortFree = rec.Port == 0 || portFreeWithin(fmt.Sprintf("127.0.0.1:%d", rec.Port), 5*time.Second)
 
 	// 5. the state dir. Credentials go IMMEDIATELY and unconditionally — the
 	//    hashed device tokens, the server token and the tunnel secret are gone
@@ -2404,4 +2404,28 @@ func countCloudflared(configPath string) int {
 		}
 	}
 	return n
+}
+
+// portFreeWithin waits for a port to come free rather than asking once.
+//
+// A teardown checks the port immediately after the process holding it died,
+// and a listening socket is not closed synchronously with the process that
+// owned it. On Unix that race is usually lost in the noise; on Windows, where
+// the share is stopped with TerminateProcess rather than a signal it can handle,
+// it was reproducible — `share revoke --all` printed "port STILL BOUND" and
+// exited 1 on a share that had torn down perfectly.
+//
+// One poll was the bug. Everything else about the check is right, so this only
+// gives it time to become true.
+func portFreeWithin(addr string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if portFree(addr) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }

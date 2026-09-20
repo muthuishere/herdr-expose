@@ -3,22 +3,34 @@ name = "herdr-expose"
 version = "0.1.0"
 description = "Your Herdr panes in a browser or on your phone: one Go binary, embedded web UI, loopback-only with a tunnel you start."
 min_herdr_version = "0.9.0"
-# Windows is EXPERIMENTAL, and as of 2026-09-20 VERIFIED END TO END on Windows
+# Windows is EXPERIMENTAL, and as of 2026-09-20 verified end to end on Windows
 # arm64 (with Herdr 0.9.1 itself running as x86_64 under emulation): the named
 # pipe transport, LockFileEx locking, Job Object process-tree kill, doctor,
 # serve, the embedded web UI, share --lan, and an agent using the herdr-share
 # skill to share its own session all work on real hardware.
 #
-# TWO THINGS ARE NOT PROVEN, and the doc says so check by check:
-#   * `service install` as an ELEVATED Windows Service (only the unelevated
-#     refusal is verified);
-#   * `herdr plugin install` itself, which needs git and a POSIX shell that
-#     Windows does not ship -- so on Windows this currently installs only if
-#     you hand-build and hand-copy the binary.
-# Read docs/windows.md before relying on any of this.
+# Windows deliberately installs NO autostart service. The [[startup]] hook below
+# is per-user and needs no privilege, so it covers starting the daemon; what
+# Windows does not get is restart-on-crash, and `herdr-expose open` says so with
+# the command when the server is down. See docs/windows.md and docs/adr/0037 for
+# why that asymmetry with the macOS LaunchAgent and the Linux systemd --user
+# unit is the platforms being genuinely different, not an oversight.
+#
+# `herdr plugin install` on Windows requires git, which is also what supplies
+# the POSIX shell the build hook needs.
 platforms = ["macos", "linux", "windows"]
 
 # Builds the React app, then the Go binary with the app embedded in it.
+#
+# TWO entries, filtered by platform, because Herdr runs a build command with
+# CreateProcess on Windows and CreateProcess cannot execute a .sh file -- there
+# is no shebang handling, and Git for Windows puts bash.exe in Git\bin which a
+# default install does NOT add to PATH. Measured: with a manifest that did not
+# list windows, `herdr plugin install` printed "build (skipped on windows)",
+# reported success, enabled the plugin, and left every action below pointing at
+# a ./bin/herdr-expose that was never built. A build that is skipped must not
+# look like a build that succeeded, so Windows gets a command it can actually
+# run.
 # node and go are build-time only and OPTIONAL: with them the script builds from
 # the cloned source; without them it falls back to the prebuilt release asset for
 # this platform and verifies it against the release SHA256SUMS. Either way the
@@ -26,7 +38,12 @@ platforms = ["macos", "linux", "windows"]
 # time. Herdr runs this once, at `plugin install`, before it registers anything;
 # a non-zero exit aborts the install.
 [[build]]
+platforms = ["macos", "linux"]
 command = ["./scripts/build.sh"]
+
+[[build]]
+platforms = ["windows"]
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "./scripts/build.ps1"]
 
 # Startup hooks are one-shot and unsupervised, so `daemon` fork-execs the real
 # server and returns immediately. `serve` holds an exclusive flock on the

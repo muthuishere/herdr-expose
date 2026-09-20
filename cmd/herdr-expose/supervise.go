@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -199,15 +198,10 @@ func noneAlive(pids []int) bool {
 	return true
 }
 
-// portFree reports whether addr can be bound right now.
-func portFree(addr string) bool {
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		return false
-	}
-	_ = ln.Close()
-	return true
-}
+// portFree reports whether addr is free to serve on. Platform-split, because
+// "can I bind it" and "is anything serving" are the same question on Unix and
+// different questions on Windows — see internal/platform/port_windows.go.
+func portFree(addr string) bool { return platform.PortBindable(addr) }
 
 // --- service state, so install/uninstall can CONVERGE rather than repeat ----
 //

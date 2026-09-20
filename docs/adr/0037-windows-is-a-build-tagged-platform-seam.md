@@ -66,27 +66,55 @@ which is the property the locks are built on. `exec.Cmd` cannot create a child
 suspended, so a grandchild could escape the sub-millisecond window before
 `AssignProcessToJobObject`; `KillTree` sweeps by command line as a backstop.
 
-### A Service, not a Scheduled Task
+### On Windows, install NO autostart — and why that is not an inconsistency
 
-`service install` means "survive a reboot and survive a crash" — that is what
-launchd `KeepAlive` and systemd `Restart=always` deliver. A logon-triggered
-Scheduled Task starts only after a human logs in and has a retry count rather
-than a supervisor. The same verb making a materially weaker promise on one
-platform is how somebody comes to believe their server is supervised when it is
-not.
+macOS installs a LaunchAgent. Linux installs a systemd `--user` unit. Windows
+installs nothing, prints the command, and exits 0.
 
-So: a real Windows Service, with SCM failure actions set to restart forever.
-That needs Administrator, so **without elevation `service install` refuses** and
-says how to elevate, and `--task` is a named opt-out that states what it gives
-up. Because the SCM starts a service with a control channel and not a command
-line, `main()` hands off to `svc.Run` when it detects the SCM started it, and a
-`SERVICE_CONTROL_STOP` cancels the same context Ctrl-C does — otherwise tunnel
-teardown and share revocation would be dead code on Windows.
+Somebody will eventually read that and conclude we ran out of time, because
+Windows runs services perfectly well. So the rule is written down here:
+
+> **Supervision follows what the platform is USED as, not what the OS can
+> technically do.**
+
+- **Linux is frequently a server**: left running, must come back after a reboot
+  with nobody logged in. `Restart=always` earns its place.
+- **macOS is the dev machine left open all day.** `KeepAlive` earns its place.
+- **Windows, for this product, is somebody's desktop** — they are sitting in
+  front of it with a terminal open. A person at the machine can run one command;
+  a headless Linux host cannot.
+
+The empirical half matters too, because all three Windows mechanisms were tried
+on real hardware and each was worse than it looked:
+
+- an **SCM Service** runs as LocalSystem, resolves `%APPDATA%` to the system
+  profile, and therefore finds ZERO of the user's Herdr sessions — it would
+  supervise an empty UI. It also could not find the herdr binary (user PATH) and
+  the SCM reported "terminated with the following error: Incorrect function". And
+  it demanded Administrator, which neither of the other platforms does.
+- a **Scheduled Task** was refused outright: `schtasks /Create` →
+  "ERROR: Access is denied." for a non-admin.
+- the **Startup folder** starts us at logon and supervises nothing.
+
+Carrying three mechanisms — each with its own install, status, uninstall and
+failure modes — on the one platform none of us runs daily is surface area, not
+sophistication. They are deleted, not parked behind a flag: dead code that can
+only run where nobody exercises it is the worst kind to keep.
+
+What Windows keeps is layers 1 and 3: Herdr's own `[[startup]]` hook fork-execs
+`herdr-expose daemon` (per-user, no privilege, every platform), and the
+managed-pid ledger still stops two servers fighting for a port. The missing
+layer is 2, restart-on-crash. So `herdr-expose open` checks the pidfile and, if
+nothing is serving, surfaces ONE line through Herdr's own `notification show`
+naming the command. User-initiated, never on a timer, silent while the server is
+up, and a no-op on macOS/Linux where a supervisor has already fixed it.
 
 ## Consequences
 
 - Two new dependencies, both Windows-only at link time:
-  `github.com/Microsoft/go-winio` and `golang.org/x/sys/windows`.
+  `github.com/Microsoft/go-winio` and `golang.org/x/sys/windows`. (The
+  `windows/svc`, `svc/mgr` and `registry` subpackages were used only by the
+  deleted Service, and are gone with it.)
 - `go.mod` pins `golang.org/x/sys v0.47.0`, the newest release that still
   declares `go 1.25.0`. v0.48.0 requires `go 1.26.0` and would have bumped this
   module's toolchain floor as a side effect of a Windows port.

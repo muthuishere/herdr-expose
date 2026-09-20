@@ -1,10 +1,12 @@
 package platform
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // These run on every platform, because the CONTRACT is the same everywhere and
@@ -141,6 +143,30 @@ func TestHerdrConfigDirHonoursXDG(t *testing.T) {
 	if !strings.Contains(got, "xdg") {
 		t.Errorf("HerdrConfigDir() = %q, ignored XDG_CONFIG_HOME", got)
 	}
+}
+
+// A port nothing is serving on must read as free, and one with a live listener
+// must not. On Windows the first half is the one that bit: a TIME_WAIT port
+// made a clean share teardown report failure.
+func TestPortBindable(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	if PortBindable(addr) {
+		t.Errorf("PortBindable(%s) = true while a listener is on it", addr)
+	}
+	_ = ln.Close()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if PortBindable(addr) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Errorf("PortBindable(%s) still false after the listener closed", addr)
 }
 
 func TestAliveOnSelfAndOnNothing(t *testing.T) {

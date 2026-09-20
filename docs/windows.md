@@ -45,7 +45,7 @@ accommodate Windows.
 | Detached child | `setsid` | `DETACHED_PROCESS` |
 | Liveness | `kill(pid, 0)` | `OpenProcess` + `GetExitCodeProcess` |
 | Command lines | `ps -axo pid=,command=` | `Get-CimInstance Win32_Process` |
-| Supervision | launchd / systemd `--user` | Windows Service (SCM) |
+| Supervision | launchd / systemd `--user` | **nothing installed** — see below |
 | State dir | `~/.local/state/herdr-expose` | `%LOCALAPPDATA%\herdr-expose\state` |
 | Config dir | `~/.config/herdr-expose` | `%APPDATA%\herdr-expose` |
 | Executable test | `mode & 0o111` | file extension vs `PATHEXT` |
@@ -89,29 +89,88 @@ session scan in `internal/upstream/registry.go` works there unchanged, and only
 the dial had to change. The config root it scans does move —
 `%APPDATA%\herdr`, not `~/.config/herdr`.
 
-### Why a Windows Service, and not a Scheduled Task
+### Why Windows installs no autostart at all
 
-`service install` means one thing on Unix: **survive a reboot and survive a
-crash**. launchd `KeepAlive` and systemd `Restart=always` both deliver exactly
-that. A logon-triggered Scheduled Task does not — it starts only after a human
-logs in, and its failure handling is a retry count, not a supervisor. Shipping
-the same verb with a materially weaker promise on one platform is how somebody
-ends up believing their server is supervised when it is not.
+`service install` does nothing on Windows. Not a Windows Service, not a
+Scheduled Task, not a Startup-folder entry. It prints what to run and exits 0.
 
-So the default is a real Windows Service: SCM auto-start at boot with no logon,
-`SetRecoveryActions` set to restart forever, and `service status` reading live
-state out of the SCM. That needs Administrator, which is a real cost, so:
+That is a deliberate asymmetry, and it is worth stating why, because Windows can
+run services perfectly well and the next person to read this will assume we
+simply never got round to it.
 
-- **without elevation, `service install` refuses** and prints how to elevate. It
-  does not quietly do something lesser.
-- `service install --task` is the named opt-out: a logon-triggered Scheduled
-  Task, no admin, and the message says what it gives up.
+**The rule is what the platform is USED as, not what the OS can do.**
 
-Because the SCM starts a service with a control channel instead of a command
-line, `main()` hands control to `svc.Run` when it detects it was started by the
-SCM, and a `SERVICE_CONTROL_STOP` cancels the same context a Ctrl-C does — so
-tunnel teardown and share revocation run on a service stop instead of being
-dead code.
+- **Linux is frequently a server** — a box you leave running that has to come
+  back by itself after a reboot with nobody logged in. `systemd --user` with
+  `Restart=always` genuinely earns its place.
+- **macOS is the dev machine people leave open all day**, so launchd
+  `KeepAlive` earns its place too.
+- **Windows, here, is somebody's desktop** — they are sitting in front of it,
+  with a terminal already open. A user who is physically at the machine can run
+  one command. A headless Linux host cannot.
+
+We also tried the alternatives and all three were worse than they looked:
+
+- The **SCM Service** runs as LocalSystem, which resolves `%APPDATA%` to
+  `C:\Windows\System32\config\systemprofile` and therefore finds **zero** of
+  the user's Herdr sessions — it would supervise an empty UI. Measured: it could
+  not even find the herdr binary (Herdr installs onto the *user* PATH), and the
+  SCM reported *"terminated with the following error: Incorrect function."* It
+  also demanded Administrator, which neither macOS nor Linux does.
+- The **Scheduled Task** was refused outright on the test machine:
+  `schtasks /Create` → `ERROR: Access is denied.` for a non-admin.
+- The **Startup folder** does not supervise anything — it starts us at logon and
+  that is all.
+
+Three mechanisms, each with its own install, status, uninstall and failure
+modes, on the one platform none of us runs daily. That is surface area, not
+sophistication, so it was deleted rather than left dormant behind a flag.
+
+### What actually happens when the process dies
+
+| | starts automatically | restarts on crash |
+|---|---|---|
+| **macOS** | LaunchAgent at login, **plus** Herdr's plugin startup hook | **yes** — launchd `KeepAlive` |
+| **Linux** | systemd `--user` at boot (with lingering), **plus** the startup hook | **yes** — `Restart=always` |
+| **Windows** | Herdr's plugin startup hook only, when Herdr starts | **no** |
+
+The Windows row is measured, not assumed. Starting the Herdr server on the test
+machine with nothing of ours running produced, from Herdr's own plugin log:
+
+```json
+{"command":["./bin/herdr-expose","daemon"],"event":"startup","exit_code":0,
+ "status":"succeeded","stdout":"started, pid 12892\n..."}
+```
+
+and `/healthz` answered 200 immediately after. So the hook genuinely starts us
+on Windows; it is not a convenient assumption.
+
+Windows keeps two of the three supervision layers: Herdr's `[[startup]]` hook
+fork-execs `herdr-expose daemon` (layer 1, and it is per-user and needs no
+privilege on every platform), and the managed-pid ledger with `reclaimStrays`
+still prevents two servers fighting for one port (layer 3). What it does not
+have is layer 2, the restart-on-crash supervisor.
+
+**So when it is not running, we say so.** `herdr-expose open` — the `hex:open`
+action and the URL link handler, i.e. the moment a user reaches for the UI —
+checks the pidfile and, if nothing is serving, surfaces one line through
+Herdr's own `notification show`, naming the command:
+
+```
+herdr-expose is not running — start it with `herdr-expose daemon`
+```
+
+It is user-initiated, never on a timer, and silent whenever the server is up.
+On macOS and Linux it is a no-op: a supervisor has already restarted the server
+by the time anyone could read a notification about it.
+
+Verified on hardware: with nothing serving, `open` issued the `notification.show`
+call and Herdr's server log recorded it `outcome="ok"`; with the daemon running,
+`open` made **no API call at all** and printed no prompt. One caveat worth
+knowing — Herdr can have notifications switched off, in which case the API
+answers `{"reason":"disabled","shown":false}` and nothing is displayed. That is
+the user's setting, not a failure, and it is why the same line is ALSO written
+to stderr, where it is unconditional.
 
 ### Why a Job Object, and not `taskkill /T`
 
@@ -153,7 +212,7 @@ the installer says so out loud.
 | 10 | `serve` + embedded web UI over HTTP | **PASS** — `/healthz` `{"ok":true,"upstream":true,"sessions_connected":1,"web_ui":true}` |
 | 11 | A real browser (Edge headless) rendering the UI | **PASS** — title `Herdr Expose`, app root present, its JS ran |
 | 12 | `share --lan` | **PASS** — scoped instance, pairing QR, serving on the LAN IP |
-| 13 | `service install` unelevated | **PASS** — refuses with instructions, exit 1. **The elevated path is still unrun** |
+| 13 | `service install` | Now installs **nothing** by design and says what to run. Verified on hardware that the three mechanisms it replaced were each unusable: Service fails as LocalSystem, `schtasks /Create` → `Access is denied.`, Startup folder does not supervise |
 | 14 | **End to end: Claude Code on the VM uses the `herdr-share` skill to share its own session** | **PASS** — raised a live LAN share, and a browser rendered it |
 
 ### The named pipe, confirmed against reality
@@ -175,7 +234,7 @@ So the pipe really is named `\\.\pipe\` + the whole socket path, as the source
 reading predicted. `herdr-expose doctor` then dialled it and got
 `herdr 0.9.1, protocol 22` back. The rule is no longer an inference.
 
-### Two bugs this found that compiling never would
+### Bugs this found that compiling never would
 
 1. **`LockFileEx` is MANDATORY where `flock` is advisory.** Locking byte 0 of
    the pidfile made `herdr-expose status` print `pid not running` while the
@@ -183,7 +242,16 @@ reading predicted. `herdr-expose doctor` then dialled it and got
    `ERROR_LOCK_VIOLATION` against our own lock. Fixed by locking a byte at
    offset 1<<62, past any content, which restores flock semantics exactly.
    Regression test: `TestLockedFileIsStillReadable`.
-2. **`os.Symlink` needs a privilege an ordinary user does not have.**
+2. **A teardown check that asked once instead of waiting.** `share revoke --all`
+   printed `port STILL BOUND` and exited 1 on a share that had torn down
+   perfectly, because it polled the port microseconds after the holding process
+   died — and a listening socket is not closed synchronously with its process.
+   Windows made it reproducible: the share is stopped with `TerminateProcess`
+   (there is no signal it can handle), and Go does not set `SO_REUSEADDR` there,
+   so a port a browser had just used sat in `TIME_WAIT`. Fixed by giving the
+   check a 5s window, and by asking "is anything SERVING" rather than "can I
+   bind" on Windows (`platform.PortBindable`).
+3. **`os.Symlink` needs a privilege an ordinary user does not have.**
    `skill install` died with "A required privilege is not held by the client"
    unless Developer Mode was on. Fixed with a **directory junction** fallback
    (`mklink /J`, no privilege required) — and then a second bug behind it: Go
@@ -218,9 +286,11 @@ back to.
 > Herdr 0.9.1 itself running as x86_64 under emulation) — the named-pipe
 > transport, file locking, Job Object process-tree kill, `doctor`, `serve`, the
 > web UI, `share --lan`, and an agent using the `herdr-share` skill to share its
-> own session all work. **Two things are not proven:** `service install` as an
-> elevated Windows Service, and `herdr plugin install`, which needs `git` and a
-> POSIX shell the platform does not ship. Install by hand for now.
+> own session all work. Windows installs **no autostart service**: Herdr's own
+> plugin startup hook starts the daemon, nothing restarts it if it crashes, and
+> herdr-expose tells you the command when you reach for the UI and it is down.
+> `herdr plugin install` requires **git**, which is also what supplies the POSIX
+> shell the build hook needs.
 
 ## Known gaps
 
@@ -234,11 +304,11 @@ back to.
   `config.toml` lands under `C:\Users\<you>\.config\herdr-expose` rather than
   `%APPDATA%`. Confirmed on hardware; it works, it is just not idiomatic. That
   package was out of scope for this port.
-- `service install` as an actual elevated Windows Service is **unrun**. The
-  unelevated refusal is verified; the SCM registration, recovery actions and
-  `svc.Run` handler are not.
-- `herdr plugin install` does not work on Windows — see "The install story is
-  the weak part" above.
+- **No restart-on-crash on Windows.** This is a design decision, not a gap —
+  see "Why Windows installs no autostart at all" — but it is a real difference
+  from macOS and Linux and the table above states it exactly.
+- `herdr plugin install` has not yet been run against a pushed commit that
+  contains the Windows build hook — see "The install story" below.
 - There is no Windows runner in the release workflow. The floor CI enforces is
   cross-build **and cross-vet** of all six targets, which catches a Unix-only
   syscall landing in a shared file — it does not catch a runtime bug.
