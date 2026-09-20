@@ -677,13 +677,9 @@ table.cmp .no { color: var(--fg-faint); }
     <h1>Say <em>“share this”</em> to the agent. It hands back a link to itself.</h1>
     <p class="lede">
       Your agents run on one machine and you aren't always at it. So don't go
-      to the machine and don't learn a CLI — tell the agent, in the session you
-      are already in, and it puts itself in a browser: Claude Code, Codex,
-      Devin, Gemini, Copilot, Cursor, any of the 21 agent kinds
-      <a href="https://herdr.dev">Herdr</a> detects. Read it from the laptop in
-      the other room, a tablet, a phone. Answer the ones that are blocked. Hand
-      a teammate a link scoped to one session that expires on its own. The web
-      app is inside the binary.
+      to the machine — tell the agent, and it puts itself in a browser: any of
+      the 21 agent kinds <a href="https://herdr.dev">Herdr</a> detects, read and
+      answered from a phone, a tablet, the laptop in the other room.
     </p>
 
     <div class="cmds">
@@ -696,19 +692,10 @@ table.cmp .no { color: var(--fg-faint); }
         <button class="copy" type="button" data-copy="share this">Copy</button>
       </div>
       <p class="cmd-note">
-        <b>Yes, the first command really does install the skill too</b> — all
-        three things, in one line: the binary, the Herdr plugin, and the agent
-        skill, which it links into <code>~/.claude/skills/herdr-share</code>
-        (and <code>~/.agents/skills</code>) during the plugin's build step.
-        There is no second install to remember. One honest caveat: that link is
-        best-effort, because a skill that would not link is not a reason to
-        lose the plugin — so if it warns, the plugin is still fine and
-        <code>herdr-expose skill install</code> fixes the skill on its own.
-        After that the second line is not a command at all — it is what you say
-        to the agent. It runs <code>herdr-expose share</code> for you and reads
-        back the URL and the pairing code. Type it yourself if you would
-        rather. Or skip sharing entirely: <code>herdr-expose daemon</code>,
-        then <code>127.0.0.1:21118</code> right where you are sitting.
+        One line installs all three — the binary, the Herdr plugin, and the
+        agent skill. The second line is not a command: it is what you say to
+        the agent, which runs <code>herdr-expose share</code> and reads back
+        the URL and pairing code. Type it yourself if you would rather.
       </p>
     </div>
 
@@ -720,15 +707,12 @@ table.cmp .no { color: var(--fg-faint); }
       <span>MIT</span>
     </div>
     <p class="platform-note">
-        Windows is supported and was verified end to end on real hardware — the
-        named-pipe transport, file locking, process-tree kill, the web UI, a LAN
-        share, and an agent using the skill to share its own session. It needs no
-        Administrator rights. One difference the badge will not tell you: macOS and
-        Linux install a supervisor that restarts the server if it crashes, and
-        Windows does not, because a desktop has someone sitting at it.
-        <a href="https://github.com/muthuishere/herdr-expose/blob/main/docs/windows.md">The full check-by-check claim</a>
-        says exactly what was run and what was not.
-      </p>
+      Windows is verified on real hardware and needs no Administrator rights.
+      One difference: macOS and Linux install a supervisor that restarts the
+      server if it crashes, and Windows does not.
+      <a href="https://github.com/muthuishere/herdr-expose/blob/main/docs/windows.md">The
+      full check-by-check claim</a> says exactly what was run.
+    </p>
   </div>
 </section>
 
@@ -1202,28 +1186,29 @@ is not reversible.<span class="m-tr-rule"></span>Run migration 0042 against dev?
     <p class="eyebrow">What actually makes this different</p>
     <h2>Every other way to do this is something <em>you</em> operate. This one, the agent operates.</h2>
     <p class="lede">
-      The tools in this space all end at the same place — a browser showing
-      your terminal — and they all start at the same place too: you. You
-      install the app, you scan the QR, you keep the relay account alive, you
-      remember the flag. The agent is the subject of the sentence and never the
-      one saying it.
+      Every tool in this space ends in the same place — a browser showing your
+      terminal — and starts in the same place too: you. You install the app, you
+      scan the QR, you keep the relay account alive. The agent is never the one
+      saying it.
     </p>
     <p class="lede" style="margin-top:14px">
       <code>herdr plugin install</code> puts a skill called
       <code>herdr-share</code> next to the binary. After that, <b>sharing is
-      something the agent knows how to do</b>. You say <em>share this</em>, or
-      <em>put this on my phone</em>, or <em>send Priya a link to this one</em>,
-      and it picks the verb, runs it, and reads the URL and the pairing code
-      back to you. You never left the session you were in.
+      something the agent knows how to do</b>. Say <em>share this</em> — it picks
+      the verb, runs it, and reads back the URL and the pairing code. You never
+      left the session you were in.
     </p>
     <p class="cmd-note" style="margin-top:18px">
-      Worth saying plainly, because it is checkable: Herdr's plugin format has
-      no concept of a skill at all — the manifest covers actions, panes,
-      keybindings, link handlers, startup hooks and storage, and the word
-      “skill” does not appear in its plugin documentation. This plugin installs
-      one anyway, as part of its build. That is the whole reason it feels
-      different to use, and it is the one thing no other plugin in that
-      marketplace ships.
+      The link lands in <code>~/.claude/skills/herdr-share</code> and
+      <code>~/.agents/skills</code>, and it is best-effort on purpose — a skill
+      that will not link is not a reason to lose the plugin. If it warns,
+      <code>herdr-expose skill install</code> repairs it on its own.
+    </p>
+    <p class="cmd-note" style="margin-top:14px">
+      Checkable rather than a boast: Herdr's plugin format has no concept of a
+      skill — the word does not appear anywhere in its plugin documentation.
+      This one installs a skill anyway, during its build. No other plugin in
+      that marketplace does.
     </p>
   </div>
 </section>
@@ -1314,13 +1299,10 @@ is not reversible.<span class="m-tr-rule"></span>Run migration 0042 against dev?
       </table>
     </div>
     <p class="cmp-note">
-      Two rows are deliberately not a clean sweep. <b>Happy Coder runs on
-      Windows too</b> — VibeTunnel is the one that says it does not — and
-      <b>herdr-expose is the only one here that needs another tool
-      installed</b>, namely Herdr, which the rest do not. A comparison you can
-      catch out on one row is worth nothing on the others, so those stay in.
-      Everything above is from each project's own documentation, as of
-      September 2026; check it before you believe it.
+      Two rows are deliberately not a clean sweep: <b>Happy Coder runs on
+      Windows too</b>, and <b>herdr-expose is the only one here that needs a
+      second tool installed</b>. From each project's own documentation,
+      September 2026 — check it before you believe it.
     </p>
   </div>
 </section>
