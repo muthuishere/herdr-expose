@@ -1,0 +1,1224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>herdr-expose — reach your terminal agents from any device</title>
+<meta name="description" content="Your coding agents run on one machine. Reach them from any browser on your network — the laptop in the other room, a tablet, a phone — and hand someone a scoped link that expires on its own.">
+<link rel="canonical" href="https://muthuishere.github.io/herdr-expose/">
+<meta property="og:type" content="website">
+<meta property="og:title" content="herdr-expose — reach your terminal agents from any device">
+<meta property="og:description" content="Agent panes as readable text that reflows to whatever screen you are on. Answer a blocked agent from another machine. Hand someone a scoped link that expires. Looking never touches the session.">
+<meta property="og:url" content="https://muthuishere.github.io/herdr-expose/">
+<meta name="twitter:card" content="summary">
+<meta name="color-scheme" content="dark light">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0d10'/%3E%3Cpath d='M7 11l5 5-5 5' stroke='%2362b0ff' stroke-width='2.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M15 21h10' stroke='%23ff8b3d' stroke-width='2.5' stroke-linecap='round'/%3E%3C/svg%3E">
+
+<style>
+/* ------------------------------------------------------------------ tokens
+   Palette lifted from the app's own stylesheet (web/src/styles/app.css) so the
+   mocks below are the product's real colours, not an invention. */
+:root {
+  --bg: #0b0d10;
+  --bg-1: #11141a;
+  --bg-2: #171b22;
+  --bg-3: #1e232c;
+  --line: #262c36;
+  --line-soft: #1b202810;
+  --fg: #e6e9ef;
+  --fg-dim: #9aa3b2;
+  --fg-faint: #6b7483;
+  --accent: #62b0ff;
+  --accent-ink: #06121f;
+  --blocked: #ff8b3d;
+  --done: #5ddc8a;
+  --working: #62b0ff;
+  --bad: #ff8b8b;
+
+  --radius: 14px;
+  --radius-sm: 8px;
+  --mono: 'SFMono-Regular', ui-monospace, 'JetBrains Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+  --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Roboto, 'Helvetica Neue', sans-serif;
+
+  --gutter: 16px;
+  --maxw: 1040px;
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #fbfbfc;
+    --bg-1: #ffffff;
+    --bg-2: #f2f4f7;
+    --bg-3: #e7eaef;
+    --line: #dde1e8;
+    --fg: #14171c;
+    --fg-dim: #4e5665;
+    --fg-faint: #7b8494;
+    --accent: #0b64c8;
+    --accent-ink: #ffffff;
+    --blocked: #b8500a;
+    --done: #16794a;
+    --working: #0b64c8;
+    --bad: #b3261e;
+    color-scheme: light;
+  }
+  .hero h1 em { background: linear-gradient(96deg, var(--accent) 0%, #1b4fa8 40%, var(--blocked) 100%); }
+
+  /* The mocks are a dark-UI product. They stay dark in light mode, on purpose:
+     inverting them would be showing you something that does not exist. */
+  .screen {
+    --bg: #0b0d10; --bg-1: #11141a; --bg-2: #171b22; --bg-3: #1e232c;
+    --line: #262c36; --fg: #e6e9ef; --fg-dim: #9aa3b2; --fg-faint: #6b7483;
+    --accent: #62b0ff; --blocked: #ff8b3d; --done: #5ddc8a; --working: #62b0ff;
+    --bad: #ff8b8b;
+    color-scheme: dark;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 17px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+/* One background wash, painted once, no animation. */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0 0 auto 0;
+  height: 620px;
+  pointer-events: none;
+  z-index: -1;
+  background:
+    radial-gradient(900px 420px at 18% -10%, rgba(98, 176, 255, 0.16), transparent 70%),
+    radial-gradient(720px 380px at 92% -18%, rgba(255, 139, 61, 0.11), transparent 70%);
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code, kbd, pre { font-family: var(--mono); }
+
+.wrap {
+  max-width: var(--maxw);
+  margin: 0 auto;
+  padding: 0 var(--gutter);
+}
+
+section { padding: 56px 0; }
+section + section { border-top: 1px solid var(--line); }
+
+.eyebrow {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+  margin: 0 0 14px;
+}
+
+h1, h2, h3 { letter-spacing: -0.025em; line-height: 1.12; margin: 0 0 16px; }
+h2 { font-size: clamp(1.6rem, 5.2vw, 2.1rem); font-weight: 700; }
+h3 { font-size: 1.06rem; font-weight: 650; letter-spacing: -0.012em; line-height: 1.3; }
+p { margin: 0 0 16px; }
+.lede { font-size: clamp(1.02rem, 3.4vw, 1.18rem); color: var(--fg-dim); max-width: 62ch; }
+.dim { color: var(--fg-dim); }
+.faint { color: var(--fg-faint); }
+strong, b { font-weight: 650; color: var(--fg); }
+
+/* ------------------------------------------------------------------- header */
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  backdrop-filter: saturate(140%) blur(12px);
+  -webkit-backdrop-filter: saturate(140%) blur(12px);
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  border-bottom: 1px solid var(--line);
+}
+.topbar-in {
+  max-width: var(--maxw);
+  margin: 0 auto;
+  padding: 10px var(--gutter);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.mark {
+  font-family: var(--mono);
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: -0.03em;
+  color: var(--fg);
+}
+.mark span { color: var(--accent); }
+.topbar nav { margin-left: auto; display: flex; gap: 16px; align-items: center; }
+.topbar nav a { font-size: 13.5px; color: var(--fg-dim); }
+.topbar nav a:hover { color: var(--fg); }
+.hide-sm { display: none; }
+@media (min-width: 640px) { .hide-sm { display: inline; } }
+
+/* --------------------------------------------------------------------- hero */
+.hero { padding: 54px 0 44px; }
+.hero h1 {
+  font-size: clamp(2.15rem, 8.6vw, 3.9rem);
+  font-weight: 700;
+  letter-spacing: -0.038em;
+  margin-bottom: 18px;
+  max-width: 16ch;
+}
+.hero h1 em {
+  font-style: normal;
+  background: linear-gradient(96deg, var(--accent) 0%, #8ec3ff 38%, var(--blocked) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.hero .lede { font-size: clamp(1.05rem, 3.8vw, 1.26rem); }
+.hero-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  margin-top: 22px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--fg-faint);
+}
+.hero-meta span {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 3px 10px;
+  background: var(--bg-1);
+}
+
+/* ------------------------------------------------------------------ command */
+.cmds { margin-top: 30px; display: grid; gap: 10px; max-width: 640px; }
+.cmd {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.cmd pre {
+  margin: 0;
+  padding: 13px 14px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: pre;
+  color: var(--fg);
+  scrollbar-width: thin;
+}
+.cmd pre .sig { color: var(--accent); user-select: none; }
+.cmd pre .cm { color: var(--fg-faint); }
+.copy {
+  flex: 0 0 auto;
+  border: none;
+  border-left: 1px solid var(--line);
+  background: var(--bg-2);
+  color: var(--fg-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 0 14px;
+  cursor: pointer;
+  min-width: 74px;
+}
+.copy:hover { background: var(--bg-3); color: var(--fg); }
+.copy[data-done="1"] { color: var(--done); }
+.cmd-note { font-size: 13.5px; color: var(--fg-faint); margin: 2px 0 0; }
+
+/* --------------------------------------------------------------------- misc */
+.cols { display: grid; gap: 18px; }
+@media (min-width: 820px) { .cols-3 { grid-template-columns: repeat(3, 1fr); } .cols-2 { grid-template-columns: 1fr 1fr; } }
+
+.card {
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 20px;
+}
+.card p:last-child { margin-bottom: 0; }
+.card p { font-size: 15px; color: var(--fg-dim); }
+.card-n {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--accent);
+  letter-spacing: 0.1em;
+  display: block;
+  margin-bottom: 10px;
+}
+
+/* the three people who are not at the keyboard */
+.cases { list-style: none; margin: 30px 0 0; padding: 0; display: grid; gap: 14px; }
+.cases li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 18px 20px;
+}
+.cases .case-n {
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  padding-top: 3px;
+}
+.cases b { display: block; font-size: 16px; margin-bottom: 4px; }
+.cases span { font-size: 15px; color: var(--fg-dim); }
+
+/* the honest "why" list */
+.nope { list-style: none; margin: 0; padding: 0; display: grid; gap: 14px; }
+.nope li {
+  border-left: 2px solid var(--line);
+  padding: 2px 0 2px 16px;
+}
+.nope li > b { display: block; font-size: 15.5px; margin-bottom: 3px; }
+.nope span { font-size: 15px; color: var(--fg-dim); }
+
+.turn {
+  margin-top: 34px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  background: var(--bg-1);
+  border-radius: var(--radius);
+  padding: 22px;
+}
+.turn p:last-child { margin-bottom: 0; }
+.turn p { font-size: 16px; }
+
+/* ------------------------------------------------------- wide-screen mock */
+/* Specificity, not order: `.mock` is defined further down and would win. */
+.mock.mock-wide { max-width: none; width: 100%; margin-bottom: 40px; }
+
+.browser {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--bg-2);
+  box-shadow: 0 30px 70px -40px rgba(0, 0, 0, 0.85);
+}
+@media (prefers-color-scheme: light) {
+  .browser { background: #12151b; border-color: #2a3039; }
+}
+.browser-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 12px;
+  background: #171b22;
+  border-bottom: 1px solid #262c36;
+}
+.browser-dots { display: inline-flex; gap: 6px; }
+.browser-dots i { width: 10px; height: 10px; border-radius: 50%; background: #2c333d; }
+.browser-url {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: #6b7483;
+  background: #0f1319;
+  border-radius: 999px;
+  padding: 3px 12px;
+}
+/* The wide layout needs width to BE the wide layout. On a narrow screen the
+   panel scrolls inside its own frame rather than pushing the page sideways. */
+.browser-body { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+.screen.screen-wide {
+  height: 440px;
+  min-width: 760px;
+  flex-direction: row;
+  border-radius: 0;
+}
+
+.d-side {
+  flex: 0 0 300px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--line);
+  background: var(--bg);
+}
+.d-side-scroll { flex: 1 1 auto; overflow: hidden; padding: 0 12px; }
+.d-row { height: 58px; padding: 8px 12px; }
+
+.d-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+.d-grid {
+  flex: 1 1 auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 12px;
+  padding: 16px;
+  align-content: start;
+  overflow: hidden;
+}
+.d-tile {
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--line);
+  border-radius: 12px;
+  padding: 10px 12px;
+  min-height: 160px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: hidden;
+}
+.d-tile.blocked { border-left-color: var(--blocked); }
+.d-tile.working { border-left-color: var(--working); }
+.d-tile.done    { border-left-color: var(--done); }
+.d-tile-title { font-weight: 600; font-size: 13px; line-height: 20px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.d-tile-q { flex: 1 1 auto; margin: 0; font-size: 13px; line-height: 1.45; color: var(--fg); }
+.d-tile-out {
+  flex: 1 1 auto; margin: 0; font-family: var(--mono); font-size: 11px; line-height: 1.42;
+  color: #c6ccd8; white-space: pre-wrap; overflow: hidden;
+}
+.d-tile-foot { font-size: 11px; color: var(--fg-faint); font-variant-numeric: tabular-nums; }
+
+.swipe-hint { color: var(--fg-faint); }
+@media (min-width: 800px) { .swipe-hint { display: none; } }
+
+/* ------------------------------------------------------------------- phones */
+.mocks {
+  display: grid;
+  /* minmax(0,…): an `auto` track sizes to the content's min-content width, and
+     a fixed-width mock inside one is exactly how a page starts scrolling
+     sideways at 375px. */
+  grid-template-columns: minmax(0, 1fr);
+  gap: 34px;
+  justify-items: center;
+  margin-top: 8px;
+}
+@media (min-width: 860px) {
+  .mocks { grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 28px; }
+}
+.mock { width: 100%; max-width: 375px; min-width: 0; }
+.mock-cap {
+  font-size: 13.5px;
+  color: var(--fg-dim);
+  margin: 14px 2px 0;
+}
+.mock-cap b { color: var(--fg); }
+
+.phone {
+  border: 1px solid var(--line);
+  border-radius: 26px;
+  padding: 8px;
+  background: var(--bg-2);
+  box-shadow: 0 24px 60px -30px rgba(0, 0, 0, 0.8);
+}
+@media (prefers-color-scheme: light) {
+  .phone { background: #12151b; border-color: #2a3039; }
+}
+.screen {
+  background: var(--bg);
+  color: var(--fg);
+  border-radius: 19px;
+  overflow: hidden;
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.35;
+  height: 520px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* appbar */
+.m-appbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 14px 10px;
+  border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+.m-brand { font-family: var(--mono); font-weight: 700; font-size: 15px; letter-spacing: -0.02em; }
+.m-conn {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-family: var(--mono); font-size: 11px; color: var(--fg-dim);
+}
+.m-conn i { width: 7px; height: 7px; border-radius: 50%; background: var(--done); }
+
+.m-scroll { flex: 1 1 auto; overflow: hidden; padding: 4px 12px 0; }
+
+.m-ws-title {
+  font-size: 11px; font-weight: 700; letter-spacing: 0.09em; text-transform: uppercase;
+  color: var(--fg-faint); margin: 14px 2px 8px;
+}
+.m-ws-title.urgent { color: var(--blocked); }
+
+.m-rows { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.m-row {
+  display: flex; flex-direction: column; gap: 5px; justify-content: center;
+  height: 62px; overflow: hidden;
+  padding: 10px 14px;
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--line);
+  border-radius: 12px;
+}
+.m-row.blocked { border-left-color: var(--blocked); background: rgba(255, 139, 61, 0.06); }
+.m-row.working { border-left-color: var(--working); }
+.m-row.done    { border-left-color: var(--done); }
+.m-row-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; }
+.m-row-title { font-weight: 600; font-size: 15px; line-height: 20px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.m-row-sub {
+  display: block; max-width: 100%; font-family: var(--mono); font-size: 12px; line-height: 1.35;
+  color: var(--fg-dim); height: 17px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.m-row-sub.q { font-family: var(--sans); color: var(--fg); font-weight: 500; font-size: 12.5px; }
+.m-row-sub.act {
+  display: flex; align-items: center; gap: 7px; font-family: var(--sans); color: var(--fg-faint);
+  font-variant-numeric: tabular-nums;
+}
+.m-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--working); flex: 0 0 auto; }
+
+.m-badge {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11px; font-weight: 600; line-height: 16px; padding: 3px 8px; border-radius: 999px;
+  background: var(--bg-3); color: var(--fg-dim); white-space: nowrap; flex: 0 0 auto;
+}
+.m-badge i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.m-badge.blocked { color: #0b0d10; background: var(--blocked); }
+.m-badge.done    { color: var(--done); background: rgba(93, 220, 138, 0.14); }
+.m-badge.working { color: var(--working); background: rgba(98, 176, 255, 0.14); }
+
+.m-session {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 8px 8px 2px; color: var(--fg-dim); margin-top: 12px;
+}
+.m-caret { font-size: 13px; color: var(--fg-faint); }
+.m-caret.open { transform: rotate(90deg); display: inline-block; }
+.m-session-name {
+  font-size: 12px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.m-session-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--fg-faint); }
+.m-session-dot.working { background: var(--working); }
+.m-session-count { margin-left: auto; font-size: 11px; color: var(--fg-faint); font-variant-numeric: tabular-nums; }
+
+/* pane view / transcript */
+.m-pv-head {
+  display: flex;
+  overflow: hidden; align-items: center; gap: 8px;
+  padding: 10px 10px 8px 8px;
+  border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+.m-back { font-family: var(--mono); font-size: 16px; color: var(--fg-dim); padding: 0 4px; }
+.m-pv-titles { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; }
+.m-pv-title { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.m-pv-sub { font-family: var(--mono); font-size: 10.5px; color: var(--fg-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.m-toggle { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; flex: 0 0 auto; }
+.m-toggle span {
+  height: 28px; min-width: 40px; padding: 0 8px; font-family: var(--mono); font-size: 11px;
+  color: var(--fg-faint); display: inline-flex; align-items: center; justify-content: center;
+}
+.m-toggle span.on { color: var(--fg); background: var(--bg-3); }
+
+.m-tr { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; background: var(--bg); }
+.m-tr-body { flex: 1 1 auto; min-height: 0; overflow: hidden; padding: 12px 14px 4px; }
+.m-tr-blocked { font-family: var(--sans); font-size: 12.5px; color: var(--blocked); margin: 0 0 10px; }
+.m-tr-text {
+  font-family: var(--mono); font-size: 12.5px; line-height: 1.5; margin: 0; color: var(--fg);
+  white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; max-width: 100%;
+}
+.m-tr-rule { display: block; height: 1px; margin: 8px 0; background: var(--line); }
+.m-tr-prov {
+  flex: 0 0 auto; margin: 0; padding: 8px 14px;
+  border-top: 1px solid var(--line); background: var(--bg-1);
+  font-family: var(--sans); font-size: 10.5px; line-height: 1.45; color: var(--fg-faint);
+}
+.m-tr-prov b { color: var(--fg-dim); font-weight: 600; }
+.m-tr-prov code { font-family: var(--mono); font-size: 10px; }
+.m-keys {
+  flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: 5px;
+  padding: 8px 12px; background: var(--bg-1); border-top: 1px solid var(--blocked);
+}
+.m-key {
+  flex: 0 0 auto; min-width: 32px; height: 34px; padding: 0 6px; border-radius: 8px;
+  background: var(--bg-3); color: var(--fg); font-family: var(--mono); font-size: 12.5px;
+  display: inline-flex; align-items: center; justify-content: center; border: 1px solid transparent;
+}
+.m-key.quick { border-color: var(--blocked); }
+.m-key.yes { background: var(--done); color: #06090d; font-weight: 700; border-color: transparent; }
+.m-key.no  { background: var(--bg-3); color: var(--bad); font-weight: 700; border-color: var(--blocked); }
+
+/* --------------------------------------------------------------------- list */
+.feat { list-style: none; margin: 0; padding: 0; display: grid; gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+.feat li { background: var(--bg-1); padding: 16px 18px; display: grid; gap: 4px; }
+@media (min-width: 720px) { .feat li { grid-template-columns: 220px 1fr; gap: 20px; align-items: baseline; } }
+.feat b { font-size: 15px; }
+.feat span { font-size: 15px; color: var(--fg-dim); }
+.feat code { font-size: 12.5px; background: var(--bg-3); border-radius: 5px; padding: 1px 6px; color: var(--fg); }
+
+/* ladder */
+.ladder { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; counter-reset: rung; }
+.ladder li {
+  display: grid;
+  /* minmax(0,…): a `1fr` track still refuses to go below its min-content, and
+     an unbreakable hostname in there is 9px of sideways scroll at 320px. */
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 14px;
+  align-items: baseline;
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 14px 16px;
+}
+.ladder .flag {
+  font-family: var(--mono); font-size: 12.5px; color: var(--accent);
+  background: var(--bg-3); border-radius: 5px; padding: 2px 8px; white-space: nowrap;
+  /* Fixed, so every rung's prose starts at the same left edge. */
+  min-width: 96px; text-align: center;
+}
+.ladder .reach { font-size: 15px; overflow-wrap: anywhere; }
+.ladder .why { grid-column: 1 / -1; font-size: 13.5px; color: var(--fg-faint); }
+@media (min-width: 720px) { .ladder .why { grid-column: 2; } }
+.ladder li.is-default { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+.tag-default {
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--accent); margin-left: 8px;
+}
+
+/* security */
+.sec-lead {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--blocked);
+  background: var(--bg-1);
+  border-radius: var(--radius);
+  padding: 20px;
+  margin-bottom: 22px;
+}
+.sec-lead p:last-child { margin-bottom: 0; }
+.checks { list-style: none; margin: 0; padding: 0; display: grid; gap: 14px; }
+.checks li { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 12px; align-items: start; font-size: 15px; color: var(--fg-dim); }
+.checks svg { width: 16px; height: 16px; margin-top: 4px; flex: 0 0 auto; }
+
+/* docs */
+.docs { display: grid; gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+@media (min-width: 720px) { .docs { grid-template-columns: 1fr 1fr; } }
+.doc { background: var(--bg-1); padding: 18px 20px; display: block; color: inherit; }
+.doc:hover { background: var(--bg-2); text-decoration: none; }
+.doc b { display: block; font-size: 15.5px; margin-bottom: 3px; color: var(--accent); }
+.doc span { font-size: 14px; color: var(--fg-dim); }
+
+footer { padding: 40px 0 64px; color: var(--fg-faint); font-size: 14px; }
+footer a { color: var(--fg-dim); }
+.foot-row { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}
+</style>
+</head>
+
+<body>
+
+<header class="topbar">
+  <div class="topbar-in">
+    <a class="mark" href="#top">herdr<span>-expose</span></a>
+    <nav>
+      <a href="#why" class="hide-sm">Why</a>
+      <a href="#look" class="hide-sm">What it looks like</a>
+      <a href="#security">Security</a>
+      <a href="https://github.com/muthuishere/herdr-expose">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+
+<!-- ------------------------------------------------------------------ hero -->
+<section class="hero">
+  <div class="wrap">
+    <p class="eyebrow">A Herdr plugin · one Go binary</p>
+    <h1>Your agents run on one machine. <em>You aren't always at it.</em></h1>
+    <p class="lede">
+      Reach every Claude Code — or any agent in a
+      <a href="https://herdr.dev">Herdr</a> pane — from any browser on your
+      network: the laptop in the other room, the desktop upstairs, a tablet, a
+      phone. Answer the ones that are blocked. Hand a teammate a link scoped to
+      one session that expires on its own. The web app is inside the binary.
+    </p>
+
+    <div class="cmds">
+      <div class="cmd">
+        <pre><span class="sig">$ </span>herdr plugin install muthuishere/herdr-expose</pre>
+        <button class="copy" type="button" data-copy="herdr plugin install muthuishere/herdr-expose">Copy</button>
+      </div>
+      <div class="cmd">
+        <pre><span class="sig">$ </span>herdr-expose share</pre>
+        <button class="copy" type="button" data-copy="herdr-expose share">Copy</button>
+      </div>
+      <p class="cmd-note">
+        The first installs the binary, the plugin and the agent skill. The
+        second prints a URL and a pairing code — open it on any device on your
+        network, or send it to the person who needs to drive that session. Or
+        skip sharing entirely: <code>herdr-expose daemon</code>, then
+        <code>127.0.0.1:21118</code> right where you are sitting.
+      </p>
+    </div>
+
+    <div class="hero-meta">
+      <span>Herdr 0.9.0+</span>
+      <span>macOS · Linux</span>
+      <span>no runtime deps</span>
+      <span>MIT</span>
+    </div>
+  </div>
+</section>
+
+<!-- ------------------------------------------------------------------- why -->
+<section id="why">
+  <div class="wrap">
+    <p class="eyebrow">Why this exists</p>
+    <h2>An agent is blocked on a question, and whoever could answer it is not at that keyboard.</h2>
+    <p class="lede">
+      Coding agents work for minutes at a time, then stop and ask. Until someone
+      answers, the thing just sits there. The person who could answer is usually
+      one room, one machine, or one company away.
+    </p>
+
+    <ol class="cases">
+      <li>
+        <span class="case-n">01</span>
+        <div>
+          <b>You, at a different machine.</b>
+          <span>Agents are stranded on whichever machine you are not currently
+          sitting at. The desktop upstairs is running three of them; you are on
+          the sofa with a laptop.</span>
+        </div>
+      </li>
+      <li>
+        <span class="case-n">02</span>
+        <div>
+          <b>Your other machines, all of them.</b>
+          <span>Two or three boxes, agents on each, and no single place that
+          shows you the lot. One URL on your own network and every device in the
+          house reaches every pane.</span>
+        </div>
+      </li>
+      <li>
+        <span class="case-n">03</span>
+        <div>
+          <b>Somebody else entirely.</b>
+          <span>A client or a teammate who needs to <em>work</em> on it — read
+          what the agent is doing, answer its questions, drive it. Not watch you
+          share a screen. Not hold SSH to your laptop forever.</span>
+        </div>
+      </li>
+    </ol>
+
+    <h3 style="margin:42px 0 18px">What you would otherwise do instead</h3>
+    <ul class="nope">
+      <li>
+        <b>SSH in</b>
+        <span>Fine on a laptop with your keys on it. On a tablet or a phone it is
+        a hundred-column TUI squeezed onto a small screen. And it is not
+        something you can hand to anyone else: shell on your machine is not
+        scoped to one session, not time-boxed, and not revoked by being
+        forgotten about.</span>
+      </li>
+      <li>
+        <b>A terminal-mirroring tool</b>
+        <span>It mirrors the character grid, so you get a faithful copy of
+        something that was never designed for the screen you are holding. Worse:
+        attaching resizes the pane, the agent repaints, and the history you
+        opened it to read is gone. <b>Looking at it breaks it</b> — and that is
+        far worse when the person looking is not you.</span>
+      </li>
+      <li>
+        <b>A screen share</b>
+        <span>They can watch and nothing else; you are still the only pair of
+        hands in the room. It ends when you close the laptop, and it shows them
+        everything on your screen rather than the one session you meant.</span>
+      </li>
+      <li>
+        <b>Nothing</b>
+        <span>You walk back to the desk.</span>
+      </li>
+    </ul>
+
+    <div class="turn">
+      <p>
+        Whoever opens it has exactly one question: <b>what is it doing, and does
+        it need me?</b> So that is what this answers. Agent panes render as
+        readable text that reflows to whatever screen it was opened on — not a
+        shrunken copy of a terminal grid. A blocked agent gets answered in one
+        tap. And <b>looking does not touch</b>: the reading view declares no
+        geometry at all, so someone opening a pane — on a tablet, or on the far
+        end of a link you sent — cannot resize or repaint it on the machine it
+        is actually running on.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ----------------------------------------------------------------- mocks -->
+<section id="look">
+  <div class="wrap">
+    <p class="eyebrow">What it looks like</p>
+    <h2>The same agents, on whatever you happen to be holding.</h2>
+    <p class="lede" style="margin-bottom:30px">
+      One layout for a wide screen, one for a narrow one — the same server, the
+      same session. Every panel below is hand-built HTML styled from the app's
+      own stylesheet: the real colours, spacing and states, drawn here rather
+      than screenshotted. Treat them as a faithful drawing, not a photograph.
+    </p>
+
+    <!-- ---- wide: the laptop in the other room ---- -->
+    <div class="mock mock-wide">
+      <div class="browser">
+        <div class="browser-bar">
+          <span class="browser-dots"><i></i><i></i><i></i></span>
+          <span class="browser-url">herdr.example.com</span>
+        </div>
+        <div class="browser-body">
+          <div class="screen screen-wide" role="img" aria-label="Mock of the wide layout: a sidebar listing panes across two sessions, and a grid of summary tiles showing a blocked agent's question, a working agent and a finished one.">
+            <aside class="d-side">
+              <div class="m-appbar">
+                <span class="m-brand">herdr</span>
+                <span class="m-conn"><i></i>18ms</span>
+              </div>
+              <div class="d-side-scroll">
+                <h4 class="m-ws-title urgent">Needs you</h4>
+                <ul class="m-rows">
+                  <li class="m-row blocked d-row">
+                    <div class="m-row-head">
+                      <span class="m-row-title">claude · api</span>
+                      <span class="m-badge blocked"><i></i>needs you</span>
+                    </div>
+                    <span class="m-row-sub q">Run migration 0042 against dev? (y/n)</span>
+                  </li>
+                </ul>
+                <div class="m-session">
+                  <span class="m-caret open">›</span>
+                  <span class="m-session-name">reqsume</span>
+                  <i class="m-session-dot working"></i>
+                  <span class="m-session-count">3</span>
+                </div>
+                <ul class="m-rows">
+                  <li class="m-row working d-row">
+                    <div class="m-row-head">
+                      <span class="m-row-title">claude · infra</span>
+                      <span class="m-badge working"><i></i>working</span>
+                    </div>
+                    <span class="m-row-sub act"><i class="m-dot"></i>working · 4m 12s</span>
+                  </li>
+                  <li class="m-row done d-row">
+                    <div class="m-row-head">
+                      <span class="m-row-title">codex · web</span>
+                      <span class="m-badge done"><i></i>done</span>
+                    </div>
+                    <span class="m-row-sub">✓ 41 tests passed in 8.2s</span>
+                  </li>
+                  <li class="m-row d-row">
+                    <div class="m-row-head">
+                      <span class="m-row-title">shell</span>
+                      <span class="m-badge"><i></i>idle</span>
+                    </div>
+                    <span class="m-row-sub">~/gitworkspace/reqsume</span>
+                  </li>
+                </ul>
+              </div>
+            </aside>
+            <div class="d-main">
+              <div class="d-grid">
+                <div class="d-tile blocked">
+                  <div class="m-row-head">
+                    <span class="d-tile-title">claude · api</span>
+                    <span class="m-badge blocked"><i></i>needs you</span>
+                  </div>
+                  <p class="d-tile-q">Run migration 0042 against dev? It drops the old plaintext column, which is not reversible.</p>
+                  <span class="d-tile-foot">waiting · 2m 40s</span>
+                </div>
+                <div class="d-tile working">
+                  <div class="m-row-head">
+                    <span class="d-tile-title">claude · infra</span>
+                    <span class="m-badge working"><i></i>working</span>
+                  </div>
+                  <span class="m-row-sub act" style="flex:1 1 auto"><i class="m-dot"></i>working · 4m 12s</span>
+                  <span class="d-tile-foot">no output shown while it works</span>
+                </div>
+                <div class="d-tile done">
+                  <div class="m-row-head">
+                    <span class="d-tile-title">codex · web</span>
+                    <span class="m-badge done"><i></i>done</span>
+                  </div>
+                  <pre class="d-tile-out">  PASS  src/net/connection.test.ts
+  PASS  src/store/store.test.ts
+
+  41 passed, 0 failed (8.2s)</pre>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p class="mock-cap">
+        <b>The laptop in the other room, on your own network.</b> A sidebar of
+        every pane on the machine, and a tile per pane so twenty of them do not
+        cost twenty live terminals. The one that is blocked shows its question,
+        because that is the only preview worth reading.
+        <span class="swipe-hint">Swipe the panel above to see the whole window.</span>
+      </p>
+    </div>
+
+    <div class="mocks">
+
+      <!-- ---- pane list ---- -->
+      <div class="mock">
+        <div class="phone">
+          <div class="screen" role="img" aria-label="Mock of the pane list: a section titled Needs you holds a blocked Claude Code pane and a finished one; below it a session with two working panes.">
+            <div class="m-appbar">
+              <span class="m-brand">herdr</span>
+              <span class="m-conn"><i></i>18ms</span>
+            </div>
+            <div class="m-scroll">
+              <h4 class="m-ws-title urgent">Needs you</h4>
+              <ul class="m-rows">
+                <li class="m-row blocked">
+                  <div class="m-row-head">
+                    <span class="m-row-title">claude · api</span>
+                    <span class="m-badge blocked"><i></i>needs you</span>
+                  </div>
+                  <span class="m-row-sub q">Run migration 0042 against dev? (y/n)</span>
+                </li>
+                <li class="m-row done">
+                  <div class="m-row-head">
+                    <span class="m-row-title">codex · web</span>
+                    <span class="m-badge done"><i></i>done</span>
+                  </div>
+                  <span class="m-row-sub">✓ 41 tests passed in 8.2s</span>
+                </li>
+              </ul>
+
+              <div class="m-session">
+                <span class="m-caret open">›</span>
+                <span class="m-session-name">reqsume</span>
+                <i class="m-session-dot working"></i>
+                <span class="m-session-count">4</span>
+              </div>
+              <ul class="m-rows">
+                <li class="m-row working">
+                  <div class="m-row-head">
+                    <span class="m-row-title">claude · infra</span>
+                    <span class="m-badge working"><i></i>working</span>
+                  </div>
+                  <span class="m-row-sub act"><i class="m-dot"></i>working · 4m 12s</span>
+                </li>
+                <li class="m-row">
+                  <div class="m-row-head">
+                    <span class="m-row-title">shell</span>
+                    <span class="m-badge"><i></i>idle</span>
+                  </div>
+                  <span class="m-row-sub">~/gitworkspace/reqsume</span>
+                </li>
+              </ul>
+            </div>
+          </div>
+        </div>
+        <p class="mock-cap">
+          <b>Narrow, the list answers "does anything need me?" first.</b> Blocked
+          and finished panes are pinned to the top. A working pane says
+          <em>working</em> and how long — not what it printed forty milliseconds
+          ago, because a line that changes ten times a second informs nobody.
+          Seen state is per device, so glancing at a pane on the desktop does not
+          wipe the badge on the phone.
+        </p>
+      </div>
+
+      <!-- ---- transcript ---- -->
+      <div class="mock">
+        <div class="phone">
+          <div class="screen" role="img" aria-label="Mock of the transcript view: a blocked agent's question rendered as reflowed text, a provenance footer, and a key bar with y, n, 1, 2, 3, esc and arrows.">
+            <div class="m-pv-head">
+              <span class="m-back">‹</span>
+              <div class="m-pv-titles">
+                <span class="m-pv-title">claude · api</span>
+                <span class="m-pv-sub">…/reqsume/services/api</span>
+              </div>
+              <span class="m-badge blocked"><i></i>needs you</span>
+              <span class="m-toggle"><span class="on">text</span><span>term</span></span>
+            </div>
+
+            <div class="m-tr">
+              <div class="m-tr-body">
+                <p class="m-tr-blocked">This agent is waiting for an answer. What follows is the prompt region.</p>
+                <pre class="m-tr-text">Migration 0042 adds pairing_codes and
+drops the old plaintext column, which
+is not reversible.<span class="m-tr-rule"></span>Run migration 0042 against dev?
+
+  1. Yes, run it
+  2. No, show me the SQL first
+  3. No, and stop here</pre>
+              </div>
+              <p class="m-tr-prov">
+                This is what <b>api</b> is showing on screen — the prompt region,
+                via herdr <code>detection</code>, with escape codes stripped. It
+                is not a reconstructed conversation log: herdr exposes the
+                screen, not the agent's message history. Opening it does not
+                resize the pane.
+              </p>
+              <div class="m-keys">
+                <span class="m-key yes">y</span>
+                <span class="m-key no">n</span>
+                <span class="m-key quick">1</span>
+                <span class="m-key quick">2</span>
+                <span class="m-key quick">3</span>
+                <span class="m-key">esc</span>
+                <span class="m-key">↑</span>
+                <span class="m-key">↓</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <p class="mock-cap">
+          <b>The reading view wraps to your viewport, never to the PTY.</b> A
+          119-column agent reads at 375px. The footer is always there and never
+          dismissible: it says which buffer this came from and what was changed,
+          so nothing is dressed up as a conversation we did not actually have.
+          The keys go over the control plane — tapping <code>y</code> answers the
+          agent without attaching a terminal to it, so the person doing the
+          answering never disturbs the pane they are answering.
+        </p>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ------------------------------------------------------------ principles -->
+<section>
+  <div class="wrap">
+    <p class="eyebrow">Three decisions the rest follows from</p>
+    <h2>Read it, don't mirror it. Look without touching. Never climb a rung for you.</h2>
+
+    <div class="cols cols-3" style="margin-top:28px">
+      <div class="card">
+        <span class="card-n">01 / TRANSCRIPT</span>
+        <h3>A rendering, not a mirror</h3>
+        <p>
+          Agent TUIs paint incrementally near the bottom of a fixed grid. A
+          browser cannot reflow that grid, because the server only ever sees the
+          post-layout characters. So the default view asks herdr for the pane's
+          recent output, strips the escape codes server-side, and lays it out as
+          text at <em>your</em> width.
+        </p>
+      </div>
+      <div class="card">
+        <span class="card-n">02 / NON-DESTRUCTIVE</span>
+        <h3>Looking must not touch</h3>
+        <p>
+          A reading subscriber declares no geometry, so there is no SIGWINCH, no
+          repaint, no lost scrollback on the machine you left behind — and none
+          when the person reading it is someone you sent a link to. The exact
+          terminal view still exists: one tap away, stating its cost the first
+          time per pane, and waiting for you to agree.
+        </p>
+      </div>
+      <div class="card">
+        <span class="card-n">03 / EXPOSURE</span>
+        <h3>The ladder is climbed, never guessed</h3>
+        <p>
+          This binary runs commands in your agent sessions. The blast radius of
+          each rung differs by orders of magnitude — this machine, this room, the
+          whole internet — so that difference is never a config key you forgot
+          you set. A failed request degrades <em>down</em>, loudly. Nothing ever
+          escalates.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- --------------------------------------------------------------- what/do -->
+<section>
+  <div class="wrap">
+    <p class="eyebrow">What you can do</p>
+    <h2>Six verbs, and one of them is a panic button.</h2>
+    <ul class="feat" style="margin-top:26px">
+      <li><b>Read an agent</b><span>Panes render as readable text that reflows to whatever screen opened them — not a shrunken copy of a terminal grid.</span></li>
+      <li><b>Answer it</b><span>Type a reply, or tap y / n / 1 2 3 / esc / arrows when it is blocked on a question. Generic across agent kinds.</span></li>
+      <li><b>Give someone a link</b><span><code>herdr-expose share</code> — a URL scoped to <em>one</em> session in the server, pairing-gated, gone when it expires. They can read that session and drive it; the rest of your machine is not merely hidden from them, it is absent.</span></li>
+      <li><b>Reach all of them yourself</b><span><code>herdr-expose share --all</code> — every session on the machine, which is exactly what you want when the other device is your own. It reads back what that means before it does it.</span></li>
+      <li><b>From further than the house</b><span><code>--quick</code> for a throwaway <code>trycloudflare.com</code> URL, <code>--domain yours.com</code> for your own name.</span></li>
+      <li><b>Stop everything</b><span><code>herdr-expose panic</code> — every share revoked and the main tunnel down, in one pass.</span></li>
+    </ul>
+
+    <h3 style="margin:36px 0 14px">The four rungs</h3>
+    <ol class="ladder">
+      <li class="is-default">
+        <span class="flag">no flag</span>
+        <span class="reach">Your own network — this machine and every device on it<span class="tag-default">share default</span></span>
+        <span class="why">This is the everyday case: your other laptop, the desktop upstairs, a tablet, a phone. A share exists to be opened from somewhere else, so loopback would make it pointless. The daemon's own default stays loopback, because it serves whoever is already sitting there.</span>
+      </li>
+      <li>
+        <span class="flag">--quick</span>
+        <span class="reach">A throwaway <code>trycloudflare.com</code> hostname</span>
+        <span class="why">Nothing is created in your Cloudflare account, so expiry is just stopping the process.</span>
+      </li>
+      <li>
+        <span class="flag">--domain X</span>
+        <span class="reach">The internet, on a name you own</span>
+        <span class="why">Expiry also deletes the DNS record and the named tunnel — only the ones it created.</span>
+      </li>
+      <li>
+        <span class="flag">--local</span>
+        <span class="reach">Loopback only — an explicit opt-in, for testing</span>
+        <span class="why">Bound to this machine. Useful for checking what a share actually exposes before you hand the link to anyone.</span>
+      </li>
+    </ol>
+    <p class="cmd-note" style="margin-top:14px">
+      Cloudflare is the only built-in transport; anything else is an adapter you
+      write. A <code>--quick</code> or <code>--domain</code> request with no
+      <code>cloudflared</code> to run degrades to your network and prints why —
+      because you did ask to be reachable, and that is the nearest honest answer.
+    </p>
+  </div>
+</section>
+
+<!-- -------------------------------------------------------------- security -->
+<section id="security">
+  <div class="wrap">
+    <p class="eyebrow">Before you run it</p>
+    <h2>This gives a browser control of a terminal.</h2>
+
+    <div class="sec-lead">
+      <p>
+        Typing into it runs commands as you, on your machine. The moment a tunnel
+        is up, that is a remote code execution endpoint on the public internet.
+      </p>
+      <p>
+        <b>That is the feature.</b> A terminal you cannot type into is a
+        screenshot. So the security here is not a checkbox bolted to the side —
+        it is entirely about <em>who gets to type</em>.
+      </p>
+    </div>
+
+    <ul class="checks">
+      <li>
+        <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 8.5l3.2 3.2L13 5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--done)"/></svg>
+        <span><b>Nothing is exposed unless you ask.</b> The daemon's default is this machine only, and it never escalates to the internet on its own.</span>
+      </li>
+      <li>
+        <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 8.5l3.2 3.2L13 5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--done)"/></svg>
+        <span><b>The pairing code is only ever shown on this machine</b> — the terminal, or the QR pane inside the Herdr TUI. No HTTP endpoint mints or reveals one; the pairing endpoint only accepts codes. Codes are six characters, single-use, valid ten minutes, rate-limited per source.</span>
+      </li>
+      <li>
+        <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 8.5l3.2 3.2L13 5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--done)"/></svg>
+        <span><b>Every share expires, so access ends whether or not you remember it.</b> There is no permanent share — a long one is thirty days. Each is time-boxed three ways, and scope is enforced in the server: for whoever you sent the link to, the sessions you did not share are absent from the tree, not merely hidden from the screen. Revoke early with one command if you want it back sooner.</span>
+      </li>
+      <li>
+        <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 8.5l3.2 3.2L13 5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--done)"/></svg>
+        <span><b>You do not choose the bind address; the mode does.</b> There is no free-form setting to get wrong. Device tokens are 32 random bytes with a sliding 30-day expiry, capped at 32 devices, individually revocable. Secrets are stored as SHA-256 hashes and compared in constant time — never plaintext, never in a log.</span>
+      </li>
+      <li>
+        <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 1.6l5.8 2.4v4c0 3.5-2.4 5.9-5.8 6.9-3.4-1-5.8-3.4-5.8-6.9V4z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" style="color:var(--blocked)"/></svg>
+        <span><b>And what you have to do:</b> take the tunnel down when you are done, do not leave LAN mode on at a coffee shop, and treat the URL as a credential even though it is not one. Your tunnel provider terminates TLS — this is not end-to-end encrypted, and nobody should imply otherwise.</span>
+      </li>
+    </ul>
+
+    <p class="cmd-note" style="margin-top:22px">
+      <code>herdr-expose doctor</code> checks the lot and tells you which part is unhappy.
+    </p>
+  </div>
+</section>
+
+<!-- ------------------------------------------------------------------ docs -->
+<section>
+  <div class="wrap">
+    <p class="eyebrow">Read further</p>
+    <h2>The API is the product.</h2>
+    <p class="lede" style="margin-bottom:26px">
+      The web app is its first client. A native one is meant to be the second,
+      built against a documented, versioned HTTP + WebSocket contract with no
+      access to this repository.
+    </p>
+    <div class="docs">
+      <a class="doc" href="https://github.com/muthuishere/herdr-expose">
+        <b>The repository →</b>
+        <span>Source, releases, issues. MIT.</span>
+      </a>
+      <a class="doc" href="https://github.com/muthuishere/herdr-expose/blob/main/docs/guide.md">
+        <b>Full guide →</b>
+        <span>Install, exposure modes, config, security model, troubleshooting.</span>
+      </a>
+      <a class="doc" href="https://github.com/muthuishere/herdr-expose/blob/main/docs/api.md">
+        <b>API →</b>
+        <span>The WebSocket + HTTP contract, enough to build a native client.</span>
+      </a>
+      <a class="doc" href="https://github.com/muthuishere/herdr-expose/tree/main/docs/adr">
+        <b>Decisions →</b>
+        <span>36 ADRs — what was chosen, and what it cost.</span>
+      </a>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap foot-row">
+    <span class="mark">herdr<span>-expose</span></span>
+    <span>MIT</span>
+    <span>Requires <a href="https://herdr.dev">Herdr</a> 0.9.0+</span>
+    <span><a href="https://github.com/muthuishere/herdr-expose">github.com/muthuishere/herdr-expose</a></span>
+  </div>
+</footer>
+
+<script>
+document.querySelectorAll('.copy').forEach(function (btn) {
+  btn.addEventListener('click', function () {
+    var text = btn.getAttribute('data-copy');
+    var done = function () {
+      btn.textContent = 'Copied';
+      btn.setAttribute('data-done', '1');
+      setTimeout(function () {
+        btn.textContent = 'Copy';
+        btn.removeAttribute('data-done');
+      }, 1600);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, fallback);
+    } else {
+      fallback();
+    }
+    function fallback() {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); done(); } catch (e) { /* nothing to do */ }
+      document.body.removeChild(ta);
+    }
+  });
+});
+</script>
+
+</body>
+</html>
