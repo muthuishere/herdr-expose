@@ -98,6 +98,105 @@ function agentState(pane) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
+/* ------------------------------------------------- the transcript watchdog */
+
+/**
+ * A second, protocol-level connection that subscribes panes in TRANSCRIPT view
+ * and records when every frame arrived.
+ *
+ * Why this exists: the LIVE path has check 8 — a pane idle for 65s must still
+ * deliver when it finally speaks — and the TRANSCRIPT path, which is the
+ * DEFAULT view for every pane since K2, had no equivalent at all. It also had
+ * no staleness assertion, so a sweep whose period grew with the number of
+ * panes watched (measured: ~1s at one target, ~10s at twelve) was invisible to
+ * this suite.
+ *
+ * It is its own websocket rather than the browser's, because the UI shows one
+ * pane at a time and cannot hold N transcript subscriptions, and because it can
+ * sit through section 8's idle soak without disturbing what that section
+ * measures. It is READ-ONLY: a transcript subscription declares no geometry and
+ * never attaches to a terminal.
+ */
+async function openTranscriptProbe(page, targets) {
+  const token = await page.evaluate(() => {
+    try {
+      return localStorage.getItem('herdr-expose.token')
+    } catch {
+      return null
+    }
+  })
+  const url =
+    URL_BASE.replace(/^http/, 'ws') + '/v1/stream' + (token ? `?token=${encodeURIComponent(token)}` : '')
+  const ws = new WebSocket(url)
+  /** @type {Map<string, number[]>} arrival times, per target */
+  const arrivals = new Map(targets.map((t) => [t, []]))
+  const texts = new Map()
+  ws.binaryType = 'arraybuffer'
+  ws.addEventListener('message', (ev) => {
+    if (typeof ev.data !== 'string') return // data plane: not our business
+    let env
+    try {
+      env = JSON.parse(ev.data)
+    } catch {
+      return
+    }
+    if (env.type !== 'transcript') return
+    const d = env.data ?? {}
+    if (!arrivals.has(d.target)) return
+    arrivals.get(d.target).push(Date.now())
+    texts.set(d.target, d.text ?? '')
+  })
+  await new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error('transcript probe never opened')), 15000)
+    ws.addEventListener('open', () => {
+      clearTimeout(t)
+      resolve()
+    })
+    ws.addEventListener('error', (e) => {
+      clearTimeout(t)
+      reject(e)
+    })
+  })
+  ws.send(
+    JSON.stringify({
+      type: 'viewport',
+      data: { targets: Object.fromEntries(targets.map((t) => [t, 'transcript'])) },
+    }),
+  )
+  return {
+    /** Wait for `needle` to show up in a target's transcript. ms, or -1. */
+    async waitForText(target, needle, timeoutMs) {
+      const t0 = Date.now()
+      while (Date.now() - t0 < timeoutMs) {
+        if ((texts.get(target) ?? '').includes(needle)) return Date.now() - t0
+        await sleep(250)
+      }
+      return -1
+    },
+    /** Per-target gaps between consecutive transcript frames, in seconds. */
+    intervals(sinceMs) {
+      const out = {}
+      for (const [t, ts] of arrivals) {
+        const kept = ts.filter((x) => x >= sinceMs)
+        const gaps = []
+        for (let i = 1; i < kept.length; i++) gaps.push((kept[i] - kept[i - 1]) / 1000)
+        out[t] = { frames: kept.length, gaps }
+      }
+      return out
+    },
+    count(target) {
+      return (arrivals.get(target) ?? []).length
+    },
+    close() {
+      try {
+        ws.close()
+      } catch {
+        /* already gone */
+      }
+    },
+  }
+}
+
 /* ------------------------------------------------------------ browser side */
 
 /** Text the terminal is actually rendering. Requires the DOM renderer. */
@@ -869,6 +968,36 @@ const main = async () => {
   // Let it settle again before the idle soak measures churn.
   await sleep(1500)
 
+  /* -- 8c. the TRANSCRIPT path gets check 8's guard too ------------------ */
+  //
+  // Opened BEFORE the soak so it sits through the same idle window the LIVE
+  // stream does, and costs the suite no extra minute.
+  const trTargets = [
+    `${SESSION}/${AGENT_PANE}`,
+    `${SESSION}/${SHELL_PANE}`,
+    `${SESSION}/${BLOCKED_PANE}`,
+  ]
+  let probe = null
+  try {
+    probe = await openTranscriptProbe(page, trTargets)
+  } catch (e) {
+    check('a protocol client can subscribe panes in transcript view', false, String(e))
+  }
+  if (probe) {
+    // The FIRST frame is unconditional by design: a subscriber that has just
+    // arrived needs the current text whether or not anything changed.
+    let firstOk = false
+    for (let i = 0; i < 40 && !firstOk; i++) {
+      firstOk = trTargets.every((t) => probe.count(t) > 0)
+      if (!firstOk) await sleep(250)
+    }
+    check(
+      `every transcript subscriber gets a first frame without waiting for the pane to move`,
+      firstOk,
+      trTargets.map((t) => `${t}=${probe.count(t)}`).join(' '),
+    )
+  }
+
   console.log(`  ... holding an IDLE pane open for ${IDLE_SECS}s ...`)
   await sleep(IDLE_SECS * 1000)
 
@@ -917,6 +1046,57 @@ const main = async () => {
         JSON.stringify(await stats(page), null, 2),
       ].join('\n'),
     )
+  }
+
+  // THE TRANSCRIPT EQUIVALENT OF CHECK 8, on the same pane, over the same
+  // 65s idle window: the DEFAULT view must not quietly stop delivering either.
+  if (probe) {
+    const trIdleMs = await probe.waitForText(`${SESSION}/${SHELL_PANE}`, token2, 30000)
+    check(
+      `output produced after ${IDLE_SECS}s of idle also reaches the TRANSCRIPT view`,
+      trIdleMs >= 0,
+      trIdleMs >= 0
+        ? `appeared after ${trIdleMs}ms`
+        : `${token2} NEVER appeared in 30s — the transcript poll died on the idle pane`,
+    )
+
+    /* -- 8d. staleness at N targets ------------------------------------- */
+    //
+    // The sweep used to be serial, so its period was N x the cost of one read
+    // and the default view went stale in proportion to how many panes you were
+    // watching. Make all N panes produce continuously, then measure the gap
+    // between consecutive frames per target.
+    const emitters = [SHELL_PANE, BLOCKED_PANE]
+    for (const p of emitters) {
+      herdr('pane', 'send-text', p, 'while true; do date +%s%N; sleep 0.2; done')
+      await sleep(150)
+      herdr('pane', 'send-keys', p, 'enter')
+    }
+    const since = Date.now() + 2000
+    await sleep(22000)
+    const iv = probe.intervals(since)
+    const measured = Object.entries(iv).filter(([, v]) => v.gaps.length >= 3)
+    const worst = measured.length
+      ? Math.max(...measured.map(([, v]) => Math.max(...v.gaps)))
+      : -1
+    check(
+      `the transcript stays ~1Hz with ${trTargets.length} targets subscribed at once`,
+      measured.length >= 2 && worst >= 0 && worst <= 3,
+      measured.length < 2
+        ? `only ${measured.length} target(s) produced enough frames to measure`
+        : `worst gap ${worst.toFixed(2)}s across ${measured.length} targets ` +
+          `(${measured.map(([t, v]) => `${t.split('/').pop()}:${v.frames}f`).join(' ')})`,
+    )
+    // Cleanup must never be able to fail the run: these panes are torn down
+    // with the session a moment later anyway.
+    for (const p of emitters) {
+      try {
+        herdr('pane', 'send-keys', p, 'ctrl+c')
+      } catch {
+        /* the pane is going away with the session regardless */
+      }
+    }
+    probe.close()
   }
 
   const statsAfter = await stats(page)

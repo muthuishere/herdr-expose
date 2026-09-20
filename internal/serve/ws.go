@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"net/http"
 	"strings"
 	"sync"
@@ -82,6 +83,12 @@ type wsConn struct {
 	// treeReq asks treeLoop for a push from a goroutine that does not own the
 	// connection's tree state (the reader goroutine, on `hello` / `seen`).
 	treeReq chan struct{}
+
+	// treeHash/treeSent dedup the rendered tree for THIS connection. They are
+	// touched only by treeLoop, which is this connection's single tree writer,
+	// so they need no lock — the same invariant agentState relies on.
+	treeHash uint64
+	treeSent bool
 
 	out     chan outMsg
 	queued  atomic.Int64
@@ -496,8 +503,48 @@ func (s *Server) treeLoop(ctx context.Context, conn *wsConn, treeCh <-chan struc
 func (s *Server) sendTree(ctx context.Context, conn *wsConn) {
 	t := s.hub.Store().Tree()
 	view := buildTree(t, conn.sess)
-	conn.SendJSON("tree", view)
+	// DEDUP ON WHAT THE CLIENT ACTUALLY RECEIVES, which is the only dedup that
+	// cannot be wrong.
+	//
+	// The store already refuses to publish a byte-identical tree, but the tree
+	// it holds carries fields no view renders — herdr bumps `Pane.Revision` on
+	// every byte a pane emits, so on a machine where anything is running the
+	// raw tree is never twice the same while the VIEW is. Measured on an idle
+	// 12-session bed: 44 frames in 12s, 12.5KB each, ONE distinct payload, and
+	// `rev` the only field that ever differed — which also defeated any
+	// client-side dedup, because a client cannot tell a new revision from new
+	// information. Marshalling once to compare is far cheaper than marshalling,
+	// deflating and writing a frame that says nothing.
+	if conn.treeViewChanged(view) {
+		conn.SendJSON("tree", view)
+	}
+	// emitAgents runs EITHER WAY: it has its own per-connection change
+	// detection, and a blocked pane's detection text can arrive without the
+	// tree around it having moved.
 	s.emitAgents(ctx, conn, view, conn.takeFirst())
+}
+
+// treeViewChanged reports whether this connection's rendered tree says anything
+// new, and remembers the answer. `rev` is excluded from the comparison on
+// purpose: it is a revision counter, not content, and treating it as content is
+// exactly what made every tree frame look new.
+//
+// Called only from treeLoop, which is this connection's single tree writer.
+func (c *wsConn) treeViewChanged(view TreeView) bool {
+	cmp := view
+	cmp.Rev = 0
+	b, err := json.Marshal(&cmp)
+	if err != nil {
+		return true // cannot compare: send it rather than guess
+	}
+	h := fnv.New64a()
+	_, _ = h.Write(b)
+	sum := h.Sum64()
+	if c.treeSent && c.treeHash == sum {
+		return false
+	}
+	c.treeHash, c.treeSent = sum, true
+	return true
 }
 
 func (s *Server) handleControl(ctx context.Context, conn *wsConn, data []byte) {

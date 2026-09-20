@@ -561,3 +561,70 @@ func TestMetricsStillRequiresAuth(t *testing.T) {
 		t.Fatalf("metrics must stay authenticated, got %d", rec.Code)
 	}
 }
+
+// /v1/config is the ONE endpoint an unpaired client must be able to read, and
+// it was handing over more than it had to. Through a public tunnel a scanner
+// with no token got back `"scope":"hexstress-b"` and the default session's
+// name — the name of a real Herdr session on a real machine, and on a share
+// also a description of exactly what is behind the link.
+//
+// What stays public is only what a client cannot pair without: a browser
+// cannot read the status of a failed WebSocket handshake, so without
+// auth_required/authenticated it can never tell "pair me" from "network down".
+func TestConfigWithholdsScopeAndSessionUntilAuthenticated(t *testing.T) {
+	s := newTestServer(t)
+	sc, err := core.ParseScope("hexstress-b", nil)
+	if err != nil {
+		t.Fatalf("scope: %v", err)
+	}
+	s.hub.Store().SetScope(sc)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "http://herdr.example/v1/config", nil)
+	s.routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/v1/config must stay reachable before pairing, got %d", rec.Code)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("config body: %v", err)
+	}
+	if _, leaked := body["scope"]; leaked {
+		t.Errorf("unauthenticated /v1/config leaks scope = %v", body["scope"])
+	}
+	if tg, ok := body["targets"].(map[string]any); ok {
+		if v, leaked := tg["default_session"]; leaked {
+			t.Errorf("unauthenticated /v1/config leaks default_session = %v", v)
+		}
+		if tg["format"] == nil || tg["separator"] == nil {
+			t.Error("the target FORMAT is not a secret and a client needs it before pairing")
+		}
+	} else {
+		t.Fatal("config lost its targets block")
+	}
+	for _, want := range []string{"auth_required", "authenticated", "api", "stream"} {
+		if _, ok := body[want]; !ok {
+			t.Errorf("unauthenticated /v1/config lost %q, which a client cannot pair without", want)
+		}
+	}
+	if body["auth_required"] != true || body["authenticated"] != false {
+		t.Fatalf("auth discovery is wrong for an unpaired caller: %s", rec.Body.String())
+	}
+
+	// Paired, and the same call tells it everything.
+	tok := pairDevice(t, s.auth, "laptop")
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "http://herdr.example/v1/config", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	s.routes().ServeHTTP(rec, req)
+	body = map[string]any{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("config body: %v", err)
+	}
+	if body["scope"] == nil {
+		t.Error("an authenticated caller must still be told the scope it is talking to")
+	}
+	if tg, _ := body["targets"].(map[string]any); tg == nil || tg["default_session"] == nil {
+		t.Error("an authenticated caller must still be told the default session")
+	}
+}

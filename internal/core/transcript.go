@@ -26,10 +26,36 @@ const (
 	// TranscriptInterval is the poll period. 1Hz is fast enough to feel live
 	// for reading and slow enough that it is not the summary firehose again.
 	TranscriptInterval = 1 * time.Second
-	// TranscriptLines is how much recent buffer to ask for. Generous: this is
-	// the ONLY history a phone gets, and the cost of a bigger read is one
-	// upstream call that is deduplicated across every subscriber.
-	TranscriptLines = 400
+	// TranscriptLines is how much recent buffer to ask for.
+	//
+	// It was 400, and 400 was chosen on the theory that a bigger read is free
+	// because it is deduplicated across subscribers. MEASURED on an isolated
+	// 12-session bed (herdr 0.9.0, over the socket, which is the only way this
+	// process ever reads): `pane.read source=recent_unwrapped` costs 0.1ms at
+	// 0 lines, 0.1ms at 100, 0.2ms at 400 and 0.3ms at 1600 — flat, and the
+	// same flat with 60k lines of scrollback behind the pane. So the line
+	// budget is NOT a latency lever upstream; it is a PAYLOAD lever. 400 lines
+	// was ~8.5KB of JSON per subscriber per second per pane, for text no phone
+	// renders. 200 halves that and is still more history than the view shows.
+	//
+	// (The ~780ms/call the stress run attributed to this read could not be
+	// reproduced on the bed at any line count, by socket or by CLI. What IS
+	// reproducible, and what actually made the view go stale, is the serial
+	// sweep below: whatever one read costs, the period was N times it.)
+	TranscriptLines = 200
+
+	// TranscriptWorkers bounds how many targets are read AT ONCE in one sweep.
+	//
+	// The sweep used to be a plain `for _, target := range targets { poll() }`
+	// inside a 1s ticker, so the real period was N x (cost of one read) and the
+	// product's DEFAULT view went stale in direct proportion to how many panes
+	// you were watching — the one thing a user cannot do anything about.
+	// A bounded pool makes the period max(TranscriptInterval, cost x N/W)
+	// instead, and bounded is the point: unbounded fanout across 44 panes is a
+	// thundering herd on somebody's real Herdr server, which K5 spends a whole
+	// amendment keeping calm. Each read dials its own short-lived socket
+	// connection (upstream.Client.Call), so concurrency here is safe.
+	TranscriptWorkers = 8
 
 	// SourceRecent is the default: recent output as LOGICAL lines, not as the
 	// PTY's post-layout grid rows. Herdr spells it with an underscore on the
@@ -149,10 +175,57 @@ func (p *transcriptPoller) run(ctx context.Context) {
 			targets = append(targets, target)
 		}
 		p.mu.Unlock()
-		for _, target := range targets {
-			p.poll(ctx, target)
+		p.sweep(ctx, targets)
+	}
+}
+
+// sweep reads every subscribed target through a bounded worker pool and returns
+// only when the whole sweep is done, so sweeps never overlap themselves.
+//
+// This is the fix for the staleness: the period of the DEFAULT view is now
+// max(TranscriptInterval, readCost x ceil(N/TranscriptWorkers)) instead of
+// N x readCost.
+func (p *transcriptPoller) sweep(ctx context.Context, targets []string) {
+	forEachBounded(ctx, targets, TranscriptWorkers, p.poll)
+}
+
+// forEachBounded runs fn over items with at most `workers` in flight, and
+// returns only when every item has been handled (or ctx is done). Bounded, not
+// unbounded: the items here are upstream reads against somebody's real Herdr
+// server, and 44 of them at once is a thundering herd.
+func forEachBounded(ctx context.Context, items []string, workers int,
+	fn func(context.Context, string)) {
+	if len(items) == 0 {
+		return
+	}
+	if workers < 1 {
+		workers = 1
+	}
+	if len(items) < workers {
+		workers = len(items)
+	}
+	work := make(chan string)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			for item := range work {
+				fn(ctx, item)
+			}
+		}()
+	}
+	for _, item := range items {
+		select {
+		case work <- item:
+		case <-ctx.Done():
+			close(work)
+			wg.Wait()
+			return
 		}
 	}
+	close(work)
+	wg.Wait()
 }
 
 func (p *transcriptPoller) poll(ctx context.Context, target string) {

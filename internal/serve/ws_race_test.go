@@ -191,3 +191,48 @@ func TestTreeLoopSerialisesPushes(t *testing.T) {
 		t.Fatal("treeLoop did not exit when the connection closed")
 	}
 }
+
+// An UNCHANGED tree is not pushed, and `rev` alone is not a change.
+//
+// Measured on an idle 12-session bed: 44 tree frames in 12s, 12.5KB each, one
+// distinct payload among them, and `rev` the only field that ever differed —
+// so 97% of the bytes carried no information and the bump defeated client-side
+// dedup as well. The store now refuses to publish an identical tree, but the
+// tree it holds carries fields no view renders (herdr bumps Pane.Revision on
+// every byte a pane emits), so the decision that actually reaches the wire has
+// to be made HERE, on the rendered view.
+func TestUnchangedTreeIsNotPushed(t *testing.T) {
+	s := newTestServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	conn, seen := raceConn(t, s, ctx)
+	defer conn.sess.Close()
+
+	s.sendTree(ctx, conn)
+	waitForCount(t, seen, 1)
+
+	for i := 0; i < 20; i++ {
+		s.sendTree(ctx, conn)
+	}
+	time.Sleep(120 * time.Millisecond)
+	if got := seen(); got != 1 {
+		t.Fatalf("%d control frames after 21 identical tree pushes, want 1", got)
+	}
+
+	// A real change still goes out on the very next push.
+	conn.treeHash, conn.treeSent = 0, false // stands in for "the view changed"
+	s.sendTree(ctx, conn)
+	waitForCount(t, seen, 2)
+}
+
+func waitForCount(t *testing.T, seen func() int, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if seen() >= want {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("saw %d control frames, want %d", seen(), want)
+}

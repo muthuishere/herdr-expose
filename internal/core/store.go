@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"hash/fnv"
 	"log/slog"
 	"sort"
 	"sync"
@@ -99,6 +100,16 @@ type Store struct {
 
 	cur atomic.Pointer[Tree]
 	rev atomic.Uint64
+
+	// lastID/published are publish's change detector. They are touched ONLY by
+	// the single writer goroutine (publish is reachable only from a func posted
+	// to s.work), so they need no lock and no atomic.
+	lastID    uint64
+	published bool
+	// suppressed counts publishes skipped because the tree was byte-identical.
+	// It is the measurement that proves the detector is working, and it is read
+	// from /v1/metrics, so it IS atomic.
+	suppressed atomic.Uint64
 
 	// work is the single-writer mailbox.
 	work chan func(*mutable)
@@ -557,7 +568,6 @@ func (s *Store) publish(m *mutable) {
 		}
 	}
 	t := &Tree{
-		Rev:            s.rev.Add(1),
 		Connected:      anyConn,
 		FocusedSession: focused,
 		Sessions:       sessions,
@@ -568,8 +578,58 @@ func (s *Store) publish(m *mutable) {
 	if f := t.Session(focused); f != nil {
 		t.Version, t.Protocol = f.Version, f.Protocol
 	}
+
+	// CHANGE DETECTION, and it is the whole reason this function is not a
+	// broadcast amplifier.
+	//
+	// K6 re-reads the tree every 1.5s while anyone is looking, and ResyncAll
+	// queues that read for EVERY attached session independently — so a machine
+	// with 12 sessions produced 12 publishes per tick. Each one bumped Rev and
+	// woke every connection's treeLoop, which marshalled and deflated the whole
+	// tree again. Measured on an idle 12-session bed: 44 tree frames in 12s,
+	// 12.5KB each, and exactly ONE distinct payload among them — the only field
+	// that ever differed was `rev`. The bump also defeated client-side dedup,
+	// because a client cannot tell "new revision" from "new information".
+	//
+	// So: hash what the tree SAYS, ignoring Rev and At (which are bookkeeping,
+	// not content). Identical content is not a revision, gets no Rev and wakes
+	// nobody. A real change still propagates on the very next publish, with no
+	// added latency and no timer.
+	if id, ok := treeIdentity(t); ok && s.published && id == s.lastID {
+		s.suppressed.Add(1)
+		return
+	} else if ok {
+		s.lastID, s.published = id, true
+	}
+	t.Rev = s.rev.Add(1)
 	s.cur.Store(t)
 	s.notify()
+}
+
+// SuppressedPublishes is how many tree publishes carried no new information and
+// were dropped instead of broadcast. Exported so /v1/metrics can report it: the
+// claim "an idle machine broadcasts nothing" is only worth making if it is
+// measurable from outside.
+func (s *Store) SuppressedPublishes() uint64 { return s.suppressed.Load() }
+
+// treeIdentity hashes everything a client would RENDER, which is the whole tree
+// except Rev and At.
+//
+// Marshalling is deterministic here: Sessions is built from a sorted name list
+// and encoding/json emits map keys in sorted order, so equal content really
+// does produce equal bytes. A marshal failure reports !ok and the caller
+// publishes rather than guessing — suppressing a frame we could not hash would
+// be silently dropping state.
+func treeIdentity(t *Tree) (uint64, bool) {
+	c := *t
+	c.Rev, c.At = 0, time.Time{}
+	b, err := json.Marshal(&c)
+	if err != nil {
+		return 0, false
+	}
+	h := fnv.New64a()
+	_, _ = h.Write(b)
+	return h.Sum64(), true
 }
 
 // applySnapshot recomputes derived state for ONE session from a fresh tree.

@@ -14,15 +14,17 @@ import (
 
 // Hub owns everything shared between connections.
 //
-// Note what it deliberately does NOT share: LIVE terminal streams. Each
-// connection gets its own `herdr terminal session` subprocess with its own
-// geometry, because a shared stream would let a phone at 40 columns resize the
-// laptop watching the same pane. Only SUMMARY reads are deduplicated, since
-// pane.read is geometry-free.
+// LIVE streams ARE shared, for every target nobody has explicitly sized — hard
+// rule #3, restored now that AMENDMENTS 14 / K4 has taken geometry off the
+// attach path and removed B1's only justification for a stream per connection.
+// See shared.go for the measurement and for what stays per-connection (seq,
+// snapshot-on-attach, coalescer, seen). A target a client has fitted to its own
+// window with `resize` still gets its own private stream at its own size, and
+// so does every CONTROL stream.
 //
 // Every target it handles is SESSION-QUALIFIED (`<session>/<pane_id>`) and is
-// routed to that session's socket. Per-connection streams and session-qualified
-// targets compose: the stream key is the full target, so the same pane id in two
+// routed to that session's socket. Shared streams and session-qualified targets
+// compose: the stream key is the full target, so the same pane id in two
 // sessions is two independent streams.
 type Hub struct {
 	store      *Store
@@ -30,6 +32,16 @@ type Hub struct {
 	summary    *summaryPoller
 	transcript *transcriptPoller
 	metrics    *Metrics
+
+	// sharedMu guards shared and ctx. Held across the subprocess spawn in
+	// attachShared, which is what makes "the first subscriber starts it, the
+	// rest join it" true rather than racy.
+	sharedMu sync.Mutex
+	shared   map[string]*sharedStream
+	// ctx is the HUB's lifetime, and it is what a shared stream is started on.
+	// Starting one on the first subscriber's connection context would kill the
+	// stream for everyone else the moment that one client went away.
+	ctx context.Context
 
 	// clients counts live websocket connections, for /v1/metrics and for the
 	// "clients" line in the log on connect/disconnect.
@@ -47,6 +59,7 @@ func NewHub(store *Store, log *slog.Logger) *Hub {
 	return &Hub{store: store, log: log,
 		summary:    newSummaryPoller(store, log),
 		transcript: newTranscriptPoller(store, log),
+		shared:     map[string]*sharedStream{},
 		metrics:    NewMetrics()}
 }
 
@@ -61,6 +74,11 @@ func (h *Hub) Store() *Store { return h.store }
 // products with different costs, and folding them into one ticker would make
 // the cheaper one pay the other's rate.
 func (h *Hub) Run(ctx context.Context) {
+	// Record the hub's lifetime BEFORE anything can attach: it is the context a
+	// shared upstream stream is spawned on.
+	h.sharedMu.Lock()
+	h.ctx = ctx
+	h.sharedMu.Unlock()
 	go h.transcript.run(ctx)
 	go h.refreshTree(ctx)
 	h.summary.run(ctx)
@@ -154,7 +172,14 @@ type Session struct {
 }
 
 type liveStream struct {
+	// stream is this connection's OWN subprocess, and is nil when the
+	// connection is instead a subscriber on a shared one (see shared below).
+	// Nothing may Stop, Resize or write to a stream it does not own.
 	stream *upstream.TerminalStream
+	// shared is the fanout this connection is subscribed to, or nil for a
+	// private stream. Only observe streams on targets with no explicit
+	// geometry are ever shared.
+	shared *sharedStream
 	mode   upstream.TerminalMode
 	hdrLen int
 	target string
@@ -529,6 +554,14 @@ func (s *Session) startStream(target string, mode upstream.TerminalMode) (*liveS
 		s.mu.Unlock()
 		return ls, nil
 	}
+	// SHARED or PRIVATE, decided here and nowhere else.
+	//
+	// Shared is for exactly the case B1's objection no longer covers: an
+	// OBSERVE stream on a target this connection has not explicitly sized, so
+	// there is no --cols/--rows to be per-connection ABOUT. A control stream is
+	// never shared (there is one controller), and neither is a target somebody
+	// has fitted to their own window.
+	shareable := mode == upstream.ModeObserve && !s.explicit[target]
 	// THE GEOMETRY DECISION, and it is a one-liner on purpose.
 	//
 	// Unless the user EXPLICITLY asked us to fit this pane to their window, we
@@ -549,6 +582,32 @@ func (s *Session) startStream(target string, mode upstream.TerminalMode) (*liveS
 	ls.needSnap.Store(true)
 	s.streams[target] = ls
 	s.mu.Unlock()
+
+	if shareable {
+		ss, joined, err := s.hub.attachShared(s, target, paneID, socket, hdr, ls)
+		if err != nil {
+			s.mu.Lock()
+			if s.streams[target] == ls {
+				delete(s.streams, target)
+			}
+			s.mu.Unlock()
+			s.sink.SendJSON("closed", map[string]any{"target": target, "reason": err.Error()})
+			return nil, err
+		}
+		ls.shared = ss
+		if joined {
+			// A LATE JOINER, and this is the part that must not be skipped.
+			// The subprocess is already running, so herdr sends it no attach
+			// frame — without this the client would sit on an empty terminal
+			// until the pane happened to move. It is owed exactly what a
+			// private attach gave it: the pane's size, and a full screen.
+			if g := ss.geometry(); g.Valid() {
+				s.noteAttached(target, g)
+			}
+			s.requestRepaint(target)
+		}
+		return ls, nil
+	}
 
 	h := &streamHandler{sess: s, target: target, hdrLen: hdr, ls: ls}
 	ts := upstream.NewTerminalStream(paneID, mode, g.Cols, g.Rows, h, s.log)
@@ -594,6 +653,12 @@ func (s *Session) stopStream(target string) {
 	// Mark BEFORE killing: OnClosed runs on the subprocess reader goroutine and
 	// must be able to tell a deliberate teardown from an upstream death.
 	ls.stopped.Store(true)
+	if ls.shared != nil {
+		// Leaving a shared stream is a detach, not a kill: the subprocess dies
+		// only when the LAST subscriber goes (detach handles that, and waits).
+		ls.shared.detach(s)
+		return
+	}
 	if ls.stream != nil {
 		ls.stream.Stop()
 		ls.stream.Wait(2 * time.Second)
@@ -662,6 +727,12 @@ func (s *Session) Close() {
 	s.mu.Unlock()
 	for _, ls := range streams {
 		ls.stopped.Store(true)
+		if ls.shared != nil {
+			// Refcounted: the pane keeps streaming for everyone else still
+			// watching it, and stops only when this was the last viewer.
+			ls.shared.detach(s)
+			continue
+		}
 		if ls.stream != nil {
 			ls.stream.Stop()
 		}
@@ -718,34 +789,46 @@ func (h *streamHandler) OnFrame(f upstream.TerminalFrame) {
 	if f.Width > 0 && f.Height > 0 {
 		h.sess.noteAttached(h.target, Geometry{Cols: f.Width, Rows: f.Height})
 	}
+	h.sess.deliverFrame(h.target, h.ls, f.Data, f.Off, h.hdrLen, f.Full, t0)
+}
+
+// deliverFrame is ONE connection's half of a terminal frame, and it is shared
+// verbatim by the private and the fanned-out paths — which is the point. A
+// client must not be able to tell from its data plane whether the subprocess
+// behind it is serving it alone.
+//
+// It takes ownership of exactly one reference on buf.
+func (s *Session) deliverFrame(target string, ls *liveStream, buf *upstream.Buf,
+	off, hdrLen int, full bool, t0 time.Time) {
 	// A stream that has stayed up counts as recovered: forget the backoff
 	// history so a target that dies again hours later restarts promptly. The
 	// check is a wall-clock compare and an atomic load, so it costs nothing on
 	// the per-frame hot path.
-	if h.ls != nil && !h.ls.healthy.Load() && !h.ls.startedAt.IsZero() &&
-		time.Since(h.ls.startedAt) >= StreamHealthyAfter && h.ls.healthy.CompareAndSwap(false, true) {
-		h.sess.clearRestarts(h.target)
+	if ls != nil && !ls.healthy.Load() && !ls.startedAt.IsZero() &&
+		time.Since(ls.startedAt) >= StreamHealthyAfter && ls.healthy.CompareAndSwap(false, true) {
+		s.clearRestarts(target)
 	}
-	h.sess.hub.metrics.CountFrame(f.Data.Len() - f.Off)
-	if f.Off != h.hdrLen {
+	s.hub.metrics.CountFrame(buf.Len() - off)
+	if off != hdrLen {
 		// Defensive: reservation mismatch means we cannot stamp in place.
-		defer f.Data.Release()
-		h.sess.sink.SendBinary(encodeFrame(TypeFrame, h.sess.seq.next(), h.target, f.Data.B[f.Off:]))
+		defer buf.Release()
+		s.sink.SendBinary(encodeFrame(TypeFrame, s.seq.next(), target, buf.B[off:]))
 		return
 	}
 	// type 2 means "you cannot trust your buffer, reset and repaint". That is
 	// true only when this CONNECTION just attached, lost bytes to a gap, or had
 	// its stream restarted — NOT on Herdr's periodic `full` repaints, which are
-	// self-contained and paint cleanly into a live buffer.
-	if f.Full && h.ls != nil && h.ls.needSnap.CompareAndSwap(true, false) {
-		stampHeader(f.Data.B, TypeSnapshot, h.sess.seq.next(), h.target)
-		h.sess.sink.SendBinary(f.Data)
-		h.sess.hub.metrics.Output.Since(t0)
+	// self-contained and paint cleanly into a live buffer. needSnap is per
+	// CONNECTION, so on a shared stream one client's reset never resets another.
+	if full && ls != nil && ls.needSnap.CompareAndSwap(true, false) {
+		stampHeader(buf.B, TypeSnapshot, s.seq.next(), target)
+		s.sink.SendBinary(buf)
+		s.hub.metrics.Output.Since(t0)
 		return
 	}
 	// A full repaint still SUPERSEDES anything buffered for this target: there
 	// is no point writing deltas the repaint is about to overwrite.
-	h.sess.co.push(h.target, f.Data, h.hdrLen, f.Full, t0)
+	s.co.push(target, buf, hdrLen, full, t0)
 }
 
 func (h *streamHandler) OnClosed(reason string) {

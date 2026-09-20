@@ -304,15 +304,11 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		// opens the socket.
 		"multi_session": true,
 		"targets": map[string]any{
-			"format":          "<session>/<pane_id>",
-			"separator":       core.TargetSep,
-			"default_session": s.hub.Store().DefaultSession(),
+			"format":    "<session>/<pane_id>",
+			"separator": core.TargetSep,
 		},
 	}
 	out["mode"] = s.cfg.Mode()
-	if sc := s.hub.Store().Scope(); sc.Active() {
-		out["scope"] = sc.String()
-	}
 
 	// Auth discovery. A browser CANNOT read the status of a failed WebSocket
 	// handshake — the WebSocket API surfaces no close code when the upgrade is
@@ -328,6 +324,23 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	out["authenticated"] = authed
+
+	// WHAT this instance is pointed AT is not bootstrap information, and it
+	// used to be handed to anyone who asked. Through a public tunnel a scanner
+	// with no token got back `"scope":"hexstress-b"` and the default session's
+	// name — the name of a real Herdr session on a real machine, which is a
+	// target, and in the case of a SHARE also tells an unpaired caller exactly
+	// what is behind the link. `auth_required`/`authenticated` stay public
+	// because a client genuinely cannot pair without them; scope and session
+	// names wait until the caller has proved it is allowed to see them.
+	if authed {
+		if t, ok := out["targets"].(map[string]any); ok {
+			t["default_session"] = s.hub.Store().DefaultSession()
+		}
+		if sc := s.hub.Store().Scope(); sc.Active() {
+			out["scope"] = sc.String()
+		}
+	}
 
 	if s.exposure != nil {
 		if url, healthy := s.exposure.Status(); url != "" {
@@ -355,6 +368,13 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if _, ok := snap["write_us"]; !ok {
 		snap["write_us"] = s.hub.Metrics().Write.Snapshot()
 	}
+	// Two load claims this server now makes, published so they can be checked
+	// from outside rather than believed: how many tree broadcasts carried no
+	// new information and were dropped, and how many upstream observe
+	// subprocesses are running for however many clients are watching.
+	snap["tree_publishes_suppressed"] = s.hub.Store().SuppressedPublishes()
+	snap["upstream_streams"] = s.hub.SharedStreams()
+	snap["clients"] = s.hub.ConnectedClients()
 	writeJSON(w, http.StatusOK, snap)
 }
 

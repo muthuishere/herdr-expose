@@ -80,6 +80,8 @@ type stats struct {
 	transcript atomic.Int64
 	trBytes    atomic.Int64
 	trees      atomic.Int64
+	treeBytes  atomic.Int64
+	cycles     atomic.Int64
 	errs       atomic.Int64
 
 	mu   sync.Mutex
@@ -100,6 +102,9 @@ func main() {
 	cols := flag.Int("cols", 100, "cols for -resize")
 	rows := flag.Int("rows", 30, "rows for -resize")
 	label := flag.String("label", "", "label for the report line")
+	dump := flag.String("dump-trees", "", "write every `tree` frame to this file, newline separated")
+	dumpTr := flag.String("dump-transcripts", "", "write every `transcript` frame (with arrival time) to this file")
+	cycle := flag.Int("cycle-ms", 0, "reconnect storm: each client closes and redials every N ms")
 	flag.Parse()
 
 	base := "http://" + *addr
@@ -141,7 +146,18 @@ func main() {
 			if *stallAfter > 0 && i == 0 {
 				stall = time.Duration(*stallAfter) * time.Second
 			}
-			runClient(i, *addr, *token, targets, *mode, deadline, st, stall, *resize, *cols, *rows)
+			if *cycle > 0 {
+				for time.Now().Before(deadline) {
+					d := time.Now().Add(time.Duration(*cycle) * time.Millisecond)
+					if d.After(deadline) {
+						d = deadline
+					}
+					runClient(i, *addr, *token, targets, *mode, d, st, 0, *resize, *cols, *rows, "", "")
+					st.cycles.Add(1)
+				}
+				return
+			}
+			runClient(i, *addr, *token, targets, *mode, deadline, st, stall, *resize, *cols, *rows, *dump, *dumpTr)
 		}(i)
 	}
 	wg.Wait()
@@ -174,7 +190,9 @@ func main() {
 		"transcripts": st.transcript.Load(),
 		"tr_bytes":    st.trBytes.Load(),
 		"trees":       st.trees.Load(),
+		"tree_bytes":  st.treeBytes.Load(),
 		"errors":      st.errs.Load(),
+		"cycles":      st.cycles.Load(),
 		"bytes_per_s": float64(st.binBytes.Load()+st.trBytes.Load()) / elapsed,
 		"rtt_p50_ms":  q(0.5), "rtt_p95_ms": q(0.95), "rtt_n": len(rtts),
 	}
@@ -237,7 +255,21 @@ func send(c *websocket.Conn, typ string, data any) {
 }
 
 func runClient(idx int, addr, token string, targets []string, mode string,
-	deadline time.Time, st *stats, stall time.Duration, resize bool, cols, rows int) {
+	deadline time.Time, st *stats, stall time.Duration, resize bool, cols, rows int, dump, dumpTr string) {
+
+	var dumpF, dumpT *os.File
+	if dump != "" && idx == 0 {
+		dumpF, _ = os.Create(dump)
+		if dumpF != nil {
+			defer dumpF.Close()
+		}
+	}
+	if dumpTr != "" && idx == 0 {
+		dumpT, _ = os.Create(dumpTr)
+		if dumpT != nil {
+			defer dumpT.Close()
+		}
+	}
 
 	c := dial(addr, token)
 	if c == nil {
@@ -305,6 +337,11 @@ func runClient(idx int, addr, token string, targets []string, mode string,
 			switch e.Type {
 			case "tree":
 				st.trees.Add(1)
+				st.treeBytes.Add(int64(len(msg)))
+				if dumpF != nil {
+					dumpF.Write(msg)
+					dumpF.Write([]byte("\n"))
+				}
 			case "transcript":
 				st.transcript.Add(1)
 				st.trBytes.Add(int64(len(msg)))
@@ -315,6 +352,9 @@ func runClient(idx int, addr, token string, targets []string, mode string,
 				st.mu.Lock()
 				st.seen[d.Target]++
 				st.mu.Unlock()
+				if dumpT != nil {
+					fmt.Fprintf(dumpT, "%d\t%s\t%d\n", time.Now().UnixMilli(), d.Target, len(msg))
+				}
 			case "pong":
 				var d struct {
 					T int64 `json:"t"`
