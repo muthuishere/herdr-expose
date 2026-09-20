@@ -216,7 +216,11 @@ secret.** Send your bearer token anyway when you have one — it is what makes
   mode; `authenticated` reports whether the token you sent (if any) works.
 - `scope` is present and non-empty on a **share-scoped instance**
   (`herdr-expose share`): it names the one session this instance can see. The
-  rest of the machine is not hidden from you, it is absent.
+  rest of the machine is not hidden from you, it is absent. An **all-sessions
+  share** (`herdr-expose share --all`) omits it exactly as the daemon does:
+  there is no scope, so the instance is the ordinary multi-session server —
+  time-boxed and pairing-gated, but not narrowed. Do not read a missing `scope`
+  as "one session"; read it as "no restriction".
 - `exposure` is present only when a tunnel is up, and `exposure.url` is the
   public URL. In `quick` mode the edge assigns that hostname at start, so read
   it and do not remember it.
@@ -711,7 +715,8 @@ hand-written client never has to infer them from this page. Read them from
 - **`geometry.resize_required` is `false` and `geometry.resize_mutates_pane` is
   `true`.** Honour both; see [`resize`](#resize--not-required-and-it-mutates-the-pane-for-everyone).
 - `scope` is non-empty only on a share-scoped instance, and names the one
-  session it can see.
+  session it can see. It is absent on the daemon and on an all-sessions share
+  (`share --all`), both of which are unrestricted.
 - There is **no `features` array in `welcome`** — an earlier draft claimed one.
   Capability discovery is the `binary` / `geometry` / `viewport` / `targets`
   objects above.

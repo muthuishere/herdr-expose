@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -142,6 +143,21 @@ func (r *shareRecord) mode() string {
 		return string(config.ModeCloudflare)
 	}
 	return r.Mode
+}
+
+// scopeAll is the value `share.json` carries in `scope` for an all-sessions
+// share, and the value `share list --json` reports. It is a WORD rather than
+// an empty string on purpose: an empty scope already means "field absent /
+// old record" everywhere else, and "this share serves the whole machine" must
+// never be something a reader has to infer from a missing value.
+const scopeAll = "all"
+
+// isAll reports an all-sessions share: no session pin, so the instance sees
+// every running herdr session exactly as the main daemon does. The scope is
+// ABSENT, not bypassed — core.ParseScope("", nil) returns a nil *Scope, and a
+// nil scope is the ordinary unrestricted server (internal/core/scope.go:23).
+func (r *shareRecord) isAll() bool {
+	return strings.TrimSpace(r.Session) == "" && r.Scope == scopeAll
 }
 
 // rung places this share on the exposure ladder, for the lines that have to
@@ -439,6 +455,14 @@ func shareUsage() {
         [--session NAME] [--pane TARGET] [--hours N] [--days N] [--json]
         expose ONE herdr session (default: this one) for N hours (default 1)
 
+  share --all [--local | --lan | --quick | --domain X] [--hours N] [--days N]
+        [--yes] [--json]
+        expose EVERY running herdr session — the whole herdr, exactly as the
+        permanent daemon serves it, but time-boxed, pairing-gated and
+        revocable. Prints the sessions it is about to expose and asks for a
+        confirmation; --yes pre-answers it for scripts. Mutually exclusive
+        with --session / --pane: scope is one choice, not a merge.
+
         FOUR RUNGS. Every rung above the default is an explicit request.
           (none)      http://<lan-ip>:<port>   — this machine and this
                       network. THE DEFAULT: a share exists to be opened from
@@ -492,6 +516,17 @@ type shareFlags struct {
 	name    string
 	asJSON  bool
 
+	// all is the SCOPE axis, not the rung axis: it drops the `--only` pin so
+	// the instance serves every running herdr session, exactly as the main
+	// daemon does. It composes with all four rungs (`--all --quick`), and it
+	// is the absence of a scope — never a bypass of scope enforcement, which
+	// stays exactly as it is for every scoped share.
+	all bool
+	// yes pre-answers the `--all` confirmation, for scripts. It is ignored by
+	// a scoped share, which needs no confirmation: its blast radius is one
+	// session.
+	yes bool
+
 	// hoursSet records that --hours was passed explicitly, so that the
 	// [share] default does not overwrite it.
 	hoursSet bool
@@ -541,6 +576,10 @@ func parseShareFlags(args []string) (shareFlags, error) {
 			f.lan = true
 		case "--quick":
 			f.quick = true
+		case "--all":
+			f.all = true
+		case "--yes", "-y":
+			f.yes = true
 		case "--provider":
 			// Removed with the second built-in provider (AMENDMENTS 18 /
 			// ADR 0034). A one-value flag that pretends to be a choice is
@@ -563,6 +602,15 @@ func parseShareFlags(args []string) (shareFlags, error) {
 	}
 	if !f.hoursSet && f.days == 0 {
 		f.hours = 1 // G1 default
+	}
+	// SCOPE is one choice, not a merge. `--all --session X` reads as either
+	// "everything" or "just X" depending on which line you believe, and the
+	// two differ by the whole machine — so it is a mistake, refused here,
+	// before anything is created.
+	if f.all && (strings.TrimSpace(f.session) != "" || len(f.panes) > 0) {
+		return f, errors.New("--all and --session/--pane are mutually exclusive: --all serves EVERY " +
+			"running herdr session, --session/--pane pins the share to one. Drop --all to share one " +
+			"session, or drop --session/--pane to share them all")
 	}
 	return f, nil
 }
@@ -854,6 +902,113 @@ func hostnameOwner(domain, exceptID string) string {
 	return ""
 }
 
+// shareScopeLabel is what goes in `share.json` and comes back out of
+// `share list --json` as `scope`. A scoped share reports the session (or the
+// pane targets) exactly as before; an all-sessions share reports the word
+// `all`, so a reader never has to interpret an empty field.
+func shareScopeLabel(f shareFlags, scope *core.Scope) string {
+	if f.all {
+		return scopeAll
+	}
+	return scope.String()
+}
+
+// scopePanes is scope.Panes for a scope that may be nil. An all-sessions
+// share HAS no scope object at all (that is the point), and reaching into it
+// for a field is the one way "no scope" turns into a crash.
+func scopePanes(scope *core.Scope) []string {
+	if scope == nil {
+		return nil
+	}
+	return scope.Panes
+}
+
+// confirmAllSessions is the gate on the widest blast radius in the product.
+//
+// A scoped share needs no confirmation: whatever goes wrong, it goes wrong to
+// ONE session that the person just named. `--all` is a different object — it
+// hands whoever pairs the URL every running herdr session on the machine,
+// which here includes live agent sessions and a trading desk. So before any
+// port, directory, token, tunnel or DNS record exists, it states plainly what
+// it is about to expose, and waits for a yes.
+//
+// It returns the session names so the success output can repeat them next to
+// the URL, and it REFUSES when it cannot enumerate: a confirmation that
+// cannot say what is being confirmed is not a confirmation, and `--yes` does
+// not buy past that.
+func confirmAllSessions(ctx context.Context, f shareFlags, ttl time.Duration) ([]string, error) {
+	sessions, err := upstream.ListSessions(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("--all refuses to run without knowing what it would expose, and the "+
+			"herdr session list could not be read: %w", err)
+	}
+	var names []string
+	for _, s := range upstream.RunningSessions(sessions) {
+		names = append(names, s.Name)
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		return nil, errors.New("no herdr session is running, so --all would expose nothing; " +
+			"start a session first")
+	}
+
+	rung := f.rung()
+	expires := time.Now().Add(ttl)
+	fmt.Fprintf(os.Stderr, `
+  --all shares EVERY running herdr session on this machine — not just this one.
+
+  %d sessions would be reachable through one URL:
+    %s
+
+  exposure:  %s — %s
+  expires:   %s  (in %s), and the instance destroys itself then
+  still gated: whoever gets the URL also needs the pairing code printed below.
+
+  To share only one session instead, run `+"`herdr-expose share`"+` with no --all
+  (that is the default, and its blast radius is that one session).
+
+`, len(names), strings.Join(names, "\n    "), rung, rung.Reach(),
+		expires.Format(time.RFC1123), ttl.Round(time.Minute))
+
+	if f.yes {
+		fmt.Fprintf(os.Stderr, "  --yes given: creating the all-sessions share.\n\n")
+		return names, nil
+	}
+	if !stdinIsTerminal() {
+		return nil, fmt.Errorf("--all needs a confirmation and stdin is not a terminal: "+
+			"re-run with --yes if you really mean to expose all %d sessions", len(names))
+	}
+	fmt.Fprintf(os.Stderr, "  Type 'yes' to expose all %d sessions: ", len(names))
+	reader := bufio.NewReader(os.Stdin)
+	answer, readErr := reader.ReadString('\n')
+	if strings.TrimSpace(answer) == "" && readErr != nil {
+		// EOF with nothing typed: there was no human here after all (a pipe,
+		// a cron job, `< /dev/null`, which is a character device and so slips
+		// past the cheap terminal probe above). Do not read that silence as a
+		// yes, and say what to pass instead.
+		fmt.Fprintln(os.Stderr)
+		return nil, fmt.Errorf("--all needs a confirmation and stdin gave none: "+
+			"re-run with --yes if you really mean to expose all %d sessions", len(names))
+	}
+	switch strings.ToLower(strings.TrimSpace(answer)) {
+	case "yes", "y":
+		fmt.Fprintln(os.Stderr)
+		return names, nil
+	}
+	return nil, errors.New("aborted: nothing was created")
+}
+
+// stdinIsTerminal reports whether there is a human on the other end to answer
+// the `--all` prompt. No dependency for it: a character device on fd 0 is the
+// whole test.
+func stdinIsTerminal() bool {
+	st, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return st.Mode()&os.ModeCharDevice != 0
+}
+
 func cmdShareCreate(args []string) (err error) {
 	f, err := parseShareFlags(args)
 	if err != nil {
@@ -869,12 +1024,14 @@ func cmdShareCreate(args []string) (err error) {
 	if err != nil {
 		return err
 	}
-	if f.session == "" {
-		f.session = defaultSessionName()
-	}
-	if f.session == "" {
-		return errors.New("cannot tell which herdr session to share: run this inside a herdr pane, " +
-			"or pass --session NAME")
+	if !f.all {
+		if f.session == "" {
+			f.session = defaultSessionName()
+		}
+		if f.session == "" {
+			return errors.New("cannot tell which herdr session to share: run this inside a herdr pane, " +
+				"pass --session NAME, or share every session with --all")
+		}
 	}
 	// Normalise --pane values: accept `w1:p1` or `<session>/w1:p1`.
 	var onlyTargets []string
@@ -888,6 +1045,10 @@ func cmdShareCreate(args []string) (err error) {
 		}
 		onlyTargets = append(onlyTargets, p)
 	}
+	// For `--all`, f.session is empty and ParseScope returns a nil *Scope —
+	// the ordinary unrestricted instance. The scope MECHANISM is untouched:
+	// there is simply no scope to enforce, which is a different thing from a
+	// scope that is enforced loosely.
 	scope, err := core.ParseScope(f.session, onlyTargets)
 	if err != nil {
 		return err
@@ -897,8 +1058,16 @@ func cmdShareCreate(args []string) (err error) {
 	defer cancel()
 
 	// The session must actually exist, or the share comes up empty and the
-	// human blames the tunnel.
-	if sessions, err := upstream.ListSessions(ctx); err == nil {
+	// human blames the tunnel. For `--all` the same call answers a bigger
+	// question — WHAT exactly is about to be exposed — and that answer is
+	// required, not advisory: see confirmAllSessions.
+	var allSessions []string
+	if f.all {
+		allSessions, err = confirmAllSessions(ctx, f, ttl)
+		if err != nil {
+			return err
+		}
+	} else if sessions, err := upstream.ListSessions(ctx); err == nil {
 		found := false
 		var names []string
 		for _, s := range upstream.RunningSessions(sessions) {
@@ -959,7 +1128,7 @@ func cmdShareCreate(args []string) (err error) {
 	share := &shareRecord{
 		ID: id, Mode: string(res.Mode), Provider: "cloudflare", Bind: res.Bind,
 		SecureContext: res.SecureContext, FellBack: res.FellBack,
-		Port: port, Session: f.session, Panes: scope.Panes, Scope: scope.String(),
+		Port: port, Session: f.session, Panes: scopePanes(scope), Scope: shareScopeLabel(f, scope),
 		CreatedAt: now, ExpiresAt: now.Add(ttl), State: "starting",
 	}
 	if res.Mode == config.ModeCloudflare {
@@ -998,7 +1167,8 @@ func cmdShareCreate(args []string) (err error) {
 	if auditClose != nil {
 		defer auditClose.Close()
 	}
-	audit.Info("share created", "share", id, "session", f.session, "scope", scope.String(),
+	audit.Info("share created", "share", id, "session", f.session, "scope", share.Scope,
+		"all_sessions", f.all,
 		"mode", string(res.Mode), "domain", share.Domain, "port", port,
 		"expires_at", share.ExpiresAt, "ttl", ttl.String(), "log", shareLogPath(dir))
 	_ = codeExp
@@ -1031,14 +1201,25 @@ func cmdShareCreate(args []string) (err error) {
 		})
 		return nil
 	}
-	fmt.Printf("\n  shared %s on %s\n\n", scope.String(), url)
+	headline := share.Scope
+	if f.all {
+		headline = fmt.Sprintf("ALL %d sessions", len(allSessions))
+	}
+	fmt.Printf("\n  shared %s on %s\n\n", headline, url)
 	printQR(url + "/?pair=" + code)
 	// The RUNG and its reach, stated plainly, at the top of the block. Which
 	// of the four ladders this share is on is the single most consequential
 	// fact about it, so it is never left to be inferred from the URL.
 	fmt.Printf("\n  url:           %s\n  exposure:      %s via %s — %s\n  pairing code:  %s  (valid until %s)\n",
 		url, final.mode(), final.provider(), final.rung().Reach(), code, codeExp.Format(time.Kitchen))
-	fmt.Printf("  scope:         %s  (nothing else on this machine is in this instance's tree)\n", scope.String())
+	if f.all {
+		// The widest blast radius in the product says so on its own line,
+		// every time, next to the URL somebody is about to send.
+		fmt.Printf("  scope:         %s — EVERY running herdr session on this machine, not one\n", scopeAll)
+		fmt.Printf("                 %d live: %s\n", len(allSessions), strings.Join(allSessions, ", "))
+	} else {
+		fmt.Printf("  scope:         %s  (nothing else on this machine is in this instance's tree)\n", share.Scope)
+	}
 	switch {
 	case final.isLocal():
 		fmt.Printf("  expires:       %s  (in %s) — the instance exits and its state is wiped then\n",
@@ -1199,6 +1380,12 @@ func cmdShareList(args []string) error {
 			v.ID, v.Mode, v.Scope, v.URL, state, v.PID, v.Remaining)
 	}
 	for _, r := range recs {
+		if r.isAll() {
+			fmt.Printf("\nnote: %s is scope %q — it serves EVERY running herdr session on this machine,\n"+
+				"      not one. `herdr-expose share revoke %s` ends it now.\n", r.ID, scopeAll, r.ID)
+		}
+	}
+	for _, r := range recs {
 		if v := r.view(); !v.SecureContext {
 			fmt.Printf("\nnote: %s is plain HTTP on a LAN IP — not a secure context, so no PWA install\n"+
 				"      and no service worker there. The URL is re-resolved on every listing, so it\n"+
@@ -1235,6 +1422,13 @@ func cmdShareExtend(args []string) error {
 	f, err := parseShareFlags(rest)
 	if err != nil {
 		return err
+	}
+	// `--all` means a SCOPE at create time and EVERY SHARE on `revoke`; it
+	// means nothing here, and a flag that is silently ignored is how somebody
+	// believes they extended all their shares. Say so instead.
+	if f.all {
+		return errors.New("`share extend` takes one share id: --all is a create-time scope " +
+			"(`share --all`) and a revoke-time selector (`share revoke --all`), not an extend option")
 	}
 	d, err := f.ttl()
 	if err != nil {
@@ -1363,8 +1557,16 @@ func cmdSharePair(args []string) error {
 	}
 	fmt.Printf("\n  scan this on the device — shown ONLY here, never sent over the tunnel\n\n")
 	printQR(url + "/?pair=" + code)
-	fmt.Printf("\n  pairing code: %s\n  valid until:  %s\n  url:          %s\n\n",
+	fmt.Printf("\n  pairing code: %s\n  valid until:  %s\n  url:          %s\n",
 		code, exp.Format(time.Kitchen), url)
+	if rec.isAll() {
+		// Re-pairing an all-sessions share is the same act as creating one:
+		// the device that uses this code gets the whole machine's herdr, not
+		// one session. It is said here too, because `share pair` is where a
+		// second person is usually being let in.
+		fmt.Printf("  scope:        %s — this code grants EVERY running herdr session, not one\n", scopeAll)
+	}
+	fmt.Println()
 	return nil
 }
 
@@ -1899,6 +2101,16 @@ func cmdShareRun(args []string) error {
 		return nil
 	}
 
+	// An all-sessions share has NO session pin, so ParseScope returns a nil
+	// *Scope and this instance is the ordinary unrestricted server — the same
+	// object the main daemon is, just time-boxed, pairing-gated and revocable.
+	// A record with no session that is NOT marked `all` is refused rather than
+	// silently served unscoped: an unscoped instance must be something that
+	// was asked for, never something a malformed record produced.
+	if strings.TrimSpace(rec.Session) == "" && !rec.isAll() {
+		return fmt.Errorf("share %s has no session and is not scope %q; refusing to serve it unscoped",
+			rec.ID, scopeAll)
+	}
 	scope, err := core.ParseScope(rec.Session, qualify(rec.Session, rec.Panes))
 	if err != nil {
 		return err
@@ -1999,7 +2211,7 @@ func cmdShareRun(args []string) error {
 			// A LAN share's URL is re-resolved on every read (the lease can
 			// move), so what is stored here is only the last known value.
 		})
-		log.Info("share is live", "url", url, "scope", scope.String(), "expires_at", rec.ExpiresAt)
+		log.Info("share is live", "url", url, "scope", rec.Scope, "expires_at", rec.ExpiresAt)
 
 		// A quick tunnel that is restarted by the supervisor comes back on a
 		// DIFFERENT hostname. `share list` must report the one that works, not

@@ -118,8 +118,12 @@ func usage() {
                         Nothing ever escalates above what you asked for; an
                         explicit tunnel request that cannot be honoured
                         degrades to --lan and says why.
-                        --provider picks WHO carries the rung. It never moves
-                        the share up or down the ladder.
+  share --all [rung] [--hours N|--days N] [--yes]
+                        expose EVERY running herdr session, not one — the whole
+                        herdr, time-boxed and revocable. It names the sessions
+                        it is about to expose and asks for a confirmation
+                        (--yes pre-answers it). Not combinable with
+                        --session/--pane.
   share list|extend <id>|pair <id>|revoke <id>|revoke --all|restore
                         manage shares (every verb takes --json)
   panic                 revoke every share AND stop the main tunnel

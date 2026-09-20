@@ -44,6 +44,7 @@ Herdr 0.9.0 verification.
 | [0032](0032-local-rotating-log-no-otel.md) | A local rotating log file, and no OpenTelemetry | Accepted |
 | [0033](0033-self-documenting-config.md) | The config file documents itself | Accepted |
 | [0034](0034-cloudflare-is-the-only-built-in-provider.md) | Cloudflare is the only built-in provider; everything else is an adapter | Accepted; **removes** 0005's `ngrok` clause and narrows 0028's provider parity |
+| [0035](0035-all-sessions-share.md) | `share --all`: an all-sessions share, confirmed out loud | Accepted; extends 0026's scoped share with the absence of a scope, and leaves 0029's ladder untouched |
 
 ## Supersessions
 
@@ -68,6 +69,7 @@ Herdr 0.9.0 verification.
 | 0032 | withdraws the OTEL exporter specified alongside 0033's config work |
 | 0033 | extends 0009 (where the config lives) with what a first run writes |
 | 0034 | **removes** 0005's `ngrok = true` clause and narrows 0028's provider parity; promotes the JS adapter from escape hatch to the extension point |
+| 0035 | extends the scoped share with `--all` (no scope at all); changes nothing about the rung ladder, pairing or time-boxing |
 
 ## Themes
 

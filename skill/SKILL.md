@@ -1,12 +1,14 @@
 ---
 name: herdr-share
-description: Turn a Herdr terminal session — a running coding agent, a shell, one pane — into a private web URL somebody can open on a phone, scoped to that session alone, time-boxed, pairing-gated, and gone when it expires. Use when the owner says "share this", "share this session/pane/agent/terminal", "expose this agent", "give someone access to this", "let X see what this agent is doing", "put this on a URL", "I want to watch this from my phone", "give me a link for this", "put this agent on <hostname>", "quick share this", "share it without a domain", or "share it on the wifi" — and for the whole lifecycle afterwards, "list my shares", "how long has that share got", "extend that share", "revoke the share", "stop sharing", "stop all shares", "kill every exposure", "panic", or "is anything of mine exposed right now". Do NOT use it for exposing a port or a web service in general (it shares Herdr panes only), for publishing or deploying code, for npm or PyPI publishing, for exposure in the photographic, financial or risk sense, or for granting access to a repo, a document or a cloud account. Wraps the herdr-expose CLI — one scoped detached server on a LAN address, a throwaway *.trycloudflare.com tunnel, or a Cloudflare named tunnel on a domain you own.
+description: Turn a Herdr terminal session — a running coding agent, a shell, one pane — into a private web URL somebody can open on a phone, scoped to that session alone, time-boxed, pairing-gated, and gone when it expires. Use when the owner says "share this", "share this session/pane/agent/terminal", "expose this agent", "give someone access to this", "let X see what this agent is doing", "put this on a URL", "I want to watch this from my phone", "give me a link for this", "put this agent on <hostname>", "quick share this", "share it without a domain", or "share it on the wifi". Also covers the ALL-SESSIONS share for "share everything", "share all my sessions", "expose the whole herdr", "share all my agents", "give them every session", "share my whole machine's herdr" — one URL that serves every running session, still time-boxed, pairing-gated and revocable. And for the whole lifecycle afterwards, "list my shares", "how long has that share got", "extend that share", "revoke the share", "stop sharing", "stop all shares", "kill every exposure", "panic", or "is anything of mine exposed right now". Do NOT use it for exposing a port or a web service in general (it shares Herdr panes only), for publishing or deploying code, for npm or PyPI publishing, for exposure in the photographic, financial or risk sense, or for granting access to a repo, a document or a cloud account. Wraps the herdr-expose CLI — one scoped detached server on a LAN address, a throwaway *.trycloudflare.com tunnel, or a Cloudflare named tunnel on a domain you own.
 ---
 
 # herdr-share
 
 Turn the session you are working in into a URL someone can open on a phone,
-scoped to that session alone, alive for a fixed window, gone afterwards.
+scoped to that session alone, alive for a fixed window, gone afterwards — or,
+when the owner asks for all of them, every running session behind one URL with
+the same deadline (`--all`).
 
 **The binary is the product; this skill is a thin wrapper.** Every verb below is
 `herdr-expose ...`. Never reimplement the logic here, never hand-roll
@@ -46,6 +48,84 @@ human text and fails.
     interpolate their values, and never pass them on a command line.
 
 ## Create a share
+
+### Pick the SCOPE first, then the rung
+
+Two independent choices, and the scope one is the bigger of the two. The rung
+decides **how far** the URL reaches; the scope decides **how much** is behind
+it.
+
+| the owner says | scope | command |
+|---|---|---|
+| "share this", "share this session", "expose this agent", "share this pane" | the CURRENT session (default) | `herdr-expose share` |
+| "share <name>", "share the crypto desk" | that one session | `herdr-expose share --session <name>` |
+| "share everything", "all my sessions", "the whole herdr", "all my agents", "every session" | **all** | `herdr-expose share --all` |
+
+**Scoped is the default and the common case.** `herdr-expose share` with no
+scope flag pins the instance to the session you are running in, and that is
+what "share this" means every time.
+
+**Never reach for `--all` to be helpful.** It is the difference between showing
+someone one agent and handing them every session on the machine — on this one
+that includes the owner's other Claude sessions and a live crypto trading desk.
+Use it only when the owner asked for all of them, in those words.
+
+`--all` and `--session` / `--pane` are **mutually exclusive**; asking for both
+is a hard error, not a merge.
+
+### `--all`: the whole herdr, time-boxed
+
+```bash
+herdr-expose share --all                      # LAN, 1 hour, every running session
+herdr-expose share --all --quick --hours 2    # public throwaway URL, 2 hours
+herdr-expose share --all --domain all.deemwar.com --days 1
+herdr-expose share --all --local --hours 1    # loopback, for testing
+herdr-expose share --all --yes --json         # non-interactive (scripts)
+```
+
+It composes with every rung and with the entire lifecycle — `list`, `extend`,
+`pair`, `revoke`, `revoke --all`, `restore`, `panic` — exactly as a scoped
+share does. `share.json` records `scope: "all"`, and `share list --json`
+reports `"scope": "all"` with an empty `session`.
+
+**It asks before it does anything.** Before a port, a directory, a token, a
+tunnel or a DNS record exists, the CLI prints the session COUNT and their
+NAMES, says plainly that this is every session and not one, states the rung and
+the exact expiry, and waits for a typed `yes`:
+
+```
+  --all shares EVERY running herdr session on this machine — not just this one.
+
+  12 sessions would be reachable through one URL:
+    chromium
+    crypto-desk
+    ...
+  exposure:  lan — anyone on this network
+  expires:   Sun, 20 Sep 2026 16:29:42 IST  (in 1h0m0s), and the instance destroys itself then
+  still gated: whoever gets the URL also needs the pairing code printed below.
+
+  Type 'yes' to expose all 12 sessions:
+```
+
+`--yes` pre-answers it. **Read the session list back to the owner and get a yes
+before you pass `--yes`** — that flag is for scripting, not for skipping the
+owner. With no terminal on stdin and no `--yes`, the create is refused rather
+than assumed. A scoped share needs none of this: its blast radius is one
+session.
+
+Two facts about `--all` that are not true of a scoped share, and must be said
+when handing the URL over:
+
+- **The command surface is the daemon's, not the narrowed scoped one.** A
+  scoped instance allows only prompt / send-keys / read / scroll / resize. An
+  all-sessions instance is the ordinary unrestricted server — a paired device
+  can do to it everything the local web app can do.
+- **What makes it safer than leaving the permanent tunnel up is that it
+  expires.** That is the whole argument for it: a revocable, pairing-gated,
+  time-boxed window instead of a standing one.
+
+If the owner is nervous, offer the middle: `--all --local` (loopback, for
+looking at it yourself) or a short `--all --lan --hours 1`.
 
 ### Pick the rung the owner actually asked for
 
@@ -94,15 +174,17 @@ herdr-expose share --pane herdr-plugins/w2:p1 --pane herdr-plugins/w2:p3 --json
 ```
 
 Full flag set for a create — there are no others, and an unknown flag is a hard
-error: `--local` · `--lan` · `--quick` · `--domain X` · `--session NAME` (`-s`)
-· `--pane TARGET` (`-p`, also spelled `--only-target`, **repeatable**) ·
-`--hours N` · `--days N` · `--name NAME` · `--json`.
+error: `--local` · `--lan` · `--quick` · `--domain X` · `--all` · `--session NAME`
+(`-s`) · `--pane TARGET` (`-p`, also spelled `--only-target`, **repeatable**) ·
+`--hours N` · `--days N` · `--name NAME` · `--yes` (`-y`, only meaningful with
+`--all`) · `--json`.
 
 Defaults: the session you are running in (`$HERDR_SESSION`, else resolved from
 `$HERDR_SOCKET_PATH`), `--hours 1`, and the **LAN** rung. `--hours` and `--days`
 **add together**; the TTL must be positive and under a year. `--local`, `--lan`,
 `--quick` and `--domain` are mutually exclusive, and passing two is an error
-rather than a precedence puzzle.
+rather than a precedence puzzle. So are `--all` and `--session`/`--pane`, on the
+other axis.
 
 `--name` is a label. It only becomes part of a hostname in one narrow case:
 `[share] default_mode = "domain"` **plus** a configured `[share] domain_suffix`,
@@ -128,7 +210,8 @@ herdr-expose share --json | jq -r '.share.mode, .share.url, .share.fell_back, .s
 `"cloudflare"`, never `"domain"`. A non-empty `.share.fell_back` means an
 explicit tunnel request degraded; its absence means you got what was asked for.
 The create output is
-`{"share": {...}, "pairing_code": "...", "pairing_expires_at": "..."}`.
+`{"share": {...}, "pairing_code": "...", "pairing_expires_at": "...",
+"pair_url": "<url>/?pair=<code>"}`.
 
 **Fallback only goes down, loudly.** An explicit `--quick` or `--domain` with no
 cloudflared installed degrades to LAN and prints why. If the owner needed the
@@ -167,7 +250,9 @@ as a side effect of listing — so a `list` that returns `[]` is a stronger
 statement than a cached view. Per-share fields: `id`, `mode`, `scope`,
 `session`, `domain`, `url`, `secure_context`, `fell_back`, `state`,
 `created_at`, `expires_at`, `remaining`, `remaining_seconds`, `pid`, `alive`,
-`expired`, `error`.
+`expired`, `error`. `scope` is the session name for a scoped share and the
+literal `all` for an all-sessions one (whose `session` is empty); `share list`
+prints a note under the table for every `all` share it finds.
 
 `share pair` is how you add a second person without restarting the share. Each
 code is single-use, so mint one per device rather than resending the same one.
@@ -205,8 +290,9 @@ that endpoint is meant to be static. **Re-arm with `herdr-expose expose start`**
 which also clears the halt flag; the daemon picks it up within about five
 seconds.
 
-Teardown reports per component — `process_gone`, `dns_gone`, `tunnel_gone`,
-`port_free`, `state_wiped` — and both commands exit non-zero if anything
+`revoke --json` returns `{"revoked": [...], "ok": bool}`; `revoke --all` uses
+the same shape. Teardown reports per component — `process_gone`, `dns_gone`,
+`tunnel_gone`, `port_free`, `state_wiped` — and both commands exit non-zero if anything
 survived. For a `lan` or `quick` share `cloudflare_not_applicable:true` comes
 with them: nothing was ever created in Cloudflare, so `dns_gone` / `tunnel_gone`
 mean "there was never one", not "we deleted it". `revoke --all` and `panic`
@@ -217,11 +303,17 @@ name what is still up.
 
 ## What is actually exposed
 
-A share is **scoped in the server, not the UI**. The shared instance's tree
-contains only the shared scope; every other session is absent from the tree,
-absent from subscribe, and rejected at the hub. The command surface narrows to
-prompt / send-keys / read / scroll / resize. So sharing one session cannot leak
-another, even to a malicious client.
+A scoped share is **scoped in the server, not the UI**. The shared instance's
+tree contains only the shared scope; every other session is absent from the
+tree, absent from subscribe, and rejected at the hub. The command surface
+narrows to prompt / send-keys / read / scroll / resize. So sharing one session
+cannot leak another, even to a malicious client.
+
+An **`--all` share has no scope** — that is what `--all` means. It is not a
+loosened scope or a bypass of the mechanism: there is simply no pin, so the
+instance is the ordinary multi-session server, with the daemon's full command
+surface. Everything else still holds — pairing, the three-way expiry, its own
+process, port, auth store and log, and self-destruct on revoke or expiry.
 
 Each share is its own detached process on its own port with its own auth store.
 The owner's permanent deployment keeps running untouched.
@@ -267,6 +359,14 @@ The owner's permanent deployment keeps running untouched.
   cloudflare = true`) still REQUIRES `domain` and can never become ephemeral;
   `quick` is not a key any config file can set. Do not try to make the daily
   driver quick — that breaks PWA install, bookmarks and every paired device.
+- **`--all` needs a read-back and a yes, every time.** Before running it, tell
+  the owner how many sessions it covers and name them, say that this is every
+  session on the machine and not the one in front of you, and state the rung
+  and the expiry. Only then run it — and prefer `--lan` and the shortest TTL
+  that does the job. Never pass `--yes` on the owner's behalf to skip that
+  conversation; it exists so a script does not hang, not so an agent can decide
+  for them. Never combine `--all` with `--domain` unless the owner explicitly
+  asked for every session to be on the public internet.
 - **Confirm before sharing a session that is not the current one**, and always
   before sharing anything touching money or production — `crypto-desk` runs a
   live trading desk. Read back the scope and the TTL and get a yes.
@@ -286,7 +386,7 @@ The owner's permanent deployment keeps running untouched.
 ## Answering "is anything of mine exposed right now?"
 
 ```bash
-herdr-expose share list --json | jq -r '.[] | "\(.id)  \(.mode)  \(.scope)  \(.url)  \(.remaining)"'
+herdr-expose share list --json | jq -r '.shares[] | "\(.id)  \(.mode)  \(.scope)  \(.url)  \(.remaining)"'
 herdr-expose expose status | jq -r '.mode, .url, .running, .healthy'
 herdr-expose doctor
 ```
@@ -322,14 +422,6 @@ otherwise just make the supervisor respawn it. If `panic` reports
 restart it (`herdr-expose stop && herdr-expose daemon`) and run `panic` again.
 That output is honest, not cosmetic — treat non-zero as "still exposed".
 
-## Known stale text in the CLI itself
-
-The **top-level** `herdr-expose --help` still describes the withdrawn
-auto-escalating ladder (`none = auto: domain if usable, else quick if
-cloudflared is installed, else lan`) and omits `--local`. **The binary does not
-behave that way.** `herdr-expose share --help` is correct and matches this
-skill. If you are reasoning from `--help` output, use the subcommand's.
-
 ## Where the details live
 
 - `docs/troubleshooting.md` — the failures that look like bugs and are not:
@@ -338,5 +430,7 @@ skill. If you are reasoning from `--help` output, use the subcommand's.
   `cloudflared STILL RUNNING`.
 - `docs/api.md` — the wire contract, if you are building a client rather than
   driving the CLI.
+- `docs/adr/0035` — why `--all` is the ABSENCE of a scope rather than a wider
+  one, and why it is the only create that asks for a confirmation.
 - `docs/adr/0026`–`0029` — why a share is a separate scoped process, why quick
   tunnels exist only for shares, and why the ladder is never climbed for you.
