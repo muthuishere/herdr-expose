@@ -82,7 +82,6 @@ type Mode string
 const (
 	ModeCloudflare Mode = "cloudflare" // public static domain; binds loopback
 	ModeQuick      Mode = "quick"      // ephemeral *.trycloudflare.com; SHARES ONLY (AMENDMENTS 15)
-	ModeNgrok      Mode = "ngrok"      // public reserved domain; binds loopback
 	ModeJS         Mode = "js"         // JS adapter escape hatch; binds loopback
 	ModeLAN        Mode = "lan"        // binds 0.0.0.0; anyone on the wifi can reach the port
 	ModeLocal      Mode = "local"      // binds loopback; the default
@@ -147,9 +146,10 @@ func (r Rung) Reach() string {
 	return "unknown"
 }
 
-// RungOf maps a resolved Mode onto the ladder. The tunnel modes that are not
-// on the share ladder (ngrok, a JS adapter) are still the internet, so they
-// sort at the top: an unknown mode must never look SAFER than it is.
+// RungOf maps a resolved Mode onto the ladder. A tunnel mode that is not on
+// the share ladder (a JS adapter, or a mode written by an older version) is
+// still the internet, so it sorts at the top: an unknown mode must never look
+// SAFER than it is.
 func RungOf(m Mode) Rung {
 	switch m {
 	case ModeLocal:
@@ -295,7 +295,6 @@ type Adapter struct {
 // `adapter` is the escape hatch: naming a JS adapter wins over the built-ins.
 type Expose struct {
 	Cloudflare bool `toml:"cloudflare" json:"cloudflare"`
-	Ngrok      bool `toml:"ngrok" json:"ngrok"`
 
 	// LAN allows binding 0.0.0.0 so phones and laptops on the same wifi can
 	// reach the server directly. It is also the automatic fallback when a
@@ -342,20 +341,19 @@ type ProviderKind string
 const (
 	ProviderNone       ProviderKind = "none"
 	ProviderCloudflare ProviderKind = "cloudflare"
-	ProviderNgrok      ProviderKind = "ngrok"
 	ProviderJS         ProviderKind = "js"
 )
 
 // Provider resolves the selection rules: an explicit JS adapter wins, then
-// cloudflare, then ngrok.
+// cloudflare. There is exactly one built-in transport (AMENDMENTS 18 / ADR
+// 0034); anything else — ngrok, tailscale, a corporate proxy — is a JS
+// adapter, which is why this stays a kind rather than collapsing into a bool.
 func (e Expose) Provider() ProviderKind {
 	switch {
 	case strings.TrimSpace(e.Adapter) != "":
 		return ProviderJS
 	case e.Cloudflare:
 		return ProviderCloudflare
-	case e.Ngrok:
-		return ProviderNgrok
 	default:
 		return ProviderNone
 	}
@@ -412,8 +410,6 @@ func (c *Config) Mode() string {
 	switch c.Expose.Provider() {
 	case ProviderCloudflare:
 		return string(ModeCloudflare)
-	case ProviderNgrok:
-		return string(ModeNgrok)
 	case ProviderJS:
 		return string(ModeJS)
 	}
@@ -601,9 +597,6 @@ func (c *Config) Validate() error {
 	if a := strings.TrimSpace(c.Expose.Adapter); a != "" && !seen[a] {
 		return fmt.Errorf("expose.adapter %q has no matching [[expose.adapters]] entry", a)
 	}
-	if c.Expose.Cloudflare && c.Expose.Ngrok {
-		return fmt.Errorf("expose: set either cloudflare or ngrok, not both")
-	}
 	d := strings.TrimSpace(c.Expose.Domain)
 	if d != "" {
 		if strings.Contains(d, "/") || strings.Contains(d, ":") || !strings.Contains(d, ".") {
@@ -617,16 +610,10 @@ func (c *Config) Validate() error {
 		return err
 	}
 	// C1: a static domain is mandatory. There is no random-hostname fallback.
-	if d == "" {
-		switch c.Expose.Provider() {
-		case ProviderCloudflare:
-			return fmt.Errorf("expose.cloudflare = true requires expose.domain, e.g. domain = \"herdr.example.com\" " +
-				"(there is no quick/ephemeral tunnel: a hostname that changes on restart breaks PWA installs, " +
-				"bookmarks and device tokens)")
-		case ProviderNgrok:
-			return fmt.Errorf("expose.ngrok = true requires expose.domain set to a RESERVED ngrok domain, " +
-				"e.g. domain = \"herdr.ngrok.app\" (random ngrok URLs are not supported)")
-		}
+	if d == "" && c.Expose.Provider() == ProviderCloudflare {
+		return fmt.Errorf("expose.cloudflare = true requires expose.domain, e.g. domain = \"herdr.example.com\" " +
+			"(there is no quick/ephemeral tunnel: a hostname that changes on restart breaks PWA installs, " +
+			"bookmarks and device tokens)")
 	}
 	return nil
 }
@@ -769,7 +756,12 @@ func (c *Config) merged() map[string]any {
 
 	expose := rawTable(doc, "expose")
 	expose["cloudflare"] = c.Expose.Cloudflare
-	expose["ngrok"] = c.Expose.Ngrok
+	// Keys this binary no longer has: read without complaint (an old config
+	// must keep loading) and dropped on rewrite, exactly as `server.bind` and
+	// `share.default_mode = "auto"` are. `ngrok` was a built-in provider until
+	// AMENDMENTS 18 / ADR 0034 removed it; a file that still carries it is not
+	// an error, it is just a key that no longer does anything.
+	delete(expose, "ngrok")
 	expose["lan"] = c.Expose.LAN
 	expose["autostart"] = c.Expose.Autostart
 	setOrDelete(expose, "domain", c.Expose.Domain)
@@ -786,6 +778,9 @@ func (c *Config) merged() map[string]any {
 	doc["expose"] = expose
 
 	share := rawTable(doc, "share")
+	// Same as [expose]: a withdrawn key is read without complaint and dropped
+	// on rewrite, never a reason to refuse to start.
+	delete(share, "ngrok")
 	share["domain_suffix"] = c.Share.DomainSuffix
 	share["default_hours"] = c.Share.DefaultHours
 	share["default_mode"] = c.Share.DefaultMode

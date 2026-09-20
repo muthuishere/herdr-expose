@@ -205,7 +205,8 @@ secret.** Send your bearer token anyway when you have one — it is what makes
 }
 ```
 
-- `mode` is `local`, `lan`, `quick`, `cloudflare`, `ngrok` or `js`.
+- `mode` is `local`, `lan`, `quick`, `cloudflare` or `js` (`js` is a JS
+  adapter — the escape hatch for any transport that is not built in).
 - **`auth_required` and `authenticated` are the two fields that matter most**,
   and they exist for one reason: a browser **cannot read the status of a failed
   WebSocket handshake**. The WebSocket API surfaces no close code when the

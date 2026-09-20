@@ -106,7 +106,7 @@ func usage() {
                         install a supervised unit (launchd / systemd --user)
   expose start|stop|status|plan|destroy
                         tunnel control
-  share [--local | --lan | --quick | --domain X] [--provider cloudflare|ngrok]
+  share [--local | --lan | --quick | --domain X]
         [--session NAME] [--pane TARGET] [--hours N|--days N]
                         expose ONE herdr session, time-boxed, self-destructing.
                         FOUR RUNGS, each one an explicit request:
@@ -954,12 +954,12 @@ func parseScopeFlags(args []string) (*core.Scope, error) {
 // stopMainTunnel takes down whatever process carries the PERMANENT deployment,
 // and is provider-aware rather than assuming cloudflared.
 //
-// Only the cloudflare providers leave a process this CLI can identify and kill
+// Only the cloudflare provider leaves a process this CLI can identify and kill
 // from outside (matched on the config path WE generated, never on a binary
-// name, so it can never reach somebody else's tunnel). For ngrok and a JS
-// adapter the child belongs to the daemon, and the halt flag the caller has
-// already raised is what stops it — within one supervisor tick. Saying which
-// of the two happened beats a cheerful message that fits only one provider.
+// name, so it can never reach somebody else's tunnel). For a JS adapter the
+// child belongs to the daemon, and the halt flag the caller has already raised
+// is what stops it — within one supervisor tick. Saying which of the two
+// happened beats a cheerful message that fits only one provider.
 //
 // It is idempotent: with nothing running, every branch is already in the
 // desired state and returns nil.

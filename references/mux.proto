@@ -28,7 +28,7 @@ option go_package = "github.com/you/mux/gen/muxv1;muxv1";
 //   GET  /v1/stream            WebSocket, binary protobuf frames
 //   GET  /*                    embedded web UI (go:embed)
 // One origin, one port. `cloudflared tunnel --url localhost:7420`
-// or `ngrok http 7420` exposes the whole product unchanged.
+// or any other HTTP tunnel exposes the whole product unchanged.
 // ============================================================
 
 message Envelope {

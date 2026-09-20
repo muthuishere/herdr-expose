@@ -287,24 +287,28 @@ existing. Right for a throwaway, wrong for a daily driver — which is exactly w
 A quick tunnel is on the public internet, so it is **not** more trusted than a
 domain share: same mandatory pairing, same server-side scope, same expiry.
 
-### ngrok
-
-Same static-domain rule — a reserved domain is required, no random URLs.
-
-```toml
-[expose]
-ngrok  = true
-domain = "herdr.ngrok.app"
-```
-
-Needs `ngrok` on your PATH and authenticated (`ngrok config add-authtoken ...`).
-
 ### Anything else: write an adapter
 
-Tailscale funnel, a corporate reverse proxy, an SSH `-R`, your homelab. Adapters
-are small JavaScript files run on an embedded Go JS runtime — **no node at run
-time** — and they are the escape hatch, not the happy path. If you only want
-Cloudflare or ngrok, you never touch this.
+**Cloudflare is the only built-in transport.** ngrok, tailscale funnel, a
+corporate reverse proxy, an SSH `-R`, your homelab — all of those are adapters,
+and an adapter is the supported answer for them, not a consolation prize.
+
+Adapters are small JavaScript files run on an embedded Go JS runtime — **no
+node at run time**. An adapter is a full provider to the host: it declares what
+it creates, its URL is verified before it is published, it is supervised and
+restarted, and its teardown is held to the same idempotency rules as the
+built-in. Start from [`adapters/template.js`](adapters/template.js), which
+documents the whole `ctx` host API;
+[`adapters/ngrok.js`](adapters/ngrok.js) is a worked example (~40 lines).
+
+> herdr-expose shipped a second built-in provider, ngrok, and removed it in
+> ADR 0034. The reason was not "unwanted feature" but **unverified surface**:
+> there was no ngrok binary and no token on the machine it was written on, so
+> it was unit-tested and never once exercised end to end. `adapters/ngrok.js`
+> is kept as an example, and is parsed in CI but never run against real ngrok —
+> test it before you trust it. If you want ngrok, an adapter is the right home
+> for it: it lives next to the binary you already have installed and
+> authenticated, and you are the person who can actually verify it.
 
 ```js
 // adapters/my-tunnel.js
@@ -463,6 +467,13 @@ max_concurrent = 10
 `--quick` is asking. A `"auto"` written before AMENDMENTS 16 still loads and now
 means `"lan"`. There is no `quick` key under `[expose]`, on purpose.
 
+**Withdrawn keys keep loading.** A config that still carries `ngrok = true`
+(removed in [ADR 0034](docs/adr/0034-cloudflare-is-the-only-built-in-provider.md)),
+a loopback `server.bind`, or `default_mode = "auto"` starts normally: the key is
+read without complaint, ignored, and dropped the next time the file is written.
+A key that no longer does anything is not a reason to take somebody's daemon
+down over a file they cannot act on until it is already up.
+
 **There are no secrets in this file.** Tokens live as SHA-256 hashes in the state
 directory at mode 0600; the Cloudflare token is read from the environment. See
 [ADR 0009](docs/adr/0009-toml-config-outside-repo.md) and
@@ -519,8 +530,9 @@ is a screenshot. So authentication here is the primary feature, not a checkbox.
   for your own network.
 - **Revoke devices you no longer use.** `herdr-expose status` lists them;
   `herdr-expose devices --revoke <id>` removes one.
-- **Your tunnel provider terminates TLS.** Cloudflare or ngrok can see the
-  traffic. This is not end-to-end encrypted and nobody should imply otherwise.
+- **Your tunnel provider terminates TLS.** Cloudflare — or whatever your
+  adapter dials — can see the traffic. This is not end-to-end encrypted and
+  nobody should imply otherwise.
 - **Treat the URL as a credential** even though it is not one. A public URL plus
   an unpatched auth bug is a shell; do not paste it into a group chat.
 - **Prefer a named tunnel with Cloudflare Access** in front of it if you are

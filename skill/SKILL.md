@@ -30,9 +30,10 @@ answer use `herdr-expose expose status`, which always prints JSON
 human text and fails.
 
 - The **default (LAN) rung and `--local` need nothing at all**, and `--quick`
-  needs nothing but the tunnel helper binary (`cloudflared`; on a build that
-  supports it, `ngrok` when that provider is selected). No account, no zone, no
-  token, no DNS. If all you need is a URL, that is the whole precondition — and
+  needs nothing but the tunnel helper binary (`cloudflared`). No account, no
+  zone, no token, no DNS. There is no `--provider` flag — Cloudflare is the one
+  built-in transport, and anything else is a JS adapter selected with
+  `adapter = "<id>"` under `[expose]`. If all you need is a URL, that is the whole precondition — and
   if the helper is missing, the CLI says which binary it wanted, so quote that
   rather than guessing.
 - `--domain` is the only rung with real preconditions:

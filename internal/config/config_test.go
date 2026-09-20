@@ -255,7 +255,6 @@ func TestExposeProviderSelection(t *testing.T) {
 		{"empty", Expose{}, ProviderNone, false},
 		{"two-liner", Expose{Cloudflare: true, Domain: "herdr.deemwar.com", Autostart: true}, ProviderCloudflare, true},
 		{"quick", Expose{Cloudflare: true}, ProviderCloudflare, false},
-		{"ngrok", Expose{Ngrok: true, Autostart: true}, ProviderNgrok, true},
 		{"js wins", Expose{Cloudflare: true, Adapter: "x"}, ProviderJS, false},
 		{"legacy disabled", Expose{Cloudflare: true, Autostart: true, Enabled: &no}, ProviderCloudflare, false},
 	}
@@ -302,12 +301,40 @@ func TestTwoLineExposeConfigRoundTrips(t *testing.T) {
 	}
 }
 
-func TestBothProvidersRejected(t *testing.T) {
-	cfg := Defaults()
-	cfg.Expose.Cloudflare = true
-	cfg.Expose.Ngrok = true
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("cloudflare+ngrok must be refused")
+// A config written against an older build still carries `ngrok = true` (and
+// the reserved domain it needed). The built-in provider is gone (AMENDMENTS 18
+// / ADR 0034), and the key must behave exactly as the other withdrawn keys do:
+// LOADED without complaint, IGNORED, and DROPPED on the next rewrite. Refusing
+// to start over a key that no longer does anything would be the worst of both
+// worlds — the user cannot act on it and their daemon is down.
+func TestLegacyNgrokKeysLoadAndAreDroppedOnRewrite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	src := "[expose]\nngrok = true\ndomain = \"herdr.example.ngrok.app\"\nautostart = true\n" +
+		"[share]\nngrok = true\ndefault_mode = \"lan\"\n"
+	if err := os.WriteFile(path, []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadFrom(path)
+	if err != nil {
+		t.Fatalf("a config carrying the withdrawn ngrok keys must still load: %v", err)
+	}
+	// Ignored: nothing is selected, so nothing autostarts.
+	if got := cfg.Expose.Provider(); got != ProviderNone {
+		t.Fatalf("the withdrawn ngrok key still selects a provider: %s", got)
+	}
+	if cfg.Expose.ShouldAutostart() {
+		t.Fatal("a config whose only provider was ngrok must not autostart anything")
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := os.ReadFile(path)
+	if strings.Contains(strings.ToLower(string(body)), "ngrok = ") {
+		t.Fatalf("the withdrawn ngrok key survived a rewrite:\n%s", body)
+	}
+	if _, err := LoadFrom(path); err != nil {
+		t.Fatalf("the rewritten config must still load: %v", err)
 	}
 }
 

@@ -17,9 +17,13 @@ import (
 	"github.com/dop251/goja"
 )
 
-// JS adapters are the ESCAPE HATCH (AMENDMENT A2), not the happy path: use
-// them for tailscale, a corporate proxy or someone's homelab. Cloudflare and
-// ngrok are built in and need no JavaScript.
+// JS adapters are the ESCAPE HATCH (AMENDMENT A2), not the happy path:
+// Cloudflare is built in and needs no JavaScript. Everything else — ngrok,
+// tailscale, a corporate proxy, someone's homelab — is an adapter, and since
+// AMENDMENTS 18 / ADR 0034 that is the ONLY answer for those, which makes
+// this file the extension point rather than a curiosity. An adapter gets the
+// same Provider contract as the built-in: declared footprint, verify before
+// publish, supervision, idempotent Stop and Destroy.
 //
 // The runtime is goja — embedded, no node at runtime, and deliberately bare:
 // there is no require, no fs, no fetch, no timers and no network primitive in

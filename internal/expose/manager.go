@@ -1,6 +1,7 @@
 // Package expose owns everything that puts the loopback server on the public
-// internet: the built-in Cloudflare and ngrok providers (Go, in-process,
-// supervised) and the goja-based JS adapter escape hatch.
+// internet: the built-in Cloudflare provider (Go, in-process, supervised) and
+// the goja-based JS adapter escape hatch, which is how anything else —
+// ngrok, tailscale, a corporate proxy — gets carried.
 //
 // Nothing in this package ever persists, logs or returns a credential. API
 // tokens are read from named environment variables at the point of use and
@@ -248,31 +249,20 @@ func (m *Manager) Start(ctx context.Context) (Status, error) {
 // from the same configuration is what makes them symmetric even then.
 //
 // The rungs map onto PROVIDERS, not onto cloudflare spellings: `Quick` means
-// "the ephemeral rung of whichever provider is selected", so `--quick
-// --provider ngrok` is an ngrok ephemeral tunnel and gets the same ladder and
-// the same guarantees as its cloudflare twin.
+// "the ephemeral rung of whichever provider is selected" (ADR 0028), which is
+// why it is answered here, per provider, rather than being hard-wired to
+// cloudflared somewhere further down.
 func (m *Manager) plan(opts Options) (providerPlan, error) {
 	kind := opts.Expose.Provider()
 
 	if opts.Expose.Quick {
-		switch kind {
-		case config.ProviderNgrok:
-			no := NgrokOptions{Port: opts.Port, Ephemeral: true}
-			return providerPlan{
-				Kind:      ModeQuick,
-				Footprint: ngrokFootprint(no),
-				New:       func() (Provider, error) { return newNgrok(no, opts.Logf, m.red) },
-				Destroy:   noDestroy,
-			}, nil
-		default:
-			co := CloudflareOptions{Port: opts.Port}
-			return providerPlan{
-				Kind:      ModeQuick,
-				Footprint: quickFootprint(),
-				New:       func() (Provider, error) { return newQuickTunnel(co, opts.Logf, m.red) },
-				Destroy:   noDestroy,
-			}, nil
-		}
+		co := CloudflareOptions{Port: opts.Port}
+		return providerPlan{
+			Kind:      ModeQuick,
+			Footprint: quickFootprint(),
+			New:       func() (Provider, error) { return newQuickTunnel(co, opts.Logf, m.red) },
+			Destroy:   noDestroy,
+		}, nil
 	}
 
 	switch kind {
@@ -285,19 +275,6 @@ func (m *Manager) plan(opts Options) (providerPlan, error) {
 			Destroy: func(ctx context.Context, logf func(string, ...any)) error {
 				return DestroyCloudflare(ctx, co, logf)
 			},
-		}, nil
-
-	case config.ProviderNgrok:
-		no := NgrokOptions{Port: opts.Port, Domain: opts.Expose.Domain}
-		return providerPlan{
-			Kind:      ModeNgrok,
-			Footprint: ngrokFootprint(no),
-			New:       func() (Provider, error) { return newNgrok(no, opts.Logf, m.red) },
-			// Nothing to destroy, and the footprint says why: a reserved
-			// domain lives in the user's ngrok account and was not created
-			// here. Deleting it would be this tool removing something it did
-			// not make.
-			Destroy: noDestroy,
 		}, nil
 
 	case config.ProviderJS:
@@ -339,7 +316,7 @@ func (m *Manager) plan(opts Options) (providerPlan, error) {
 
 	default:
 		return providerPlan{}, fmt.Errorf("nothing to expose: set `cloudflare = true` with `domain = \"herdr.example.com\"`, " +
-			"or `ngrok = true` with a reserved domain, or `adapter = \"<id>\"` under [expose]")
+			"or `adapter = \"<id>\"` under [expose] to run a JS adapter (the escape hatch for any other transport)")
 	}
 }
 

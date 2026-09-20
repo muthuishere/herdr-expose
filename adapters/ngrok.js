@@ -1,8 +1,20 @@
-// ngrok.js — expose through ngrok.
+// ngrok.js — expose through ngrok. A WORKED EXAMPLE of adapters/template.js.
 //
-// Built in too (`ngrok = true` under [expose], with an optional `domain`).
-// This adapter is the escape hatch for flags the built-in does not expose,
-// e.g. an edge, a custom region or basic auth.
+// READ THIS FIRST. ngrok was a built-in Go provider until AMENDMENTS 18 /
+// ADR 0034 removed it, and the reason matters here: there is no ngrok binary
+// and no ngrok account on the machine this repo is built on, so the built-in
+// was unit-tested and NEVER ONCE run end to end. Code on a public surface that
+// has never actually run is a liability — it rots, and the first person to use
+// it finds the bug.
+//
+// So this file is exactly what it looks like: community-shaped example code.
+// CI loads it under goja to prove it parses and exports start/status/stop, and
+// that is ALL that is verified. Nothing here has been run against real ngrok.
+// Treat it as a starting point you are expected to test, not as a supported
+// transport. It is kept because a JS adapter is the right home for ngrok — it
+// is roughly forty lines, it lives next to the tool the user already has
+// installed and authenticated, and whoever runs it is the person who can
+// actually verify it.
 //
 // Config:
 //

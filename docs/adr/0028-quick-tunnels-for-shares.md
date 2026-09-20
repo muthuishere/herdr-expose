@@ -1,6 +1,10 @@
 # 28. Quick tunnels come back — for shares only
 
-Status: Accepted (SPEC AMENDMENTS 15; partially reverses ADR 0005's blanket ban)
+Status: Accepted (SPEC AMENDMENTS 15; partially reverses ADR 0005's blanket
+ban). Its **provider parity** clause is narrowed by
+[0034](0034-cloudflare-is-the-only-built-in-provider.md): there is one built-in
+provider now, so parity is a property of the ladder rather than a claim about
+two implementations.
 
 ## Context
 
@@ -33,11 +37,22 @@ config file can set — it is a share flag and nothing else. ADR 0005 stands
 exactly where it was aimed.
 
 **`quick` is a RUNG, not a Cloudflare spelling.** It means "the ephemeral
-tunnel of whichever provider is selected" — TryCloudflare and an unreserved
-ngrok tunnel are the same rung: a throwaway public hostname with nothing
-reserved, nothing provisioned in an account and nothing to clean up. So the only
-precondition is whether the selected provider's binary is installed, and a
-fallback message names *that* binary rather than always naming `cloudflared`.
+tunnel of whichever provider is selected": a throwaway public hostname with
+nothing reserved, nothing provisioned in an account and nothing to clean up. So
+the only precondition is whether the selected provider's binary is installed,
+and a fallback message names *that* binary rather than always naming
+`cloudflared`.
+
+> **NARROWED by [ADR 0034](0034-cloudflare-is-the-only-built-in-provider.md).**
+> This clause was written when a second built-in provider (ngrok) carried the
+> same two rungs, and it illustrated the rung with "TryCloudflare and an
+> unreserved ngrok tunnel are the same rung". That provider was removed as
+> **unverified surface**: no ngrok binary and no token on the machine it was
+> written on, so it was unit-tested and never once run end to end. The
+> definition above is kept rather than deleted, because it is the reason
+> `quickBinary` still resolves the binary per provider instead of hard-coding
+> `cloudflared` — a JS adapter carries the rung today, and a future built-in
+> would inherit the same treatment.
 
 ## Consequences
 

@@ -116,7 +116,7 @@ func (s *Store) Bind() string {
 	return s.bind
 }
 
-// Mode implements Provider: cloudflare | ngrok | js | lan | local.
+// Mode implements Provider: cloudflare | quick | js | lan | local.
 func (s *Store) Mode() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

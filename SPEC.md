@@ -474,6 +474,12 @@ half-provision: if DNS fails, do not leave a dangling tunnel.
 
 ## C4. ngrok and JS adapters
 
+> **SUPERSEDED in part by AMENDMENTS 18.** The built-in ngrok provider is gone;
+> the static-domain rule below stands for Cloudflare. JS adapters are no longer
+> "for exotic setups only" — they are the extension point for every transport
+> that is not built in, which since AMENDMENTS 18 means every transport but
+> Cloudflare.
+
 `ngrok = true` follows the same static-domain rule: a reserved domain is
 required, no random URLs. goja/JS adapters remain the escape hatch for exotic
 setups only. Neither is the happy path.
@@ -834,7 +840,7 @@ default_view = "grid"       # grid | focus
 cloudflare = false
 domain = ""                 # REQUIRED when cloudflare = true
 tunnel_name = "herdr-expose"
-ngrok = false
+ngrok = false               # REMOVED by AMENDMENTS 18: no longer written, still loads if present
 lan = false                 # bind 0.0.0.0; also the automatic fallback
 autostart = false
 
@@ -1182,3 +1188,61 @@ reach, so lan is right here.
 L2 is unchanged and remains the important half: **the ladder is never climbed
 for you.** A bare `share` must never become a tunnel because a domain happens to
 be configured. Fallback degrades downward on an explicit ask, never upward.
+
+---
+
+# AMENDMENTS 18 — one built-in transport. Everything else is an adapter.
+
+Owner: "no need ngrok — cloudflare is enough."
+
+## M1. The built-in ngrok provider is REMOVED
+
+Gone: the `ngrok` config key, `--provider`, the ngrok rungs, `$NGROK_AUTHTOKEN`
+handling, and every claim in the README, the skill, the docs and the config
+scaffold that this binary carries ngrok. AMENDMENTS 3 §C4's ngrok clause is
+withdrawn; its static-domain rule stands for Cloudflare.
+
+## M2. The reason is UNVERIFIED SURFACE, not an unwanted feature
+
+There is no ngrok binary and no ngrok token on the machine this was built on, so
+the provider was unit-tested against a fake binary and **never once exercised
+end to end**. Those tests proved the shape of the integration — argv, the token
+in the child's environment and nowhere else, the scanner regex — and could not
+prove ngrok's agent behaves that way.
+
+**Code on a public surface that has never actually run is a liability.** It rots
+against the upstream tool's flags and log format, and the first person to use it
+finds the bug. This is the criterion for admitting a future built-in: not "is it
+popular" but "can we run it end to end here".
+
+## M3. What is KEPT, and why it is not ngrok scaffolding
+
+- **The `Provider` interface and `Footprint()`.** `Footprint` is what makes
+  teardown symmetric with creation *when creation was interrupted* — the case
+  that orphans resources — and the interface is what lets idempotency be tested
+  without a network. cloudflare-named, cloudflare-quick and the goja adapter all
+  implement it, the rung × provider table still runs over all three, and the
+  abstraction does not collapse back into Cloudflare-specific code.
+- **The goja/JS adapter**, promoted from curiosity to THE extension point. It
+  is now the answer for ngrok, tailscale, a corporate proxy or a homelab, so it
+  is documented as such (`adapters/template.js`) and held to the built-in's
+  standard in the provider table rather than tested beside it.
+  `adapters/ngrok.js` stays as a worked example, clearly labelled as
+  community-shaped code that CI parses and never runs.
+
+## M4. `--provider` is removed, not reduced
+
+With one built-in it would be a one-value flag pretending to be a choice. It is
+refused at parse time with an error naming the replacement, because silently
+accepting `--provider ngrok` and handing back a Cloudflare tunnel is the one
+outcome worse than failing.
+
+## M5. An old config still loads
+
+A file carrying `ngrok = true` (under `[expose]` or `[share]`) is read without
+complaint, ignored, and dropped on the next rewrite — exactly as the withdrawn
+`server.bind` and `default_mode = "auto"` keys are. A key that no longer does
+anything is not a reason to take somebody's daemon down.
+
+The four rungs of AMENDMENTS 16/17 are unchanged: bare = lan, `--quick`,
+`--domain`, `--local`, and the ladder is still never climbed for you.

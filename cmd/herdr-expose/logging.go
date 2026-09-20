@@ -203,7 +203,7 @@ const safeValue = "[withheld: terminal output and credentials are never logged]"
 //   - ANY []byte value is replaced whatever it is called — that is what a
 //     frame looks like;
 //   - every string is bounded, because a value that long is a payload;
-//   - known secret VALUES (the Cloudflare and ngrok tokens) are
+//   - known secret VALUES (the Cloudflare tokens) are
 //     scrubbed out of free text, the same trick internal/expose already plays,
 //     so a third-party error string cannot smuggle one through.
 type safeHandler struct{ inner slog.Handler }
@@ -276,7 +276,6 @@ func truncate(s string) string {
 // even inside somebody else's error string.
 var secretEnvNames = []string{
 	"CLOUDFLARE_ALLPURPOSE_TOKEN", "CLOUDFLARE_API_TOKEN", "CLOUDFLARE_TUNNEL_TOKEN",
-	"NGROK_AUTHTOKEN",
 }
 
 func scrubText(s string) string {

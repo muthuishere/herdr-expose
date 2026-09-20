@@ -11,11 +11,18 @@ import (
 )
 
 // Provider is the ONE interface every exposure implementation satisfies:
-// cloudflare-named, cloudflare-quick, ngrok-domain, ngrok-quick and a goja/JS
-// adapter. There is no "the built-in one plus an escape hatch that gets a
-// different deal" — the Manager only ever holds a Provider, and every
-// guarantee in this package is stated on this interface rather than on one
-// implementation.
+// cloudflare-named, cloudflare-quick and a goja/JS adapter. There is no "the
+// built-in one plus an escape hatch that gets a different deal" — the Manager
+// only ever holds a Provider, and every guarantee in this package is stated on
+// this interface rather than on one implementation.
+//
+// This interface OUTLIVES any particular provider, and deliberately so. The
+// built-in ngrok provider was removed in AMENDMENTS 18 / ADR 0034, and the
+// interface did not shrink with it: it is not ngrok scaffolding, it is what
+// makes teardown symmetric with creation (Footprint), makes idempotency
+// testable without a network, and gives a JS adapter — now the answer for
+// ngrok, tailscale or anything else — exactly the same contract as the
+// built-in. Do not collapse it back into Cloudflare-specific code.
 //
 // The method set is exactly the lifecycle of an exposure:
 //
@@ -44,9 +51,9 @@ import (
 // cannot opt out of being restarted, or of being killed.
 type Provider interface {
 	// Name is the provider identity, e.g. "cloudflare", "cloudflare-quick",
-	// "ngrok", "ngrok-quick", "js:<id>".
+	// "js:<id>".
 	Name() string
-	// Mode is the transport shape, e.g. "named" | "quick" | "ngrok" | "js".
+	// Mode is the transport shape, e.g. "named" | "quick" | "js".
 	Mode() string
 	// Footprint declares what this provider creates outside this process.
 	Footprint() Footprint
@@ -93,9 +100,10 @@ type Footprint struct {
 	// away from the permanent deployment's hostname.
 	DNSRecord string `json:"dns_record,omitempty"`
 	DNSTag    string `json:"dns_tag,omitempty"`
-	// ReservedName is a hostname the provider USES but did not create (an
-	// ngrok reserved domain). It is listed so teardown can state plainly that
-	// it is leaving it alone.
+	// ReservedName is a hostname the provider USES but did not create — a
+	// name reserved in somebody else's account, typically by a JS adapter. It
+	// is listed so teardown can state plainly that it is leaving it alone,
+	// rather than leaving a suspiciously empty Destroy to be read as a bug.
 	ReservedName string `json:"reserved_name,omitempty"`
 	// StateFiles are the local files it writes, all under the state dir.
 	StateFiles []string `json:"state_files,omitempty"`

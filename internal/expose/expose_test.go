@@ -232,7 +232,7 @@ func TestShippedAdaptersLoad(t *testing.T) {
 		t.Run(filepath.Base(m), func(t *testing.T) {
 			log := &testLog{}
 			j, err := newJSTunnel(filepath.Base(m), m, "http://127.0.0.1:21118",
-				map[string]string{"hostname": "herdr.example.com", "tunnel": "t", "domain": "d.ngrok.app"},
+				map[string]string{"hostname": "herdr.example.com", "tunnel": "t", "domain": "d.example.com"},
 				log.logf, &redactor{})
 			if err != nil {
 				t.Fatalf("%s failed to load under goja: %v", m, err)
@@ -485,8 +485,6 @@ func TestModeResolution(t *testing.T) {
 			absent, ModeLAN, config.BindAll, false, true},
 		{"cloudflare without binary falls back even when lan is false",
 			config.Expose{Cloudflare: true, Domain: "x.example.com", LAN: false}, absent, ModeLAN, config.BindAll, false, true},
-		{"ngrok without binary falls back", config.Expose{Ngrok: true, Domain: "x.ngrok.app"}, absent,
-			ModeLAN, config.BindAll, false, true},
 		{"js adapter binds loopback", config.Expose{Adapter: "x"}, present, ModeJS, config.BindLoopback, true, false},
 		{"a working tunnel is not downgraded by lan = true",
 			config.Expose{Cloudflare: true, Domain: "herdr.deemwar.com", LAN: true}, present,

@@ -1,17 +1,32 @@
 // template.js — copy this to write your own herdr-expose tunnel adapter.
 //
-// WHEN YOU NEED THIS
-// ------------------
-// Probably never. Cloudflare and ngrok are built into the Go binary:
+// THIS IS THE EXTENSION POINT. There is exactly ONE built-in transport:
 //
 //     [expose]
 //     cloudflare = true
 //     domain = "herdr.example.com"
 //
-// does the whole job — creates/reuses the named tunnel, writes the DNS record,
-// runs cloudflared, restarts it if it dies. A JS adapter is the ESCAPE HATCH
-// for the setups we cannot ship built in: tailscale funnel, a corporate proxy,
-// an SSH reverse tunnel to your own box, a homelab ingress.
+// which does the whole job — creates/reuses the named tunnel, writes the DNS
+// record, runs cloudflared, restarts it if it dies.
+//
+// EVERYTHING ELSE IS AN ADAPTER, and an adapter is the supported answer, not a
+// consolation prize: ngrok, tailscale funnel, a corporate reverse proxy, an
+// SSH -R to your own box, a homelab ingress. An adapter written here is a full
+// provider to the host — it declares a footprint, its URL is verified before
+// it is published, it is supervised and restarted, and its Stop and Destroy
+// are held to the same idempotency rules as the built-in. herdr-expose used to
+// carry a second built-in provider (ngrok) and removed it in AMENDMENTS 18 /
+// ADR 0034, because a transport nobody here could run end to end rots in
+// place; a transport YOU run is a transport that gets exercised. See
+// adapters/ngrok.js for a worked example of exactly that.
+//
+// WHAT YOU GET, AND WHAT YOU OWE
+// ------------------------------
+// You get: process supervision, line scanning, URL verification, secret
+// handling by env-var NAME, and redaction of anything you register.
+// You owe: honesty about what your adapter CREATES. If it provisions
+// something in an account, destroy() is how it comes back out; if it creates
+// nothing, say so and destroy() is a no-op.
 //
 // HOW IT RUNS
 // -----------

@@ -43,7 +43,7 @@ mobile apps. Herdr stays upstream and untouched.
                    │ 127.0.0.1:7420
         ┌──────────┼───────────┐
         │          │           │
-    React web  cloudflared  ngrok
+    React web  cloudflared  adapter
                    │           │
               ┌────▼───────────▼────┐
               │  iOS · Android      │

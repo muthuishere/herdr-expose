@@ -19,6 +19,12 @@ import (
 // Provider interface, and each one runs for every implementation, so a
 // provider that quietly gives up verification, supervision or a symmetric
 // teardown fails here rather than in somebody's account.
+//
+// The table shrank when the built-in ngrok provider was removed (AMENDMENTS 18
+// / ADR 0034) — it did not go away. The JS adapter is now the answer for ngrok,
+// tailscale and anything else, so it is IN the table: the escape hatch is held
+// to the same rung, footprint and idempotency rules as the built-in, which is
+// the only thing that makes it a usable answer rather than a shrug.
 
 // providerCase is one implementation, built the way the Manager builds it.
 type providerCase struct {
@@ -41,8 +47,10 @@ func providerCases(t *testing.T) []providerCase {
 	cfQuickBin := fakeBinDir(t, "cloudflared",
 		`echo "|  https://silly-fake-words.trycloudflare.com  |"; sleep 30`)
 	cfNamedBin := fakeBinDir(t, "cloudflared", `sleep 30`)
-	ngrokBin := fakeBinDir(t, "ngrok",
-		`echo 'msg="started tunnel" url=https://fake-parity.ngrok-free.app'; sleep 30`)
+	adapter, err := filepath.Abs(filepath.Join("..", "..", "adapters", "template.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	return []providerCase{
 		{
@@ -59,16 +67,16 @@ func providerCases(t *testing.T) []providerCase {
 			wantRung: config.RungQuick,
 		},
 		{
-			name:     "ngrok-domain",
-			expose:   config.Expose{Ngrok: true, Domain: "parity.example.ngrok.app"},
-			bins:     ngrokBin,
+			// The escape hatch, built exactly as the Manager builds it. It is
+			// a full Provider or it is not an answer for the transports that
+			// are no longer built in.
+			name: "js-adapter",
+			expose: config.Expose{
+				Adapter:  "template",
+				Adapters: []config.Adapter{{ID: "template", Script: adapter}},
+			},
+			bins:     cfNamedBin, // unused by the adapter; keeps PATH shaped the same
 			wantRung: config.RungDomain,
-		},
-		{
-			name:     "ngrok-quick",
-			expose:   config.Expose{Quick: true, Ngrok: true},
-			bins:     ngrokBin,
-			wantRung: config.RungQuick,
 		},
 	}
 }
@@ -103,7 +111,6 @@ func TestEveryProviderDeclaresItsFootprint(t *testing.T) {
 	for _, tc := range providerCases(t) {
 		t.Run(tc.name, func(t *testing.T) {
 			withFakePath(t, tc.bins)
-			t.Setenv(NgrokTokenEnv, "fake-ngrok-token-value")
 			m := New(Options{Port: 21999, Expose: tc.expose, StateDir: t.TempDir()})
 
 			fp := m.Footprint()
@@ -132,9 +139,11 @@ func TestEveryProviderDeclaresItsFootprint(t *testing.T) {
 }
 
 // The ladder is the same for every provider. `--quick` is the quick rung
-// whether cloudflared or ngrok carries it, and a domain is the domain rung
-// either way — otherwise "least exposure by default" would mean different
-// things depending on which binary the user happens to have.
+// whoever carries it, and a domain is the domain rung either way — otherwise
+// "least exposure by default" would mean different things depending on which
+// binary the user happens to have. A JS adapter is NOT a way off the ladder:
+// it sorts at the top, because an unknown transport must never look safer than
+// it is.
 func TestRungIsTheSameWhicheverProviderCarriesIt(t *testing.T) {
 	for _, tc := range providerCases(t) {
 		t.Run(tc.name, func(t *testing.T) {
@@ -153,9 +162,10 @@ func TestRungIsTheSameWhicheverProviderCarriesIt(t *testing.T) {
 	}
 }
 
-// A missing binary degrades to LAN for EVERY provider, and names the binary
-// that is actually missing. Reporting "cloudflared is not installed" to
-// somebody who asked for ngrok is how an hour gets lost.
+// A missing binary degrades to LAN, and names the binary that is actually
+// missing. The message is built from quickBinary rather than hard-coded, so a
+// provider added later reports ITS binary: telling somebody "cloudflared is
+// not installed" when they asked for something else is how an hour gets lost.
 func TestMissingBinaryDegradesToLANPerProvider(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -163,9 +173,7 @@ func TestMissingBinaryDegradesToLANPerProvider(t *testing.T) {
 		want   string
 	}{
 		{"cloudflare-quick", config.Expose{Quick: true}, "cloudflared"},
-		{"ngrok-quick", config.Expose{Quick: true, Ngrok: true}, "ngrok"},
 		{"cloudflare-domain", config.Expose{Cloudflare: true, Domain: "x.example.com"}, "cloudflared"},
-		{"ngrok-domain", config.Expose{Ngrok: true, Domain: "x.ngrok.app"}, "ngrok"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -259,7 +267,6 @@ func TestStopAndDestroyAreIdempotentForEveryProvider(t *testing.T) {
 	for _, tc := range providerCases(t) {
 		t.Run(tc.name, func(t *testing.T) {
 			withFakePath(t, tc.bins)
-			t.Setenv(NgrokTokenEnv, "fake-ngrok-token-value")
 			state := t.TempDir()
 			m := New(Options{Port: 21999, Expose: tc.expose, StateDir: state})
 
@@ -342,146 +349,51 @@ func TestStartTwiceReusesTheRunningTunnel(t *testing.T) {
 	}
 }
 
-// --- ngrok: the invariants that hold with no account and no token ----------
+// --- the escape hatch, held to the built-in's standard ---------------------
 //
-// ngrok is not installed on the machine this was written on and no token is
-// present, which is the normal case for most users — so these assert the
-// properties that must hold WITHOUT signing up for anything. The token rule in
-// particular is testable exactly as stated: the value lives in one child
-// process's environment and nowhere else.
+// ngrok was a built-in provider until AMENDMENTS 18 / ADR 0034 removed it as
+// UNVERIFIED SURFACE: no binary and no token on the machine it was written on,
+// so it was unit-tested and never once exercised end to end. What replaced it
+// is a JS adapter, and an escape hatch is only an honest answer if it is a
+// real Provider — so these assert that, with no account and no network.
 
-func TestNgrokWithoutATokenFailsByNameNotByValue(t *testing.T) {
-	withFakePath(t, fakeBinDir(t, "ngrok", "sleep 1"))
-	t.Setenv(NgrokTokenEnv, "")
-	t.Setenv("HOME", t.TempDir()) // no ngrok.yml anywhere
-
-	_, err := newNgrok(NgrokOptions{Port: 21999, Domain: "x.example.ngrok.app"},
-		func(string, ...any) {}, &redactor{})
-	if err == nil {
-		t.Fatal("ngrok with no authtoken anywhere must fail before starting anything")
-	}
-	if !strings.Contains(err.Error(), NgrokTokenEnv) {
-		t.Fatalf("the error must NAME the variable so it is actionable: %v", err)
-	}
-	if !strings.Contains(err.Error(), "add-authtoken") {
-		t.Fatalf("the error must offer the other way to configure it: %v", err)
-	}
-}
-
-// The token reaches the child's ENVIRONMENT at the point of use, and nothing
-// else: not argv (where `ps` would show it), not the log, not the status, not
-// an error.
-func TestNgrokTokenIsUsedButNeverLeaks(t *testing.T) {
-	const fake = "ngrok-fake-token-value-long-enough"
-	withFakePath(t, fakeBinDir(t, "ngrok", "sleep 1"))
-	t.Setenv(NgrokTokenEnv, fake)
-
-	red := &redactor{}
-	log := &testLog{}
-	p, err := newNgrok(NgrokOptions{Port: 21999, Domain: "parity.example.ngrok.app"}, log.logf, red)
+func TestJSAdapterIsAFullProviderNotASecondClassOne(t *testing.T) {
+	adapter, err := filepath.Abs(filepath.Join("..", "..", "adapters", "template.js"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	pt, ok := p.(*procTunnel)
-	if !ok {
-		t.Fatalf("ngrok is not process-backed: %T", p)
+	exp := config.Expose{
+		Adapter:  "template",
+		Adapters: []config.Adapter{{ID: "template", Script: adapter}},
 	}
-	cmd, err := pt.spec.Build(context.Background())
-	if err != nil {
-		t.Fatal(err)
+	m := New(Options{Port: 21999, Expose: exp, StateDir: t.TempDir()})
+	defer m.Close()
+
+	// It declares a footprint BEFORE anything runs, like every other provider.
+	fp := m.Footprint()
+	if fp.Provider != "js:template" {
+		t.Fatalf("the adapter does not declare itself: %+v", fp)
+	}
+	if !fp.Ephemeral {
+		t.Fatalf("an adapter that creates nothing in the host's name must say so: %s", fp.Describe())
+	}
+	if strings.Contains(fp.Describe(), "trycloudflare") {
+		t.Fatalf("the adapter inherited a Cloudflare footprint: %s", fp.Describe())
 	}
 
-	// argv must be clean.
-	if strings.Contains(strings.Join(cmd.Args, " "), fake) {
-		t.Fatal("the authtoken reached argv, where `ps` shows it to every user on the box")
+	// It sits on the ladder — at the top, not off it.
+	res := Resolve(exp, 21999, func(string) bool { return false })
+	if res.Mode != ModeJS || !res.Remote || res.Bind != config.BindLoopback {
+		t.Fatalf("an adapter must be a remote rung on a loopback listener: %+v", res)
 	}
-	// the environment must carry it.
-	found := false
-	for _, kv := range cmd.Env {
-		if kv == NgrokTokenEnv+"="+fake {
-			found = true
+	if config.RungOf(res.Mode) != config.RungDomain {
+		t.Fatalf("an unknown transport must never sort BELOW the top rung: %s", config.RungOf(res.Mode))
+	}
+
+	// And Stop is idempotent with nothing running, like every other provider.
+	for i := 0; i < 3; i++ {
+		if err := m.Stop(); err != nil {
+			t.Fatalf("Stop #%d on an adapter with nothing running: %v", i+1, err)
 		}
-	}
-	if !found {
-		t.Fatal("the authtoken never reached the child's environment: ngrok cannot authenticate")
-	}
-	// ...and it is registered, so anything echoing it is scrubbed.
-	if !red.contains(fake) {
-		t.Fatal("the authtoken was not registered with the redactor")
-	}
-	if strings.Contains(red.scrub("agent said "+fake), fake) {
-		t.Fatal("the authtoken survives scrubbing")
-	}
-	// Status is credential-free.
-	snap := p.Snapshot()
-	for _, s := range []string{snap.URL, snap.LastError, snap.Provider, snap.Tunnel} {
-		if strings.Contains(s, fake) {
-			t.Fatalf("the authtoken reached a Status field: %q", s)
-		}
-	}
-	// And the footprint names the variable without carrying its value.
-	fp := p.Footprint()
-	if len(fp.SecretEnv) == 0 || fp.SecretEnv[0] != NgrokTokenEnv {
-		t.Fatalf("the footprint must name the secret it reads: %+v", fp)
-	}
-	if strings.Contains(fp.Describe(), fake) {
-		t.Fatal("the authtoken reached the footprint description")
-	}
-	if strings.Contains(log.text(), fake) {
-		t.Fatalf("the authtoken reached a log line: %s", log.text())
-	}
-}
-
-// The two ngrok rungs are shaped correctly: a reserved domain is pinned with
-// --domain and verified against the hostname we already know; an ephemeral one
-// passes no domain and has its hostname scraped and then verified. Getting
-// this backwards would either publish an unverified URL or pin a hostname the
-// user never reserved.
-func TestNgrokRungsAreShapedLikeTheirCloudflareTwins(t *testing.T) {
-	withFakePath(t, fakeBinDir(t, "ngrok", "sleep 1"))
-	t.Setenv(NgrokTokenEnv, "ngrok-fake-token-value-long-enough")
-
-	reserved, err := newNgrok(NgrokOptions{Port: 21999, Domain: "r.example.ngrok.app"},
-		func(string, ...any) {}, &redactor{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	rs := reserved.(*procTunnel).spec
-	if !rs.Verify || rs.StaticURL != "https://r.example.ngrok.app" || rs.ScanURL != nil {
-		t.Fatalf("the reserved-domain rung must verify a hostname it already knows: %+v", rs)
-	}
-	if rs.HealthInterval <= 0 {
-		t.Fatal("the reserved-domain rung is not health-checked")
-	}
-	cmd, _ := rs.Build(context.Background())
-	if !strings.Contains(strings.Join(cmd.Args, " "), "--domain r.example.ngrok.app") {
-		t.Fatalf("the reserved domain is not pinned: %v", cmd.Args)
-	}
-	if fp := reserved.Footprint(); fp.ReservedName != "r.example.ngrok.app" || fp.NamedTunnel != "" {
-		t.Fatalf("a reserved domain is USED, never created — and so never deleted: %+v", fp)
-	}
-
-	ephemeral, err := newNgrok(NgrokOptions{Port: 21999, Ephemeral: true},
-		func(string, ...any) {}, &redactor{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	es := ephemeral.(*procTunnel).spec
-	if !es.Verify || es.StaticURL != "" || es.ScanURL == nil {
-		t.Fatalf("the ephemeral rung must scrape its hostname and verify it: %+v", es)
-	}
-	if es.Mode != string(ModeQuick) {
-		t.Fatalf("the ephemeral rung must sit on the quick rung, got %q", es.Mode)
-	}
-	if got := es.ScanURL(`t=2026-09-20 lvl=info msg="started tunnel" url=https://abc-123.ngrok-free.app`); got !=
-		"https://abc-123.ngrok-free.app" {
-		t.Fatalf("the ephemeral scanner does not find ngrok's hostname: %q", got)
-	}
-	cmd, _ = es.Build(context.Background())
-	if strings.Contains(strings.Join(cmd.Args, " "), "--domain") {
-		t.Fatalf("the ephemeral rung must reserve nothing: %v", cmd.Args)
-	}
-	if fp := ephemeral.Footprint(); !fp.Ephemeral || fp.ReservedName != "" {
-		t.Fatalf("the ephemeral rung creates nothing and reserves nothing: %+v", fp)
 	}
 }

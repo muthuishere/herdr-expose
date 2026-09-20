@@ -332,13 +332,6 @@ func TestMissingDomainIsRefused(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "domain is required") {
 		t.Fatalf("a domainless cloudflare config must be refused, got: %v", err)
 	}
-	// C4 on ngrok: a domainless PERMANENT ngrok config is a mistake, not an
-	// invitation to hand back a hostname that changes on every restart. The
-	// ephemeral rung exists, but only when it is asked for by name.
-	_, err = newNgrok(NgrokOptions{Port: 21118}, func(string, ...any) {}, &redactor{})
-	if err == nil || !strings.Contains(err.Error(), "domain is required") {
-		t.Fatalf("a domainless ngrok config must be refused, got: %v", err)
-	}
 }
 
 func countCalls(m *mockCF, want string) int {

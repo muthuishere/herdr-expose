@@ -10,8 +10,8 @@ import (
 // Status is what `herdr-expose status`, /v1/config and the UI see. It is
 // deliberately credential-free: no tokens, no env values, no command lines.
 type Status struct {
-	Provider string `json:"provider"` // cloudflare | ngrok | js:<id> | none
-	Mode     string `json:"mode"`     // cloudflare | ngrok | js | lan | local
+	Provider string `json:"provider"` // cloudflare | cloudflare-quick | js:<id> | none
+	Mode     string `json:"mode"`     // cloudflare | quick | js | lan | local
 
 	// Bind is the resolved listen address: 127.0.0.1, or 0.0.0.0 in lan mode.
 	Bind string `json:"bind"`
@@ -26,7 +26,7 @@ type Status struct {
 	// FellBack explains an automatic downgrade, e.g. cloudflared missing.
 	FellBack string `json:"fell_back,omitempty"`
 	// Tunnel is the process-backed transport, when one is running.
-	Tunnel    string    `json:"tunnel,omitempty"`    // named | ngrok | js
+	Tunnel    string    `json:"tunnel,omitempty"`    // named | quick | js
 	Running   bool      `json:"running"`             //
 	Healthy   bool      `json:"healthy"`             //
 	URL       string    `json:"url"`                 // public URL, empty until known

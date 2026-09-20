@@ -1,7 +1,9 @@
 # 5. One static domain, provisioned through the Cloudflare API from Go
 
-Status: Accepted (supersedes both the "all exposure is a JS adapter" draft and
-the "quick tunnel by default" draft)
+Status: Accepted for the permanent deployment; its ban on ephemeral tunnels is
+narrowed by 0027/0028, and its `ngrok = true` clause is **removed** by 0034
+(supersedes both the "all exposure is a JS adapter" draft and the "quick tunnel
+by default" draft)
 
 ## Context
 
@@ -66,9 +68,16 @@ removes them, and only ever touches records it created.
 The API token is read from `$CLOUDFLARE_ALLPURPOSE_TOKEN` **by name, at point of
 use**. Never in config, never in state, never in a log.
 
-`ngrok = true` follows the same rule: a reserved domain is required, no random
-URLs. **JS adapters on goja remain** for exotic setups — tailscale, a corporate
-proxy, a homelab — as the escape hatch, not the happy path.
+> **NARROWED by [ADR 0034](0034-cloudflare-is-the-only-built-in-provider.md).**
+> This paragraph originally read: "`ngrok = true` follows the same rule: a
+> reserved domain is required, no random URLs." The built-in ngrok provider was
+> removed as **unverified surface** — there was no ngrok binary and no token on
+> the machine it was written on, so it was unit-tested and never once exercised
+> end to end. The static-domain rule above stands for Cloudflare, unchanged.
+
+**JS adapters on goja remain** for everything that is not built in — ngrok,
+tailscale, a corporate proxy, a homelab. Since 0034 that is the *only* answer
+for those, which makes the adapter the extension point rather than a footnote.
 
 ## Consequences
 

@@ -63,12 +63,14 @@ type shareRecord struct {
 	SecureContext bool   `json:"secure_context"`
 	FellBack      string `json:"fell_back,omitempty"`
 
-	// Provider is WHICH implementation serves this share's rung —
-	// "cloudflare" (the default, and what every record written before
-	// providers were interchangeable means) or "ngrok". The rung and the
-	// provider are independent: Mode says how far this reaches, Provider says
-	// who carries it, and teardown needs BOTH, because only the cloudflare
-	// domain rung creates anything that has to be deleted.
+	// Provider is WHICH implementation serves this share's rung. Today the
+	// only one a share can be created with is "cloudflare"; the field stays
+	// because the rung and the provider are independent — Mode says how far
+	// this reaches, Provider says who carries it — and because teardown needs
+	// BOTH: only a cloudflare DOMAIN share creates anything that has to be
+	// deleted. It also keeps records written by older versions (the built-in
+	// ngrok provider, removed in AMENDMENTS 18 / ADR 0034) readable, so that
+	// `share list` and `share revoke` can still see and wipe them.
 	Provider string `json:"provider,omitempty"`
 
 	Domain     string    `json:"domain,omitempty"`
@@ -90,7 +92,8 @@ type shareRecord struct {
 type shareView struct {
 	ID   string `json:"id"`
 	Mode string `json:"mode"`
-	// Provider is which implementation carries the rung: cloudflare | ngrok.
+	// Provider is which implementation carries the rung. "cloudflare" for
+	// anything this version creates; an older value is reported as written.
 	Provider string `json:"provider"`
 	Scope    string `json:"scope"`
 	Session  string `json:"session"`
@@ -169,11 +172,13 @@ func (r *shareRecord) hasCloudflareResources() bool {
 	if r.isLocal() || r.isLAN() || r.isQuick() {
 		return false
 	}
-	// ngrok's domain rung uses a RESERVED domain that the user provisioned in
-	// their own ngrok account. This tool did not create it, so this tool never
-	// deletes it — teardown for an ngrok share is "stop the process", exactly
-	// as the provider's Footprint declares.
-	return r.provider() != "ngrok"
+	// A share carried by anything other than the built-in Cloudflare provider
+	// created nothing in anybody's Cloudflare account, so there is nothing
+	// here to delete — teardown is "stop the process", exactly as that
+	// provider's Footprint declares. The test is POSITIVE (is it cloudflare?)
+	// rather than a list of what it is not, so a record naming a provider this
+	// build has never heard of is never handed a Cloudflare teardown.
+	return r.provider() == "cloudflare"
 }
 
 // provider names the implementation behind this share. An empty field means a
@@ -430,7 +435,7 @@ func cmdShare(args []string) error {
 func shareUsage() {
 	fmt.Fprint(os.Stderr, `herdr-expose share — one scoped, time-boxed, self-destructing tunnel
 
-  share [--local | --lan | --quick | --domain X] [--provider cloudflare|ngrok]
+  share [--local | --lan | --quick | --domain X]
         [--session NAME] [--pane TARGET] [--hours N] [--days N] [--json]
         expose ONE herdr session (default: this one) for N hours (default 1)
 
@@ -451,16 +456,10 @@ func shareUsage() {
         above what you asked for: a bare 'share' never becomes a tunnel just
         because [expose] has a domain configured.
 
-        --provider cloudflare|ngrok  WHO carries the rung (default cloudflare).
-        The ladder is the same for both, and picking a provider can never move
-        a share up or down it:
-          --quick    --provider ngrok  a throwaway ngrok hostname
-          --domain X --provider ngrok  a domain RESERVED in your ngrok account
-        Both verify before publishing, both are supervised and restarted, and
-        both tear down only what they created — which for ngrok is nothing,
-        because the reserved domain is yours and was not made here.
-        $NGROK_AUTHTOKEN is read by NAME at the point a child process is
-        started, and never stored, logged or returned.
+        Cloudflare carries every tunnel rung. Any other transport — ngrok,
+        tailscale, a corporate proxy — is a JS adapter configured under
+        [expose] (see adapters/template.js); there is no provider flag,
+        because there is no second built-in to choose between.
   share list [--json]              list shares; reaps any whose deadline passed
   share extend <id> --hours N|--days N [--json]
   share pair <id> [--name NAME] [--json]
@@ -482,22 +481,16 @@ type shareFlags struct {
 	// none is, the share is LAN: this machine and this network, and not one
 	// hop further. Every rung above that is an explicit request, and `--local`
 	// is the explicit way DOWN, for testing.
-	local  bool
-	lan    bool
-	quick  bool
-	domain string
-	// provider is WHO carries the rung: "cloudflare" (default) or "ngrok".
-	// It is deliberately orthogonal to the rung flags — AMENDMENTS 16/17 are
-	// about REACH, and reach must mean the same thing whichever provider is
-	// asked for. Picking a provider can therefore never move a share up or
-	// down the ladder; it only changes which binary carries it.
-	provider string
-	session  string
-	panes    []string
-	hours    float64
-	days     float64
-	name     string
-	asJSON   bool
+	local   bool
+	lan     bool
+	quick   bool
+	domain  string
+	session string
+	panes   []string
+	hours   float64
+	days    float64
+	name    string
+	asJSON  bool
 
 	// hoursSet records that --hours was passed explicitly, so that the
 	// [share] default does not overwrite it.
@@ -549,7 +542,16 @@ func parseShareFlags(args []string) (shareFlags, error) {
 		case "--quick":
 			f.quick = true
 		case "--provider":
-			f.provider, err = next()
+			// Removed with the second built-in provider (AMENDMENTS 18 /
+			// ADR 0034). A one-value flag that pretends to be a choice is
+			// worse than no flag, and silently accepting `--provider ngrok`
+			// would hand back a Cloudflare tunnel under an ngrok name. Say
+			// what happened and where the transport went instead.
+			_, _ = next()
+			err = errors.New("--provider was removed: Cloudflare is the only built-in transport, " +
+				"so the rung flags (--lan / --quick / --domain / --local) are the whole choice. " +
+				"For ngrok, tailscale or anything else, write a JS adapter and select it with " +
+				"`adapter = \"<id>\"` under [expose] — see adapters/template.js")
 		case "--json":
 			f.asJSON = true
 		default:
@@ -562,20 +564,8 @@ func parseShareFlags(args []string) (shareFlags, error) {
 	if !f.hoursSet && f.days == 0 {
 		f.hours = 1 // G1 default
 	}
-	switch strings.ToLower(strings.TrimSpace(f.provider)) {
-	case "", "cloudflare", "cloudflared", "cf":
-		f.provider = "cloudflare"
-	case "ngrok":
-		f.provider = "ngrok"
-	default:
-		return f, fmt.Errorf("unknown --provider %q: the built-in providers are `cloudflare` and `ngrok` "+
-			"(a JS adapter is configured under [expose] instead)", f.provider)
-	}
 	return f, nil
 }
-
-// isNgrok reports which provider carries this share's rung.
-func (f shareFlags) isNgrok() bool { return f.provider == "ngrok" }
 
 // namedARung reports whether the command line asked for a specific rung.
 // `--local` counts: saying "local" out loud is how somebody with a different
@@ -795,11 +785,10 @@ func resolveShareModeUnchecked(ctx context.Context, f shareFlags, port int, tunn
 	// made; the ONLY precondition is cloudflared. Missing it degrades to lan
 	// with the reason printed, because the ask was "make this reachable".
 	case f.quick:
-		// The ephemeral rung of whichever provider was asked for. Both
-		// flavours create nothing in any account, so the only precondition is
-		// that provider's binary; a missing one degrades to lan with the
-		// reason printed, exactly as it does for the other provider.
-		e := config.Expose{Quick: true, Ngrok: f.isNgrok()}
+		// The ephemeral rung: it creates nothing in any account, so the only
+		// precondition is the binary that carries it; a missing one degrades
+		// to lan with the reason printed.
+		e := config.Expose{Quick: true}
 		res := expose.Resolve(e, port, shareBinaryFound)
 		if res.Mode != config.ModeQuick {
 			return lanFallback("you asked for a quick tunnel, but " + res.FellBack)
@@ -813,20 +802,6 @@ func resolveShareModeUnchecked(ctx context.Context, f shareFlags, port int, tunn
 	// the fix in it: silently putting that share on the wifi instead would not
 	// be what the person meant by `--domain`.
 	d := strings.TrimSpace(f.domain)
-
-	if f.isNgrok() {
-		// ngrok's analogue of a named tunnel: a RESERVED domain, provisioned
-		// by the user in their own ngrok account. There is no zone to check
-		// and nothing to provision, because there is nothing this tool
-		// creates — which is also why its teardown deletes nothing. Same rung,
-		// same reach, same verify-before-publish, different paperwork.
-		e := config.Expose{Ngrok: true, Domain: d}
-		res := expose.Resolve(e, port, shareBinaryFound)
-		if res.Mode != config.ModeNgrok {
-			return lanFallback(fmt.Sprintf("you asked to share on %s via ngrok, but %s", d, res.FellBack))
-		}
-		return res, e, nil
-	}
 
 	e := config.Expose{Cloudflare: true, Domain: d, TunnelName: tunnelName}
 	res := expose.Resolve(e, port, shareBinaryFound)
@@ -982,21 +957,14 @@ func cmdShareCreate(args []string) (err error) {
 
 	now := time.Now()
 	share := &shareRecord{
-		ID: id, Mode: string(res.Mode), Provider: f.provider, Bind: res.Bind,
+		ID: id, Mode: string(res.Mode), Provider: "cloudflare", Bind: res.Bind,
 		SecureContext: res.SecureContext, FellBack: res.FellBack,
 		Port: port, Session: f.session, Panes: scope.Panes, Scope: scope.String(),
 		CreatedAt: now, ExpiresAt: now.Add(ttl), State: "starting",
 	}
-	switch res.Mode {
-	case config.ModeCloudflare:
+	if res.Mode == config.ModeCloudflare {
 		share.Domain, share.TunnelName = strings.TrimSuffix(strings.TrimPrefix(res.URL, "https://"), "/"), shareTunnelName(id)
-	case config.ModeNgrok:
-		// The reserved domain is recorded so `share list` and the collision
-		// check see it, but NO tunnel name: there is nothing named to create
-		// and therefore nothing named to delete.
-		share.Domain = strings.TrimSuffix(strings.TrimPrefix(res.URL, "https://"), "/")
-	}
-	if res.Mode != config.ModeCloudflare && res.Mode != config.ModeNgrok {
+	} else {
 		// A fallback landed us below the rung that uses a hostname; make sure
 		// no stale domain survives into the record and into teardown.
 		share.Domain, share.TunnelName = "", ""
@@ -1598,16 +1566,18 @@ func revokeShareRecord(rec *shareRecord) teardownResult {
 		switch {
 		case rec.isLocal():
 			bindAddr = fmt.Sprintf("127.0.0.1:%d", rec.Port)
-		case rec.isQuick() && rec.provider() != "ngrok":
+		case rec.isQuick() && rec.provider() == "cloudflare":
 			pattern := expose.QuickURLPattern(rec.Port)
 			killStrayCloudflared(pattern)
 			waitForNoCloudflared(pattern, 10*time.Second)
 			bindAddr = fmt.Sprintf("127.0.0.1:%d", rec.Port)
 		case !rec.isLAN():
-			// An ngrok share (either rung): the agent is a child of the share
-			// process and dies with it, and there is nothing in the user's
-			// ngrok account that this tool created, so there is nothing to
-			// delete. The reserved domain stays exactly where the user put it.
+			// A tunnel share carried by something other than the built-in
+			// Cloudflare provider — a JS adapter, or a record from a build
+			// that still had the ngrok provider. Its child process dies with
+			// the share process, and nothing it used was created here, so
+			// there is nothing remote to delete: the name stays exactly where
+			// its owner put it.
 			bindAddr = fmt.Sprintf("127.0.0.1:%d", rec.Port)
 		}
 		res.PortFree = rec.Port == 0 || portFree(bindAddr)
@@ -1940,11 +1910,18 @@ func cmdShareRun(args []string) error {
 	// never tries a tunnel, and a tunnel share never silently degrades to LAN.
 	// Nothing here consults the config file, so editing [expose] under a live
 	// share cannot move it up the ladder either.
-	// The PROVIDER is reconstructed from the record too, not just the rung: a
+	// The PROVIDER is checked against the record too, not just the rung: a
 	// share restored after a reboot must come back on the same binary as well
 	// as the same rung, or its teardown and its footprint no longer describe
-	// what is actually running.
-	ngrok := rec.provider() == "ngrok"
+	// what is actually running. A record naming a provider this build no
+	// longer has (the built-in ngrok, removed in AMENDMENTS 18 / ADR 0034) is
+	// therefore REFUSED rather than quietly re-pointed at Cloudflare, which
+	// would aim a tunnel at a hostname in somebody else's account.
+	if p := rec.provider(); p != "cloudflare" && !rec.isLocal() && !rec.isLAN() {
+		return fmt.Errorf("share %s was created with the %q provider, which is no longer built in: "+
+			"revoke it (`herdr-expose share revoke %s`) and create a new one, or carry that transport "+
+			"with a JS adapter under [expose]", rec.ID, p, rec.ID)
+	}
 	exp := config.Expose{LAN: true}
 	switch {
 	case rec.isLocal():
@@ -1955,9 +1932,7 @@ func cmdShareRun(args []string) error {
 		// stays quick and never silently acquires a domain — and, just as
 		// importantly, a domain share can never silently degrade to an
 		// ephemeral hostname on restart.
-		exp = config.Expose{Quick: true, Ngrok: ngrok}
-	case ngrok && !rec.isLAN():
-		exp = config.Expose{Ngrok: true, Domain: rec.Domain}
+		exp = config.Expose{Quick: true}
 	case !rec.isLAN():
 		exp = config.Expose{Cloudflare: true, Domain: rec.Domain, TunnelName: rec.TunnelName}
 	}

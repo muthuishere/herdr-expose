@@ -13,15 +13,16 @@ import (
 
 // EVERY VERB, TWICE.
 //
-// The owner's rule is "make sure we are idempotent — cloudflared or ngrok,
-// whatever they want", and idempotency here is not "the second run does not
+// The owner's rule is "make sure we are idempotent — whatever transport they
+// want", and idempotency here is not "the second run does not
 // error". It is "the second run reaches the same state as the first, and an
 // INTERRUPTED first run converges on it too". These tests run each verb twice
 // against real state on disk, and several of them kill the state halfway
 // first.
 //
 // Nothing here touches a real account: every case is a rung that creates
-// nothing (local / lan / quick / ngrok), or a record whose Cloudflare half is
+// nothing (local / lan / quick, or a legacy record from a provider this build
+// no longer has), or a record whose Cloudflare half is
 // asserted through classification rather than executed.
 
 // withStateDir points the whole state tree — shares, ledgers, locks — at a
@@ -84,9 +85,13 @@ func TestRevokeAllTwiceAcrossEveryRung(t *testing.T) {
 	seedShare(t, "bbbb1111", &shareRecord{Mode: string(config.ModeLocal)})
 	seedShare(t, "bbbb2222", &shareRecord{Mode: string(config.ModeLAN)})
 	seedShare(t, "bbbb3333", &shareRecord{Mode: string(config.ModeQuick), URL: "https://x.trycloudflare.com"})
+	// Legacy records from the build that still had the ngrok provider
+	// (AMENDMENTS 18 / ADR 0034). They must still be reaped in the same pass:
+	// a share this binary can no longer CREATE is still a share it has to be
+	// able to WIPE, or removing a provider would strand state forever.
 	seedShare(t, "bbbb4444", &shareRecord{Mode: string(config.ModeQuick), Provider: "ngrok",
 		URL: "https://x.ngrok-free.app"})
-	seedShare(t, "bbbb5555", &shareRecord{Mode: string(config.ModeNgrok), Provider: "ngrok",
+	seedShare(t, "bbbb5555", &shareRecord{Mode: "ngrok", Provider: "ngrok",
 		Domain: "reserved.example.ngrok.app"})
 
 	for i := 0; i < 2; i++ {
@@ -322,22 +327,27 @@ func TestTwoBareSharesDoNotCollide(t *testing.T) {
 
 // ---------------------------------------------------------------- providers
 
-// The ladder is provider-independent. `--provider ngrok` must land on exactly
-// the same rung as its cloudflare twin, and must never move a share up or down
-// it — the point of AMENDMENTS 16/17 is REACH, and reach cannot depend on
-// which binary happens to be installed.
-func TestProviderChoiceNeverChangesTheRung(t *testing.T) {
+// The rung is decided by the rung FLAGS and nothing else. There is one
+// built-in transport now (AMENDMENTS 18 / ADR 0034), so the way this could go
+// wrong has changed shape: not "a provider moved the share up the ladder" but
+// "a share created without a rung flag still ends up somewhere". Every rung is
+// still requested explicitly, and every one still resolves to itself.
+func TestRungComesFromTheFlagsAndNothingElse(t *testing.T) {
 	withBinaryProbe(t, installed)
 	cases := []struct {
 		args []string
 		want config.Rung
+		// resolve is false for the domain rung, whose resolution looks a zone
+		// up in a real Cloudflare account. The REQUESTED rung is still
+		// asserted; what it resolves to against a live zone belongs in e2e,
+		// not in a unit test that must not touch the network.
+		resolve bool
 	}{
-		{nil, config.RungLAN},
-		{[]string{"--provider", "ngrok"}, config.RungLAN},
-		{[]string{"--local", "--provider", "ngrok"}, config.RungLocal},
-		{[]string{"--quick"}, config.RungQuick},
-		{[]string{"--quick", "--provider", "ngrok"}, config.RungQuick},
-		{[]string{"--domain", "x.example.ngrok.app", "--provider", "ngrok"}, config.RungDomain},
+		{nil, config.RungLAN, true},
+		{[]string{"--lan"}, config.RungLAN, true},
+		{[]string{"--local"}, config.RungLocal, true},
+		{[]string{"--quick"}, config.RungQuick, true},
+		{[]string{"--domain", "x.example.com"}, config.RungDomain, false},
 	}
 	for _, tc := range cases {
 		f, err := parseShareFlags(tc.args)
@@ -347,40 +357,51 @@ func TestProviderChoiceNeverChangesTheRung(t *testing.T) {
 		if f.rung() != tc.want {
 			t.Fatalf("%v requested rung %s, want %s", tc.args, f.rung(), tc.want)
 		}
-		res, exp, err := resolveShareMode(context.Background(), f, 21999, "herdr-expose-share-test")
+		if !tc.resolve {
+			continue
+		}
+		res, _, err := resolveShareMode(context.Background(), f, 21999, "herdr-expose-share-test")
 		if err != nil {
 			t.Fatalf("%v: %v", tc.args, err)
 		}
 		if got := config.RungOf(res.Mode); got != tc.want {
 			t.Fatalf("%v resolved to rung %s (mode %s), want %s", tc.args, got, res.Mode, tc.want)
 		}
-		if f.isNgrok() && (exp.Cloudflare || (exp.Domain != "" && !exp.Ngrok)) {
-			t.Fatalf("%v was handed a cloudflare table: %+v", tc.args, exp)
+	}
+}
+
+// `--provider` is GONE, and it fails loudly rather than being accepted and
+// ignored. Silently swallowing `--provider ngrok` would hand back a Cloudflare
+// tunnel under an ngrok name, which is the one outcome worse than an error —
+// so the refusal has to name the replacement, the JS adapter.
+func TestProviderFlagIsRefusedAndPointsAtTheEscapeHatch(t *testing.T) {
+	for _, args := range [][]string{
+		{"--provider", "ngrok"},
+		{"--provider", "cloudflare"},
+		{"--quick", "--provider", "tailscale"},
+	} {
+		_, err := parseShareFlags(args)
+		if err == nil {
+			t.Fatalf("%v: --provider was removed and must not be silently accepted", args)
+		}
+		if !strings.Contains(err.Error(), "adapter") {
+			t.Fatalf("%v: the refusal must point at the escape hatch, got: %v", args, err)
 		}
 	}
 }
 
-// An unknown provider is refused at parse time, before anything is created.
-func TestUnknownProviderIsRefused(t *testing.T) {
-	if _, err := parseShareFlags([]string{"--provider", "tailscale"}); err == nil ||
-		!strings.Contains(err.Error(), "cloudflare") {
-		t.Fatalf("an unknown provider must be refused with the list of real ones, got: %v", err)
-	}
-}
-
-// An ngrok share creates NOTHING that this tool may delete — a reserved domain
-// belongs to the user's ngrok account — so teardown must classify it as such
-// rather than running the Cloudflare path and no-opping.
-func TestNgrokShareHasNoCloudflareTeardown(t *testing.T) {
+// A share recorded under a provider this build no longer has creates NOTHING
+// that this tool may delete, so teardown must classify it as such rather than
+// running the Cloudflare path and no-opping — or worse, aiming a Cloudflare
+// teardown at a hostname in somebody else's account.
+func TestAForeignProviderShareHasNoCloudflareTeardown(t *testing.T) {
 	for _, rec := range []*shareRecord{
-		{Mode: string(config.ModeNgrok), Provider: "ngrok", Domain: "r.example.ngrok.app"},
+		{Mode: "ngrok", Provider: "ngrok", Domain: "r.example.ngrok.app"},
 		{Mode: string(config.ModeQuick), Provider: "ngrok", URL: "https://q.ngrok-free.app"},
+		{Mode: string(config.ModeCloudflare), Provider: "js:homelab", Domain: "r.example.com"},
 	} {
 		if rec.hasCloudflareResources() {
-			t.Fatalf("an ngrok share must not be given a Cloudflare teardown: %+v", rec)
-		}
-		if rec.provider() != "ngrok" {
-			t.Fatalf("provider = %q", rec.provider())
+			t.Fatalf("a share this build did not create must not be given a Cloudflare teardown: %+v", rec)
 		}
 	}
 	// ...and the cloudflare domain rung still does.

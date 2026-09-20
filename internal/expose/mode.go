@@ -52,20 +52,18 @@ import (
 // pairing code is shown ONLY on the physically-present machine: no HTTP
 // endpoint mints or displays one. A neighbour on the wifi can reach the port
 // and gets nowhere without looking at the owner's screen.
-// quickBinary names the helper the ephemeral rung needs for the selected
-// provider, so that `--quick --provider ngrok` checks for ngrok rather than
-// silently checking for cloudflared and reporting the wrong missing tool.
-func quickBinary(e config.Expose) (bin, label string) {
-	if e.Provider() == config.ProviderNgrok {
-		return "ngrok", "ngrok"
-	}
+// quickBinary names the helper the ephemeral rung needs. It stays a function
+// of the [expose] table rather than a constant because `quick` is a RUNG, not
+// a Cloudflare spelling (ADR 0028): whatever carries the ephemeral rung, the
+// fallback message has to name THAT binary, not always `cloudflared`. Today
+// the only built-in that carries it is cloudflared.
+func quickBinary(config.Expose) (bin, label string) {
 	return "cloudflared", "cloudflare"
 }
 
 const (
 	ModeCloudflare = config.ModeCloudflare
 	ModeQuick      = config.ModeQuick
-	ModeNgrok      = config.ModeNgrok
 	ModeJS         = config.ModeJS
 	ModeLAN        = config.ModeLAN
 	ModeLocal      = config.ModeLocal
@@ -81,7 +79,7 @@ const (
 //	res := mgr.Resolution()
 //	store.SetBinding(res.Mode, res.Bind)
 type Resolution struct {
-	Mode config.Mode `json:"mode"` // cloudflare | ngrok | js | lan | local
+	Mode config.Mode `json:"mode"` // cloudflare | js | lan | local
 	Bind string      `json:"bind"` // 127.0.0.1 or 0.0.0.0 — never user-settable
 	Port int         `json:"port"`
 
@@ -116,7 +114,7 @@ func (r Resolution) AllowedOrigins(configured []string) []string {
 		add(strings.TrimSpace(o))
 	}
 	switch r.Mode {
-	case ModeCloudflare, ModeNgrok, ModeJS, ModeQuick:
+	case ModeCloudflare, ModeJS, ModeQuick:
 		// For a quick tunnel r.URL is empty until the hostname is scraped;
 		// Manager.AllowedOrigins appends the live one as soon as it is known.
 		add(r.URL)
@@ -164,13 +162,11 @@ func Resolve(e config.Expose, port int, binaryFound func(string) bool) Resolutio
 	// can set it.
 	//
 	// It is a RUNG, not a cloudflare spelling: "the ephemeral tunnel of
-	// whichever provider was selected". cloudflared's TryCloudflare and
-	// ngrok's unreserved tunnel are the same rung — a throwaway public
-	// hostname with nothing reserved, nothing provisioned in an account and
-	// nothing to clean up — so a user who picks ngrok gets the same ladder,
-	// and the same guarantees, as one who picks cloudflare. There is nothing
-	// to provision either way, so the only question is whether the selected
-	// provider's binary is installed.
+	// whichever provider was selected" — a throwaway public hostname with
+	// nothing reserved, nothing provisioned in an account and nothing to clean
+	// up. There is nothing to provision, so the only question is whether the
+	// selected provider's binary is installed, which is why the check goes
+	// through quickBinary rather than naming cloudflared here.
 	if e.Quick {
 		bin, label := quickBinary(e)
 		if binaryFound(bin) {
@@ -194,13 +190,6 @@ func Resolve(e config.Expose, port int, binaryFound func(string) bool) Resolutio
 			r.Mode = ModeLAN
 			r.FellBack = "cloudflared is not installed, so the Cloudflare tunnel cannot start; " +
 				"falling back to LAN mode (install cloudflared to get the public domain back)"
-		}
-	case config.ProviderNgrok:
-		if strings.TrimSpace(e.Domain) != "" && binaryFound("ngrok") {
-			r.Mode, r.Remote, r.URL = ModeNgrok, true, "https://"+e.Domain
-		} else if !binaryFound("ngrok") {
-			r.Mode = ModeLAN
-			r.FellBack = "the ngrok binary is not installed; falling back to LAN mode"
 		}
 	case config.ProviderJS:
 		r.Mode, r.Remote = ModeJS, true // the adapter reports its own URL

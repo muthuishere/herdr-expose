@@ -28,7 +28,7 @@ type Config interface {
 	// from the exposure mode and hands it to the config store. The serve layer
 	// must never pick one itself.
 	Bind() string
-	// Mode is the resolved exposure mode: cloudflare | ngrok | js | lan | local.
+	// Mode is the resolved exposure mode: cloudflare | quick | js | lan | local.
 	Mode() string
 	// AllowedOrigins is the mode-correct origin allowlist, which in lan mode
 	// includes the LAN origin. It comes from expose.Manager.AllowedOrigins and

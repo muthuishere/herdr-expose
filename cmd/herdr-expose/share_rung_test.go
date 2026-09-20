@@ -25,7 +25,7 @@ import (
 // table — which is what makes a share local BY CONSTRUCTION: no provider to
 // build, no domain to write DNS for, no 0.0.0.0 bind.
 func isZeroExpose(e config.Expose) bool {
-	return !e.Cloudflare && !e.Ngrok && !e.Quick && !e.LAN && !e.Autostart &&
+	return !e.Cloudflare && !e.Quick && !e.LAN && !e.Autostart &&
 		e.Domain == "" && e.Adapter == "" && len(e.Adapters) == 0
 }
 
@@ -85,7 +85,7 @@ func TestBareShareIsLANAndRaisesNoTunnel(t *testing.T) {
 	// The [expose] table handed to the instance is what decides whether a
 	// tunnel process is ever started and whether a DNS record is ever written.
 	// For a LAN share it must switch on nothing but the bind.
-	if !exp.LAN || exp.Quick || exp.Cloudflare || exp.Ngrok || exp.Domain != "" || exp.Adapter != "" {
+	if !exp.LAN || exp.Quick || exp.Cloudflare || exp.Domain != "" || exp.Adapter != "" {
 		t.Fatalf("a bare share was handed a tunnel-capable [expose] table (%+v)", exp)
 	}
 	// And the record written from it asks for no Cloudflare teardown, because
@@ -279,7 +279,7 @@ max_concurrent = 10
 	if res.Mode != config.ModeLAN {
 		t.Fatalf("--lan resolved to %s: a LAN request was escalated to a tunnel", res.Mode)
 	}
-	if res.Remote || exp.Quick || exp.Cloudflare || exp.Ngrok || exp.Domain != "" {
+	if res.Remote || exp.Quick || exp.Cloudflare || exp.Domain != "" {
 		t.Fatalf("--lan was handed a tunnel-capable [expose] table: %+v", exp)
 	}
 	if config.RungOf(res.Mode) > config.RungLAN {
@@ -453,7 +453,7 @@ func TestShippedDefaultModeIsLocal(t *testing.T) {
 	}
 	// The DAEMON, by contrast, keeps its loopback default: it serves whoever
 	// is sitting at this machine. The asymmetry is the point, so it is pinned.
-	if got := config.Defaults().Expose; got.LAN || got.Cloudflare || got.Ngrok || got.Quick {
+	if got := config.Defaults().Expose; got.LAN || got.Cloudflare || got.Quick {
 		t.Fatalf("the daemon's [expose] default left loopback: %+v", got)
 	}
 }

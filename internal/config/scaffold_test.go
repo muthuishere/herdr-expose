@@ -33,7 +33,7 @@ func TestFirstRunWritesEverySectionAndKey(t *testing.T) {
 		"pair_attempts_per_minute = 10", "handshake_attempts_per_minute = 60",
 		`theme = "auto"`, `default_view = "grid"`,
 		"cloudflare = false", `domain = ""`, `tunnel_name = "herdr-expose"`,
-		"ngrok = false", "lan = false", "autostart = false",
+		"lan = false", "autostart = false",
 		`domain_suffix = ""`, "default_hours = 1", `default_mode = "lan"`, "max_concurrent = 10",
 		`level = "info"`, `format = "text"`, `file = ""`, "max_size_mb = 10", "keep = 3",
 	} {
@@ -41,6 +41,15 @@ func TestFirstRunWritesEverySectionAndKey(t *testing.T) {
 			t.Errorf("scaffold is missing key %q", want)
 		}
 	}
+	// The scaffold is the most user-visible documentation this binary ships —
+	// it is written into the file the user opens — so a withdrawn provider
+	// must not survive in it, in a key OR in a comment. AMENDMENTS 18 /
+	// ADR 0034 removed the built-in ngrok provider; a scaffold that still
+	// offers it hands the user a key that does nothing.
+	if strings.Contains(strings.ToLower(text), "ngrok = ") {
+		t.Errorf("the scaffold still offers the withdrawn ngrok key:\n%s", text)
+	}
+
 	// The stale `bind` key is gone, and its stale claim with it.
 	if strings.Contains(text, "\nbind = ") {
 		t.Errorf("scaffold still writes a bind key:\n%s", text)

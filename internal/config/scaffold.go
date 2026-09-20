@@ -86,10 +86,11 @@ default_view = "grid"               # grid | focus
 cloudflare = false                  # public https on a static domain you own
 domain = ""                         # REQUIRED when cloudflare = true, e.g. "herdr.example.com"
 tunnel_name = "herdr-expose"        # the named Cloudflare tunnel to create or reuse
-ngrok = false                       # alternative provider; domain must be a RESERVED ngrok domain
 lan = false                         # bind 0.0.0.0 so the wifi can reach this machine; also the automatic fallback when cloudflared is missing
 autostart = false                   # bring the tunnel up when the server starts
-# adapter = "my-tunnel"             # escape hatch: run a JS adapter instead of a built-in provider
+# adapter = "my-tunnel"             # escape hatch: a JS adapter instead of the built-in provider.
+#                                   Cloudflare is the ONE built-in transport; ngrok, tailscale, a
+#                                   corporate proxy or a homelab box are adapters. See adapters/template.js.
 #
 # [[expose.adapters]]
 # id = "my-tunnel"

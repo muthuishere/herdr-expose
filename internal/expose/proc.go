@@ -13,12 +13,13 @@ import (
 	"time"
 )
 
-// procSpec describes a supervised external tunnel process (cloudflared, ngrok).
+// procSpec describes a supervised external tunnel process (cloudflared, or
+// whatever binary a JS adapter spawns).
 // Build is called once per launch attempt so that per-attempt credentials (a
 // freshly fetched tunnel token, say) are never cached on disk or in a struct.
 type procSpec struct {
 	Name      string // provider name, e.g. "cloudflare"
-	Mode      string // "named" | "ngrok" | "js"
+	Mode      string // "named" | "quick" | "js"
 	Bin       string // resolved binary path, for error messages only
 	Build     func(ctx context.Context) (*exec.Cmd, error)
 	ScanURL   func(line string) string // returns a public URL found in a log line, or ""

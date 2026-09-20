@@ -14,7 +14,7 @@ Herdr 0.9.0 verification.
 | [0002](0002-socket-api-is-the-only-contract.md) | The Herdr socket API is the only upstream contract | Accepted |
 | [0003](0003-terminal-streaming-via-subprocess.md) | Terminal streaming goes through the `herdr terminal session` subprocess | Accepted |
 | [0004](0004-loopback-only-auth-is-the-product.md) | Loopback-only bind; auth is the primary feature | Accepted, relaxed by 0022/0023 |
-| [0005](0005-static-domain-api-provisioned-tunnel.md) | One static domain, provisioned through the Cloudflare API from Go | Accepted for the permanent deployment; its ban on ephemeral tunnels is narrowed by 0027/0028 |
+| [0005](0005-static-domain-api-provisioned-tunnel.md) | One static domain, provisioned through the Cloudflare API from Go | Accepted for the permanent deployment; its ban on ephemeral tunnels is narrowed by 0027/0028, its `ngrok` clause **removed** by 0034 |
 | [0006](0006-split-plane-json-control-binary-data.md) | Split plane: JSON control frames, binary data frames | Accepted |
 | [0007](0007-server-owned-viewport-modes.md) | Server-owned viewport modes; per-connection LIVE streams | Accepted; its "geometry before the first frame" rule is **withdrawn** by 0031 |
 | [0008](0008-per-connection-seen-state.md) | Seen state is per-connection, never global | Accepted |
@@ -37,12 +37,13 @@ Herdr 0.9.0 verification.
 | [0025](0025-hex-namespaced-entrypoint-ids.md) | All plugin entrypoint ids are namespaced `hex:` | Accepted |
 | [0026](0026-scoped-time-boxed-shares.md) | A share is a scoped, time-boxed, self-destructing second instance | Accepted |
 | [0027](0027-ephemeral-dns-for-shares-only.md) | Ephemeral DNS is legal — for shares only | Accepted |
-| [0028](0028-quick-tunnels-for-shares.md) | Quick tunnels come back — for shares only | Accepted |
+| [0028](0028-quick-tunnels-for-shares.md) | Quick tunnels come back — for shares only | Accepted; its provider-parity clause narrowed by 0034 |
 | [0029](0029-exposure-ladder-climbed-never-guessed.md) | The exposure ladder is climbed, never guessed | Accepted |
 | [0030](0030-transcript-view-not-a-terminal-mirror.md) | Agent panes get a TRANSCRIPT view, not a terminal mirror | Accepted; its per-pane defaults superseded by 0031 |
 | [0031](0031-looking-must-not-touch.md) | Looking must not touch | Accepted |
 | [0032](0032-local-rotating-log-no-otel.md) | A local rotating log file, and no OpenTelemetry | Accepted |
 | [0033](0033-self-documenting-config.md) | The config file documents itself | Accepted |
+| [0034](0034-cloudflare-is-the-only-built-in-provider.md) | Cloudflare is the only built-in provider; everything else is an adapter | Accepted; **removes** 0005's `ngrok` clause and narrows 0028's provider parity |
 
 ## Supersessions
 
@@ -66,6 +67,7 @@ Herdr 0.9.0 verification.
 | 0031 | **withdraws** 0007's "a terminal without a geometry message does not work"; supersedes 0030's per-pane defaults; `pane.scroll` leaves the observer path |
 | 0032 | withdraws the OTEL exporter specified alongside 0033's config work |
 | 0033 | extends 0009 (where the config lives) with what a first run writes |
+| 0034 | **removes** 0005's `ngrok = true` clause and narrows 0028's provider parity; promotes the JS adapter from escape hatch to the extension point |
 
 ## Themes
 
@@ -73,10 +75,11 @@ Herdr 0.9.0 verification.
   contract a client that has never seen this repo can be built against. See
   [`../api.md`](../api.md).
 - **Security is a feature, not a checkbox** — 0004, 0009, 0010, 0017, 0026,
-  0029, 0032. This binary executes arbitrary commands, so the questions that
-  matter are *who can reach it* (0029's ladder), *what can they reach*
+  0029, 0032, 0034. This binary executes arbitrary commands, so the questions
+  that matter are *who can reach it* (0029's ladder), *what can they reach*
   (0026's server-side scope), *for how long* (0026's three-way expiry) and
-  *what gets written down* (0032's redaction).
+  *what gets written down* (0032's redaction). 0034 adds the one about the
+  surface itself: code that has never actually run does not get to sit on it.
 - **Looking must not touch** — 0030, 0031, 0008. Viewing a pane from a phone
   must not move the pane somebody is typing in. This was got wrong first, then
   measured, then fixed; 0031 has the measurements.

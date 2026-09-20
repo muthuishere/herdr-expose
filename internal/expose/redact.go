@@ -6,7 +6,7 @@ import (
 )
 
 // redactor holds the set of secret VALUES this process has touched (a
-// Cloudflare API token, a tunnel token, an ngrok authtoken, anything an adapter
+// Cloudflare API token, a tunnel token, anything an adapter
 // pulled out of the environment with ctx.env()) and scrubs them out of every
 // string on its way to a log line, a status payload or a state file.
 //
