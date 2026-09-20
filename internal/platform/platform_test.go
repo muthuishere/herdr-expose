@@ -78,6 +78,36 @@ func TestLockFileReleasedOnClose(t *testing.T) {
 	_ = UnlockFile(b)
 }
 
+// A held lock must not stop anyone READING the file. flock is advisory and
+// never did; LockFileEx is mandatory and does, unless the lock is taken off the
+// end of the content -- which is why this test exists. Getting it wrong made
+// `status` report "pid not running" against a running daemon, because reading
+// our own pidfile failed with ERROR_LOCK_VIOLATION.
+func TestLockedFileIsStillReadable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "z.pid")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if held, err := LockFile(f, false); err != nil || !held {
+		t.Fatalf("lock: held=%v err=%v", held, err)
+	}
+	defer UnlockFile(f)
+	if _, err := f.WriteAt([]byte("4242\n"), 0); err != nil {
+		t.Fatalf("holder could not write its own pid: %v", err)
+	}
+
+	// A DIFFERENT handle, as another process would have.
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("a held lock blocked a plain read of the file: %v", err)
+	}
+	if strings.TrimSpace(string(b)) != "4242" {
+		t.Errorf("read back %q, want 4242", b)
+	}
+}
+
 func TestStateAndConfigDirsAreAbsoluteAndNamed(t *testing.T) {
 	for _, tc := range []struct {
 		name string

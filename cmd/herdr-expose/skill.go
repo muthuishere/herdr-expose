@@ -177,10 +177,10 @@ func inspectSkillLink(link, src string) (state skillLinkState, points string) {
 	if err != nil {
 		return linkAbsent, ""
 	}
-	if fi.Mode()&os.ModeSymlink == 0 {
+	if !isDirLink(fi, link) {
 		return linkReal, ""
 	}
-	points, err = os.Readlink(link)
+	points, err = readDirLink(link)
 	if err != nil {
 		return linkStale, ""
 	}
@@ -271,7 +271,7 @@ func cmdSkillInstall() error {
 		if err := os.MkdirAll(t.Dir, 0o755); err != nil {
 			return fmt.Errorf("creating %s: %w", t.Dir, err)
 		}
-		if err := os.Symlink(src, link); err != nil {
+		if err := linkDir(src, link); err != nil {
 			return fmt.Errorf("linking %s: %w", link, err)
 		}
 		fmt.Printf("  %s -> %s\n", t.Label, src)
@@ -344,11 +344,11 @@ func cmdSkillUninstall() error {
 			fmt.Printf("  %s  not linked — nothing to do\n", t.Label)
 			continue
 		}
-		if fi.Mode()&os.ModeSymlink == 0 {
+		if !isDirLink(fi, link) {
 			fmt.Printf("  %s  a REAL directory — not removing it\n", t.Label)
 			continue
 		}
-		points, _ := os.Readlink(link)
+		points, _ := readDirLink(link)
 		abs := points
 		if !filepath.IsAbs(abs) {
 			abs = filepath.Join(filepath.Dir(link), abs)

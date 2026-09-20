@@ -134,50 +134,93 @@ as a backstop.
 
 ## What we claim
 
-As of 2026-09-20. This table is the claim. If a row says **not run on
-hardware**, nothing else in this repo — README, badge, manifest — may imply
-otherwise.
+Verified 2026-09-20 on a real Windows-on-ARM machine (Parallels), with a
+**native windows/arm64** herdr-expose talking to **Herdr 0.9.1 running as
+x86_64 under Windows emulation** — there is no native arm64 Herdr build, and
+the installer says so out loud.
 
-| # | Check | Status |
+| # | Check | Result |
 |---|---|---|
-| 1 | `GOOS=windows GOARCH=amd64` and `GOOS=windows GOARCH=arm64`: `go build ./...` **and** `go vet ./...` | **Verified** — clean, and enforced in CI for all six targets |
-| 2 | darwin and linux unaffected: `go build`, `go vet`, `go test -race ./...` | **Verified** — green throughout |
-| 3 | Lock semantics (exclusive, non-blocking, released on close) | **Verified on Unix**, by a portable test that runs on every platform. The `LockFileEx` implementation is **not run on hardware** |
-| 4 | The `\\.\pipe\` naming rule | **Confirmed from Herdr's published source** (`v0.9.1`: `session.rs`, `integration/env.rs`, `ipc.rs`, and five bundled integrations). **Not observed against a running Windows Herdr server** |
-| 5 | `go-winio` dialling a real named pipe and round-tripping bytes | Test written (`//go:build windows`), **not run on hardware** |
-| 6 | Job Object reaping a `cmd.exe` → `ping` grandchild with no orphan | Test written (`//go:build windows`), **not run on hardware** |
-| 7 | Windows Service install / recovery actions / SCM stop | Implemented, **not run on hardware**. The test VM's agent session is unelevated, so the elevated path has never executed |
-| 8 | `herdr-expose doctor`, `share --lan`, a browser driving a pane on Windows | **Not run on hardware** |
+| 1 | `go build` + `go vet`, windows/amd64 and windows/arm64 | **PASS** — and enforced in CI for all six targets |
+| 2 | darwin/linux unaffected: build, vet, `go test -race` | **PASS** — green throughout |
+| 3 | `internal/platform` suite, run natively on windows/arm64 | **PASS** — 13/13 |
+| 4 | The `\\.\pipe\` naming rule, against a **live Herdr server** | **PASS** — see below |
+| 5 | `go-winio` dialling the real Herdr pipe and round-tripping a request | **PASS** — `herdr socket … herdr 0.9.1, protocol 22` |
+| 6 | Job Object reaping a `cmd.exe` → `ping` tree, no orphan | **PASS** — `TestKillTreeReapsAGrandchild`, plus `KILL_ON_JOB_CLOSE` on handle close |
+| 7 | `LockFileEx`: two `serve` launched simultaneously | **PASS** — one process, one listener on 21118; the second exited silently |
+| 8 | State / config paths | **PASS** for state (`%LOCALAPPDATA%\herdr-expose\state`); config is a known gap, below |
+| 9 | `herdr-expose doctor` | **PASS** — every check, "everything that must work, works" |
+| 10 | `serve` + embedded web UI over HTTP | **PASS** — `/healthz` `{"ok":true,"upstream":true,"sessions_connected":1,"web_ui":true}` |
+| 11 | A real browser (Edge headless) rendering the UI | **PASS** — title `Herdr Expose`, app root present, its JS ran |
+| 12 | `share --lan` | **PASS** — scoped instance, pairing QR, serving on the LAN IP |
+| 13 | `service install` unelevated | **PASS** — refuses with instructions, exit 1. **The elevated path is still unrun** |
+| 14 | **End to end: Claude Code on the VM uses the `herdr-share` skill to share its own session** | **PASS** — raised a live LAN share, and a browser rendered it |
 
-### Why not, specifically
+### The named pipe, confirmed against reality
 
-Herdr **0.9.1 was installed successfully** on the test VM (Windows on ARM,
-unelevated, via the documented `irm https://herdr.dev/install.ps1 | iex`
-one-liner). Two facts came out of that and both belong here:
+`herdr session list --json` on the box reports
 
-- **There is no native windows/arm64 Herdr build.** Release `v0.9.1` ships only
-  `herdr-windows-x86_64.zip`, and the installer says so out loud: *"Windows
-  ARM64 detected; installing the x86_64 build under Windows emulation."* So any
-  future claim from that machine is "verified on Windows arm64 with Herdr
-  running as x86_64 under emulation", not "verified on Windows".
-- The remote-execution channel to that VM wedged before the checks could run,
-  and recovering it needs someone at the machine. So rows 3 and 5–8 stayed
-  unrun. They are written to be run, not aspirational: they are ordinary
-  `go test` cases behind `//go:build windows`.
+```
+socket_path = C:\Users\muthuishere\AppData\Roaming\herdr\herdr.sock
+```
+
+and enumerating the pipe namespace returns exactly:
+
+```
+C:\Users\muthuishere\AppData\Roaming\herdr\herdr.sock
+C:\Users\muthuishere\AppData\Roaming\herdr\herdr-client.sock
+```
+
+So the pipe really is named `\\.\pipe\` + the whole socket path, as the source
+reading predicted. `herdr-expose doctor` then dialled it and got
+`herdr 0.9.1, protocol 22` back. The rule is no longer an inference.
+
+### Two bugs this found that compiling never would
+
+1. **`LockFileEx` is MANDATORY where `flock` is advisory.** Locking byte 0 of
+   the pidfile made `herdr-expose status` print `pid not running` while the
+   daemon was serving happily — our own `os.ReadFile` was failing with
+   `ERROR_LOCK_VIOLATION` against our own lock. Fixed by locking a byte at
+   offset 1<<62, past any content, which restores flock semantics exactly.
+   Regression test: `TestLockedFileIsStillReadable`.
+2. **`os.Symlink` needs a privilege an ordinary user does not have.**
+   `skill install` died with "A required privilege is not held by the client"
+   unless Developer Mode was on. Fixed with a **directory junction** fallback
+   (`mklink /J`, no privilege required) — and then a second bug behind it: Go
+   reports a junction as a plain directory, so `skill status` disowned its own
+   link, reinstall refused, and uninstall would not remove it. Both fixed by
+   asking for `FILE_ATTRIBUTE_REPARSE_POINT`.
+
+### The install story is the weak part
+
+`herdr plugin install muthuishere/herdr-expose` — the command this document
+tells a user to run — **fails on a stock Windows box**:
+
+```
+Error: Error { kind: NotFound, message: "program not found" }
+```
+
+Herdr shells out to `git` to clone, and the test machine had no `git`. It also
+had no `bash` and no `curl`, which means **both** halves of `scripts/build.sh`
+are unavailable: the from-source path needs a POSIX shell, and the release-asset
+fallback needs `curl`. Everything above was therefore verified with a
+hand-built binary copied into place.
+
+So, plainly: **on Windows this currently installs only if you hand-build and
+hand-copy.** Making `herdr plugin install` work there needs the build hook to
+run without bash — the manifest takes a single `command`, so that is a real
+design question, not a one-line fix — and a published windows asset to fall
+back to.
 
 ### The sentence we are entitled to publish
 
-> **Windows: experimental.** Builds and vets clean for windows/amd64 and
-> windows/arm64, and the platform-specific code (named pipe transport,
-> `LockFileEx`, Job Objects, Windows Service) is implemented and unit-tested —
-> but it has **not** been run on Windows hardware. Treat it as untested until
-> this line says otherwise.
-
-Nothing stronger. We removed ngrok this week rather than keep an implied
-promise; this is the same rule applied to ourselves.
-
-
----
+> **Windows: experimental, and verified end to end on Windows arm64** (with
+> Herdr 0.9.1 itself running as x86_64 under emulation) — the named-pipe
+> transport, file locking, Job Object process-tree kill, `doctor`, `serve`, the
+> web UI, `share --lan`, and an agent using the `herdr-share` skill to share its
+> own session all work. **Two things are not proven:** `service install` as an
+> elevated Windows Service, and `herdr plugin install`, which needs `git` and a
+> POSIX shell the platform does not ship. Install by hand for now.
 
 ## Known gaps
 
@@ -189,8 +232,13 @@ promise; this is the same rule applied to ourselves.
   grandchild.
 - `internal/config` still derives its config directory the Unix way, so
   `config.toml` lands under `C:\Users\<you>\.config\herdr-expose` rather than
-  `%APPDATA%`. It works; it is not idiomatic. That package was out of scope for
-  this port.
+  `%APPDATA%`. Confirmed on hardware; it works, it is just not idiomatic. That
+  package was out of scope for this port.
+- `service install` as an actual elevated Windows Service is **unrun**. The
+  unelevated refusal is verified; the SCM registration, recovery actions and
+  `svc.Run` handler are not.
+- `herdr plugin install` does not work on Windows — see "The install story is
+  the weak part" above.
 - There is no Windows runner in the release workflow. The floor CI enforces is
   cross-build **and cross-vet** of all six targets, which catches a Unix-only
   syscall landing in a shared file — it does not catch a runtime bug.

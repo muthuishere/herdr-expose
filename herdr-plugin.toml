@@ -3,13 +3,19 @@ name = "herdr-expose"
 version = "0.1.0"
 description = "Your Herdr panes in a browser or on your phone: one Go binary, embedded web UI, loopback-only with a tunnel you start."
 min_herdr_version = "0.9.0"
-# Windows is EXPERIMENTAL and, as of 2026-09-20, UNTESTED ON HARDWARE: it
-# builds and vets clean for windows/amd64 and windows/arm64 and the
-# platform-specific code (named pipe transport, LockFileEx, Job Objects,
-# Windows Service) is implemented and unit-tested, but none of it has been run
-# on Windows. docs/windows.md is the full, check-by-check claim -- read it
-# before relying on this line. Windows is listed here because a platform left
-# out is a platform nobody can even try; it is NOT listed because it is proven.
+# Windows is EXPERIMENTAL, and as of 2026-09-20 VERIFIED END TO END on Windows
+# arm64 (with Herdr 0.9.1 itself running as x86_64 under emulation): the named
+# pipe transport, LockFileEx locking, Job Object process-tree kill, doctor,
+# serve, the embedded web UI, share --lan, and an agent using the herdr-share
+# skill to share its own session all work on real hardware.
+#
+# TWO THINGS ARE NOT PROVEN, and the doc says so check by check:
+#   * `service install` as an ELEVATED Windows Service (only the unelevated
+#     refusal is verified);
+#   * `herdr plugin install` itself, which needs git and a POSIX shell that
+#     Windows does not ship -- so on Windows this currently installs only if
+#     you hand-build and hand-copy the binary.
+# Read docs/windows.md before relying on any of this.
 platforms = ["macos", "linux", "windows"]
 
 # Builds the React app, then the Go binary with the app embedded in it.

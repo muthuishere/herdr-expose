@@ -96,8 +96,24 @@ teardown and share revocation would be dead code on Windows.
 - `internal/expose`'s fixtures shell out to `sh -c`, so that suite stays
   Unix-only at runtime. The tests that run on Windows live in
   `internal/platform`.
-- One real bug was found by doing this rather than by compiling: `isExec` tested
-  `mode & 0o111`, which is **always false on Windows** — `os.Stat` there has no
-  execute bit. A direct port would have silently disabled the binary-search
-  fallback, which is precisely the path a Windows Service depends on, since a
-  service inherits the machine PATH and not the user's.
+- Three bugs were found by doing this rather than by compiling, and only one of
+  them was visible without running on hardware:
+  1. `isExec` tested `mode & 0o111`, which is **always false on Windows** —
+     `os.Stat` there has no execute bit. A direct port would have silently
+     disabled the binary-search fallback, which is precisely the path a Windows
+     Service depends on, since a service inherits the machine PATH.
+  2. **`LockFileEx` is mandatory where `flock` is advisory.** Locking byte 0 of
+     the pidfile made `status` report `pid not running` against a live daemon,
+     because reading our own pidfile failed with `ERROR_LOCK_VIOLATION`. The
+     lock now sits at offset 1<<62, past any content, which is what restores
+     flock's semantics.
+  3. **`os.Symlink` needs a privilege ordinary users lack**, so `skill install`
+     could not run without Developer Mode. It now falls back to a directory
+     JUNCTION — and, because Go reports a junction as a plain directory, the
+     link *classifier* had to learn `FILE_ATTRIBUTE_REPARSE_POINT` too, or
+     status/uninstall/idempotency all disown a link we just made.
+- Not solved here, and named in `docs/windows.md`: `herdr plugin install` does
+  not work on Windows. Herdr shells out to `git`, and `scripts/build.sh` needs a
+  POSIX shell for the source path and `curl` for the release fallback. A stock
+  Windows box has none of the three. The manifest allows a single `[[build]]`
+  command, so making that work is a design question, not a patch.
