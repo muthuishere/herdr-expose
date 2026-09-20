@@ -92,10 +92,10 @@ type shareView struct {
 	Mode string `json:"mode"`
 	// Provider is which implementation carries the rung: cloudflare | ngrok.
 	Provider string `json:"provider"`
-	Scope   string `json:"scope"`
-	Session string `json:"session"`
-	Domain  string `json:"domain"`
-	URL     string `json:"url"`
+	Scope    string `json:"scope"`
+	Session  string `json:"session"`
+	Domain   string `json:"domain"`
+	URL      string `json:"url"`
 	// SecureContext is false for a LAN share: plain HTTP on 192.168.x.x is not
 	// a secure context (localhost is exempt, a LAN IP is not), so the browser
 	// grants no service worker and no PWA install there. Surfaced because the
@@ -493,11 +493,11 @@ type shareFlags struct {
 	// down the ladder; it only changes which binary carries it.
 	provider string
 	session  string
-	panes   []string
-	hours   float64
-	days    float64
-	name    string
-	asJSON  bool
+	panes    []string
+	hours    float64
+	days     float64
+	name     string
+	asJSON   bool
 
 	// hoursSet records that --hours was passed explicitly, so that the
 	// [share] default does not overwrite it.

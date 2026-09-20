@@ -259,29 +259,7 @@ func installLaunchAgent(exePath, state string) (string, error) {
 	plistPath := filepath.Join(dir, serviceLabel+".plist")
 	// PATH is spelled out: launchd gives a unit a minimal PATH that contains
 	// none of the places herdr is normally installed.
-	plist := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>%s</string>
-  <key>ProgramArguments</key><array>
-    <string>%s</string><string>serve</string>
-  </array>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>EnvironmentVariables</key><dict>
-    <key>PATH</key><string>%s/.local/bin:%s/.cargo/bin:%s/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
-    <key>HERDR_PLUGIN_STATE_DIR</key><string>%s</string>
-    <!-- Without this, the unit is a KeepAlive loop of instant no-op exits:
-         serve refuses to start when a manager is in charge (main.go), which is
-         exactly what this unit IS. Worse, while the unit is loaded every other
-         start path refuses too - including the plugin's own daemon hook - so
-         installing the service silently disables the product. -->
-    <key>HERDR_EXPOSE_SUPERVISED</key><string>1</string>
-  </dict>
-  <key>StandardOutPath</key><string>%s/serve.log</string>
-  <key>StandardErrorPath</key><string>%s/serve.log</string>
-</dict></plist>
-`, serviceLabel, exePath, home, home, home, state, state, state)
+	plist := launchAgentPlist(exePath, home, state)
 	if err := os.WriteFile(plistPath, []byte(plist), 0o644); err != nil {
 		return "", err
 	}
@@ -302,23 +280,7 @@ func installSystemdUnit(exePath, state string) (string, error) {
 		return "", err
 	}
 	unitPath := filepath.Join(dir, "herdr-expose.service")
-	unit := fmt.Sprintf(`[Unit]
-Description=herdr-expose (Herdr web bridge)
-After=default.target
-
-[Service]
-Type=simple
-ExecStart=%s serve
-Restart=always
-RestartSec=2
-Environment=PATH=%s/.local/bin:%s/.cargo/bin:%s/bin:/usr/local/bin:/usr/bin:/bin
-Environment=HERDR_PLUGIN_STATE_DIR=%s
-# Without this the unit never actually serves: see the plist comment above.
-Environment=HERDR_EXPOSE_SUPERVISED=1
-
-[Install]
-WantedBy=default.target
-`, exePath, home, home, home, state)
+	unit := systemdUnit(exePath, home, state)
 	if err := os.WriteFile(unitPath, []byte(unit), 0o644); err != nil {
 		return "", err
 	}
@@ -478,4 +440,60 @@ func unmanagedDaemonPID(state string) int {
 		}
 	}
 	return 0
+}
+
+// --- unit templates, as PURE functions --------------------------------------
+//
+// Rendering is separated from loading so the content can be asserted without
+// installing anything. That is not tidiness: the last regression here was a
+// missing HERDR_EXPOSE_SUPERVISED, which made the supervised process exit
+// instantly as a no-op while the loaded unit simultaneously caused every other
+// start path to refuse — `service install` silently disabled the product, and
+// nothing could catch it because the only way to see the template was to load
+// it on a live machine.
+
+func launchAgentPlist(exePath, home, state string) string {
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>%s</string>
+  <key>ProgramArguments</key><array>
+    <string>%s</string><string>serve</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>%s/.local/bin:%s/.cargo/bin:%s/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>HERDR_PLUGIN_STATE_DIR</key><string>%s</string>
+    <!-- Without this, the unit is a KeepAlive loop of instant no-op exits:
+         serve refuses to start when a manager is in charge (main.go), which is
+         exactly what this unit IS. Worse, while the unit is loaded every other
+         start path refuses too - including the plugin's own daemon hook - so
+         installing the service silently disables the product. -->
+    <key>HERDR_EXPOSE_SUPERVISED</key><string>1</string>
+  </dict>
+  <key>StandardOutPath</key><string>%s/serve.log</string>
+  <key>StandardErrorPath</key><string>%s/serve.log</string>
+</dict></plist>
+`, serviceLabel, exePath, home, home, home, state, state, state)
+}
+
+func systemdUnit(exePath, home, state string) string {
+	return fmt.Sprintf(`[Unit]
+Description=herdr-expose (Herdr web bridge)
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%s serve
+Restart=always
+RestartSec=2
+Environment=PATH=%s/.local/bin:%s/.cargo/bin:%s/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HERDR_PLUGIN_STATE_DIR=%s
+# Without this the unit never actually serves: see the plist comment above.
+Environment=HERDR_EXPOSE_SUPERVISED=1
+
+[Install]
+WantedBy=default.target
+`, exePath, home, home, home, state)
 }

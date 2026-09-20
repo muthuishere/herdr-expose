@@ -394,3 +394,64 @@ func TestNgrokShareHasNoCloudflareTeardown(t *testing.T) {
 		t.Fatal("a record written before providers existed must mean cloudflare")
 	}
 }
+
+// ---------------------------------------------------------------- service
+
+// A supervised unit MUST set HERDR_EXPOSE_SUPERVISED, or `service install`
+// silently disables the product.
+//
+// The mechanism is worth stating because the failure was invisible: cmdServe
+// refuses to start when a service manager is in charge UNLESS this variable
+// says "you ARE the supervised copy". A unit without it loads fine, runs
+// `serve`, hits that guard, exits 0 — and KeepAlive restarts it forever, while
+// every other start path (including the plugin's own daemon hook) now refuses
+// because a manager is nominally in charge. Nothing is serving, and nothing
+// reports an error.
+func TestSupervisedUnitsMarkThemselvesAsSupervised(t *testing.T) {
+	const exe = "/opt/herdr/bin/herdr-expose"
+	home, state := "/Users/test", "/Users/test/.local/state/herdr-expose"
+
+	for name, unit := range map[string]string{
+		"launchd": launchAgentPlist(exe, home, state),
+		"systemd": systemdUnit(exe, home, state),
+	} {
+		if !strings.Contains(unit, "HERDR_EXPOSE_SUPERVISED") {
+			t.Fatalf("the %s unit does not mark itself supervised; `service install` would "+
+				"silently disable the product:\n%s", name, unit)
+		}
+		// The guard in cmdServe compares against "", so the value must be
+		// non-empty; "1" is what both templates use.
+		if !strings.Contains(unit, "HERDR_EXPOSE_SUPERVISED=1") &&
+			!strings.Contains(unit, "<key>HERDR_EXPOSE_SUPERVISED</key><string>1</string>") {
+			t.Fatalf("the %s unit sets the variable but not to a non-empty value:\n%s", name, unit)
+		}
+		// It must also pass the state dir through, or the supervised copy
+		// reads a different state tree from every CLI invocation.
+		if !strings.Contains(unit, state) {
+			t.Fatalf("the %s unit does not pin HERDR_PLUGIN_STATE_DIR to %s", name, state)
+		}
+		if !strings.Contains(unit, exe) {
+			t.Fatalf("the %s unit does not exec the resolved binary path", name)
+		}
+	}
+}
+
+// `service status` is read-only and must never claim more than it knows.
+func TestServiceStateHealthyRequiresARunningProcess(t *testing.T) {
+	cases := []struct {
+		st   serviceState
+		want bool
+	}{
+		{serviceState{}, false},
+		{serviceState{Installed: true}, false},
+		{serviceState{Loaded: true}, false},
+		{serviceState{Loaded: true, Active: true}, false}, // active but no pid: not proven
+		{serviceState{Loaded: true, Active: true, PID: 42}, true},
+	}
+	for _, tc := range cases {
+		if got := tc.st.Healthy(); got != tc.want {
+			t.Fatalf("Healthy(%+v) = %v, want %v — a second install must only be a "+
+				"no-op when something is genuinely running", tc.st, got, tc.want)
+		}
+	}
+}
