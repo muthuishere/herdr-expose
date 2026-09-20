@@ -1,7 +1,7 @@
 id = "dev.deemwar.herdr-expose"
 name = "herdr-expose"
 version = "0.1.0"
-description = "Your Herdr panes in a browser or on your phone: one Go binary, embedded web UI, loopback-only with a tunnel you start."
+description = "Reach your terminal coding agents from any device on your network — and hand a teammate or client a scoped link that expires. Herdr sessions in a browser."
 min_herdr_version = "0.9.0"
 # Windows is EXPERIMENTAL, and as of 2026-09-20 verified end to end on Windows
 # arm64 (with Herdr 0.9.1 itself running as x86_64 under emulation): the named
