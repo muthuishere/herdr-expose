@@ -196,7 +196,10 @@ secret.** Send your bearer token anyway when you have one — it is what makes
   "targets": {
     "format": "<session>/<pane_id>",
     "separator": "/",
-    "default_session": "herdr-plugins"
+    "default_session": "herdr-plugins"   // AUTHENTICATED ONLY - omitted for an
+                                         // unauthenticated caller, along with
+                                         // "scope". They tell a scanner what is
+                                         // behind a public URL.
   },
   "limits": { "min_cols": 20, "min_rows": 6 },
   "ui": { "theme": "auto", "default_view": "grid" },
@@ -701,6 +704,15 @@ hand-written client never has to infer them from this page. Read them from
   "targets": {
     "format": "<session>/<pane_id>", "separator": "/",
     "multi_session": true, "default_session": "herdr-plugins"
+```
+
+> **Two-tier, like `/healthz`.** `scope` and `targets.default_session` are
+> **withheld until the caller is authenticated** — on a public URL they tell a
+> scanner which session is behind it. `auth_required`, `authenticated`,
+> `targets.format` and `targets.separator` are always present, because a client
+> needs them *before* it can pair.
+
+```json
   }
 }}
 ```

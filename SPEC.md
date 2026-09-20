@@ -276,6 +276,11 @@ Herdr client process per browser tab. We keep the pane-tree product. Do not chur
 
 ## B1. Per-connection streams (REPLACES hard rule #3)
 
+> **NARROWED by AMENDMENTS 21.** Geometry left the attach path entirely
+> (AMENDMENTS 14 / K4), which removed the reason this clause existed. A
+> geometry-free LIVE target now shares ONE stream again, as rule #3 said; only a
+> control stream or an explicitly-sized target is still per-connection.
+
 Rule #3 said one upstream stream per target, hub fans out. **That is wrong on
 0.9.0** and it reintroduces the exact bug 0.9.0's #3526 fixed: a shared stream
 means a phone at 40 cols resizes the laptop looking at the same pane. Give each
@@ -1391,3 +1396,41 @@ not when it is merged.**
 A budget that is quietly missed is not a budget; it is a wish with a table
 around it. Every row here is a number somebody watched a process reach. A3's
 closing line still governs: *a claimed number is not a number*.
+
+
+---
+
+# AMENDMENTS 21 — hard rule #3 comes back for geometry-free targets
+
+B1 replaced hard rule #3 with per-connection streams **because geometry was
+per-connection**. AMENDMENTS 14 (K4) then withdrew geometry from the attach path
+altogether: a LIVE attach passes no `--cols/--rows` and renders at the pane's own
+size. The justification was gone, but nobody went back to check what it
+invalidated, so the code kept faithfully implementing a superseded rule — at
+8.7MB of `herdr terminal session observe` subprocess per CONNECTION per target.
+16 viewers of one pane cost 209.5MB.
+
+**A target is shared iff `mode == observe && !explicit`.** One subprocess per
+target, fanned out, started on the HUB's context rather than the first
+subscriber's, refcounted down to zero. A control stream or a target a client
+explicitly sized still gets its own private stream — those are the cases B1 was
+actually about.
+
+Sharing the STREAM must not share client state, and does not: per-connection
+`seq`, `needSnap`, coalescer and backpressure, and the `SeenSet` (B-seen) are all
+preserved. A late joiner gets its own `geometry` frame and its own snapshot via
+`requestRepaint`. The last subscriber is handed the pooled buffer, so a single
+viewer is still zero-copy; the others get clones, because each stamps its own seq.
+
+Measured: 16 viewers of one pane, 209.5MB → 63.2MB.
+
+**Lesson worth keeping:** when an amendment withdraws a premise, something
+elsewhere is still standing on it. B1's cost was invisible for weeks because the
+code was correct with respect to a rule that had already been superseded.
+
+## N21.2 `/v1/config` is two-tier, like `/healthz`
+
+`scope` and `targets.default_session` are withheld until authenticated — they
+told an unauthenticated scanner what was behind a public URL. `auth_required`,
+`authenticated`, `targets.format` and `targets.separator` stay public, because a
+client legitimately needs them before it can pair.
