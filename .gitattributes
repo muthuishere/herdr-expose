@@ -1,0 +1,13 @@
+# Batch is parsed line by line and is genuinely fragile about line endings near
+# labels and block ends, so pin CRLF on the way out regardless of the platform
+# that committed it. Everything else keeps LF in the repo.
+* text=auto eol=lf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# Generated or binary: never touched.
+*.png binary
+*.gif binary
+*.mp4 binary
+*.webm binary

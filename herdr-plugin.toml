@@ -48,7 +48,14 @@ command = ["./scripts/build.sh"]
 
 [[build]]
 platforms = ["windows"]
-command = ["cmd", "/c", "scripts\\build.cmd"]
+# --no-link is REQUIRED here, not a preference. The skill link is a directory
+# JUNCTION, and Herdr builds a plugin in a staging directory before moving it
+# into place -- a junction pointing INTO that staging tree makes it
+# un-renameable, and the install dies with "failed to install managed plugin
+# checkout ... Access is denied (os error 5)". Proven by bisection: identical
+# build, --no-link, moves fine. The skill is linked instead by the `daemon`
+# startup hook below, which runs from the FINAL location.
+command = ["cmd", "/c", "scripts\\build.cmd", "--no-link"]
 
 # Startup hooks are one-shot and unsupervised, so `daemon` fork-execs the real
 # server and returns immediately. `serve` holds an exclusive flock on the

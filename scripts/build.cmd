@@ -27,6 +27,18 @@ rem    scripts\build.cmd --skip-web   Go only (web\dist must already exist)
 rem    scripts\build.cmd --no-link    build only; install no agent skill
 rem ---------------------------------------------------------------------------
 
+rem Resolve the checkout BEFORE parsing arguments. `shift` in the loop below
+rem rewrites %0 -- after one shift %~dp0 is no longer this script, it is the
+rem current directory -- so reading it later silently yields the PARENT of the
+rem checkout. Measured: with no arguments the build worked, and with any flag
+rem (`--no-link`, `--skip-web`) REPO_ROOT came out one level too high and the
+rem build died with "no web\ directory at <parent>\web". The manifest passes
+rem --no-link, so this was load-bearing.
+rem %~dp0 ends with a backslash; strip it, then take the parent.
+set "SCRIPT_DIR=%~dp0"
+set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
+for %%I in ("%SCRIPT_DIR%\..") do set "REPO_ROOT=%%~fI"
+
 set "SKIP_WEB="
 set "NO_LINK="
 :parse
@@ -38,10 +50,6 @@ exit /b 2
 :parsed
 if "%HERDR_EXPOSE_NO_LINK%"=="1" set "NO_LINK=1"
 
-rem %~dp0 ends with a backslash; strip it, then take the parent.
-set "SCRIPT_DIR=%~dp0"
-set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
-for %%I in ("%SCRIPT_DIR%\..") do set "REPO_ROOT=%%~fI"
 cd /d "%REPO_ROOT%"
 if errorlevel 1 goto :err_nocd
 

@@ -228,6 +228,7 @@ func cmdSkill(args []string) error {
 // did in every branch — including the branch where it did nothing, which on a
 // machine that already has the skill is the common one.
 func cmdSkillInstall() error {
+	setSkillOptOut(false)
 	src, err := skillSourceDir()
 	if err != nil {
 		return err
@@ -332,6 +333,8 @@ func cmdSkillStatus() error {
 // and left alone, and a second run is success, because the desired state — no
 // link — is already reached.
 func cmdSkillUninstall() error {
+	// Remember it, so the daemon's self-heal does not put it straight back.
+	setSkillOptOut(true)
 	targets, err := skillTargets()
 	if err != nil {
 		return err
@@ -370,7 +373,34 @@ func cmdSkillUninstall() error {
 	return nil
 }
 
-// repairStaleSkillLink re-points a skill link whose target has vanished.
+// skillOptOutMarker records that the operator ran `skill uninstall`. Without it,
+// the self-healing below would silently put the link back on the next daemon
+// start, which is not healing, it is ignoring them.
+const skillOptOutMarker = "skill-uninstalled"
+
+func skillOptedOut() bool {
+	state, err := StateDir()
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(filepath.Join(state, skillOptOutMarker))
+	return err == nil
+}
+
+func setSkillOptOut(on bool) {
+	state, err := StateDir()
+	if err != nil {
+		return
+	}
+	path := filepath.Join(state, skillOptOutMarker)
+	if on {
+		_ = os.WriteFile(path, []byte("removed by `herdr-expose skill uninstall`\n"), 0o600)
+		return
+	}
+	_ = os.Remove(path)
+}
+
+// repairStaleSkillLink installs or re-points the agent skill link.
 //
 // THE BUG THIS EXISTS FOR, measured on a clean Windows `herdr plugin install`:
 // Herdr builds a plugin in a STAGING directory
@@ -387,8 +417,22 @@ func cmdSkillUninstall() error {
 // link is actually dangling — a link the user pointed somewhere deliberately is
 // left alone, and so is a real directory.
 //
+// It also CREATES the link when there is none, because on Windows the build
+// hook deliberately does not: a junction pointing into Herdr's staging
+// directory makes the staging tree un-renameable, and Herdr's install then dies
+// with "failed to install managed plugin checkout ... Access is denied
+// (os error 5)". Measured, and proven by bisection: the same build with
+// --no-link moves into place fine. So the link is created HERE, from the final
+// location, where it is both correct and harmless.
+//
+// An explicit `skill uninstall` is remembered and respected — see
+// skillOptOutMarker.
+//
 // Entirely best effort: a skill link is not a reason to fail starting a server.
 func repairStaleSkillLink() {
+	if skillOptedOut() {
+		return
+	}
 	src, err := skillSourceDir()
 	if err != nil {
 		return
@@ -403,8 +447,13 @@ func repairStaleSkillLink() {
 	for _, t := range targets {
 		link := t.Link()
 		state, points := inspectSkillLink(link, src)
+		if state == linkAbsent {
+			_ = os.MkdirAll(t.Dir, 0o755)
+			_ = linkDir(src, link)
+			continue
+		}
 		if state != linkStale {
-			continue // absent, already correct, or a real directory: not ours to touch
+			continue // already correct, or a real directory: not ours to touch
 		}
 		// Only heal a DANGLING link. One that resolves is somebody's choice.
 		abs := points
