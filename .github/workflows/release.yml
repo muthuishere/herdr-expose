@@ -1,7 +1,11 @@
 # Publish a release when a vX.Y.Z tag is pushed.
 #
-# One runner builds all four targets: the binary is CGO-free, so Go
+# One runner builds all six targets: the binary is CGO-free, so Go
 # cross-compiles them and the embedded web app is identical in each.
+#
+# Windows (amd64 + arm64) is built here but is NOT verified here — see the
+# cross-vet step below and docs/windows.md for exactly what is and is not
+# claimed.
 #
 # The artifacts are NOT signed or notarized. macOS Gatekeeper will quarantine a
 # downloaded build; `xattr -d com.apple.quarantine ./herdr-expose` clears it.
@@ -46,6 +50,18 @@ jobs:
       - name: Test
         run: go test ./...
 
+      # Windows has no runner in this workflow, so the floor is enforced by
+      # cross-compiling and cross-vetting every target. This is what stops a
+      # Unix-only syscall landing in a shared file and silently breaking the
+      # Windows build until somebody downloads it.
+      - name: Cross-build and vet every target
+        run: |
+          set -eux
+          for t in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64 windows/arm64; do
+            GOOS="${t%/*}" GOARCH="${t#*/}" go build ./...
+            GOOS="${t%/*}" GOARCH="${t#*/}" go vet ./...
+          done
+
       - name: Build the release matrix
         run: ./scripts/build.sh --release
         env:
@@ -57,8 +73,11 @@ jobs:
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           {
-            echo "Prebuilt binaries for macOS and Linux (amd64 + arm64), with the"
-            echo "web UI embedded. Not signed or notarized."
+            echo "Prebuilt binaries for macOS, Linux and Windows (amd64 + arm64),"
+            echo "with the web UI embedded. Not signed or notarized."
+            echo
+            echo "Windows support is EXPERIMENTAL. See docs/windows.md for what has"
+            echo "been verified on real hardware and what has not."
             echo
             echo "Install as a Herdr plugin. That builds from source when Go and"
             echo "node are present, and falls back to these binaries when they are"

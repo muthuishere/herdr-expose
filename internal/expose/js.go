@@ -11,10 +11,11 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/dop251/goja"
+
+	"github.com/muthuishere/herdr-expose/internal/platform"
 )
 
 // JS adapters are the ESCAPE HATCH (AMENDMENT A2), not the happy path:
@@ -84,6 +85,10 @@ type jsTunnel struct {
 type jsProc struct {
 	cmd *exec.Cmd
 	pid int
+	// group owns this child's whole tree: a process group on Unix, a Job
+	// Object on Windows. Without it a killed adapter child can leave a
+	// grandchild tunnel running. See internal/platform.
+	group *platform.ProcGroup
 	// dead is atomic, not guarded by jsTunnel.mu. The reaper goroutine writes
 	// it while killAll() reads it from INSIDE a ctx.kill() call on the JS
 	// goroutine, and killAll deliberately drops the lock before it starts
@@ -376,7 +381,7 @@ func (j *jsTunnel) jsSpawn(call goja.FunctionCall) goja.Value {
 	}
 	cmd := exec.Command(bin, args...)
 	cmd.Env = env
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	platform.PrepareGroup(cmd)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -390,7 +395,13 @@ func (j *jsTunnel) jsSpawn(call goja.FunctionCall) goja.Value {
 		panic(vm.ToValue(fmt.Sprintf("spawn %s: %v", bin, err)))
 	}
 
-	p := &jsProc{cmd: cmd, pid: cmd.Process.Pid}
+	group, gerr := platform.AdoptGroup(cmd)
+	if gerr != nil {
+		j.logf("adapter %s: could not take ownership of pid %d's tree: %v",
+			j.id, cmd.Process.Pid, gerr)
+	}
+
+	p := &jsProc{cmd: cmd, pid: cmd.Process.Pid, group: group}
 	j.mu.Lock()
 	j.procs = append(j.procs, p)
 	j.mu.Unlock()
@@ -513,7 +524,7 @@ func (j *jsTunnel) killAll() {
 	j.mu.RUnlock()
 	for _, p := range procs {
 		if !p.dead.Load() {
-			killProcessGroup(p.pid, j.logf)
+			platform.KillTree(p.pid, p.group, j.logf)
 		}
 	}
 }

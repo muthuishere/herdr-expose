@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/muthuishere/herdr-expose/internal/platform"
 )
 
 // CloudflareOptions configures the built-in Cloudflare provider — the happy
@@ -308,16 +310,14 @@ ingress:
 }
 
 // StateDir is where runtime state lives. Unlike the config path,
-// $HERDR_PLUGIN_STATE_DIR IS honoured here (B6).
+// $HERDR_PLUGIN_STATE_DIR IS honoured here (B6). Otherwise it is the
+// platform's per-user state dir: ~/.local/state/herdr-expose on Unix,
+// %LOCALAPPDATA%\herdr-expose\state on Windows.
 func StateDir() (string, error) {
 	if d := strings.TrimSpace(os.Getenv("HERDR_PLUGIN_STATE_DIR")); d != "" {
 		return d, nil
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, ".local", "state", "herdr-expose"), nil
+	return platform.StateDir("herdr-expose")
 }
 
 func cloudflareStateDir(override string) (string, error) {
@@ -557,12 +557,16 @@ func resolveBinary(override, name string) (string, error) {
 		return p, nil
 	}
 	home, _ := os.UserHomeDir()
-	candidates := []string{
-		filepath.Join(home, ".local", "bin", name),
-		filepath.Join(home, "bin", name),
-		"/opt/homebrew/bin/" + name,
-		"/usr/local/bin/" + name,
-		"/usr/bin/" + name,
+	exe := platform.ExeName(name)
+	var candidates []string
+	for _, dir := range platform.BinCandidates() {
+		if strings.HasPrefix(dir, "~/") || strings.HasPrefix(dir, `~\`) {
+			if home == "" {
+				continue
+			}
+			dir = filepath.Join(home, dir[2:])
+		}
+		candidates = append(candidates, filepath.Join(dir, exe))
 	}
 	for _, c := range candidates {
 		if isExecutable(c) {
@@ -572,10 +576,9 @@ func resolveBinary(override, name string) (string, error) {
 	return "", fmt.Errorf("%s not found on PATH or in %s", name, strings.Join(candidates, ", "))
 }
 
-func isExecutable(path string) bool {
-	st, err := os.Stat(path)
-	return err == nil && !st.IsDir() && st.Mode().Perm()&0o111 != 0
-}
+// isExecutable asks the platform: the execute bit is a Unix-only concept, and
+// os.Stat on Windows has none to report.
+func isExecutable(path string) bool { return platform.IsExecutable(path) }
 
 // minimalEnv is the environment handed to a tunnel child process: enough to
 // run, with none of our own secrets in it. Provider credentials are appended

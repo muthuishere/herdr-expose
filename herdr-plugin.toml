@@ -3,7 +3,14 @@ name = "herdr-expose"
 version = "0.1.0"
 description = "Your Herdr panes in a browser or on your phone: one Go binary, embedded web UI, loopback-only with a tunnel you start."
 min_herdr_version = "0.9.0"
-platforms = ["macos", "linux"]
+# Windows is EXPERIMENTAL and, as of 2026-09-20, UNTESTED ON HARDWARE: it
+# builds and vets clean for windows/amd64 and windows/arm64 and the
+# platform-specific code (named pipe transport, LockFileEx, Job Objects,
+# Windows Service) is implemented and unit-tested, but none of it has been run
+# on Windows. docs/windows.md is the full, check-by-check claim -- read it
+# before relying on this line. Windows is listed here because a platform left
+# out is a platform nobody can even try; it is NOT listed because it is proven.
+platforms = ["macos", "linux", "windows"]
 
 # Builds the React app, then the Go binary with the app embedded in it.
 # node and go are build-time only and OPTIONAL: with them the script builds from

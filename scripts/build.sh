@@ -89,10 +89,14 @@ download_release() {
   need curl "Needed to download a release asset."
   need tar  "Needed to unpack a release asset."
 
-  local os arch sums_url asset_url tmp file want got
+  local os arch sums_url asset_url tmp file want got ext=""
   case "$(uname -s)" in
     Darwin) os=darwin ;;
     Linux)  os=linux ;;
+    # This script only ever runs under a POSIX shell. On Windows that means Git
+    # Bash / MSYS2, which is what `herdr plugin install` uses there, and which
+    # reports these.
+    MINGW*|MSYS*|CYGWIN*) os=windows; ext=".exe" ;;
     *) die "no prebuilt binary for $(uname -s); install Go 1.22+ and node 20+ and rebuild from source." ;;
   esac
   case "$(uname -m)" in
@@ -141,10 +145,10 @@ download_release() {
   log "checksum ok"
 
   mkdir -p bin
-  tar -xzf "$tmp/$file" -C bin "$BIN_NAME"
-  chmod +x "bin/$BIN_NAME"
-  log "installed bin/${BIN_NAME} from $file"
-  "./bin/$BIN_NAME" version || true
+  tar -xzf "$tmp/$file" -C bin "${BIN_NAME}${ext}"
+  chmod +x "bin/${BIN_NAME}${ext}" 2>/dev/null || true
+  log "installed bin/${BIN_NAME}${ext} from $file"
+  "./bin/${BIN_NAME}${ext}" version || true
 }
 
 # ------------------------------------------------------ the rest of it -----
@@ -240,6 +244,11 @@ need "$GO" "Install Go 1.22+ from https://go.dev/dl/, or run ./scripts/build.sh 
 # -trimpath keeps absolute build paths out of the binary.
 go_build() {
   local goos="$1" goarch="$2" out="$3"
+  # Windows will not execute a file without the extension, and CreateProcess
+  # only appends .exe for a command with no extension at all -- so the file on
+  # disk has to be herdr-expose.exe even though the manifest says
+  # ./bin/herdr-expose.
+  case "$goos" in windows) out="${out}.exe" ;; esac
   mkdir -p "$(dirname "$out")"
   CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
     "$GO" build -trimpath -ldflags "$LDFLAGS" -o "$out" "$PKG"
@@ -248,13 +257,16 @@ go_build() {
 if [ "$RELEASE" -eq 1 ]; then
   log "release matrix, version ${VERSION}"
   rm -rf dist
-  for target in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64; do
+  # windows/arm64 is not an afterthought: Windows on ARM is the shape of the
+  # test machine this port was verified on.
+  for target in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64 windows/arm64; do
     goos="${target%/*}"
     goarch="${target#*/}"
+    ext=""; case "$goos" in windows) ext=".exe" ;; esac
     out="dist/${BIN_NAME}_${VERSION}_${goos}_${goarch}/${BIN_NAME}"
     log "  ${goos}/${goarch}"
     go_build "$goos" "$goarch" "$out"
-    ( cd "$(dirname "$out")" && tar -czf "../${BIN_NAME}_${VERSION}_${goos}_${goarch}.tar.gz" "$BIN_NAME" )
+    ( cd "$(dirname "$out")" && tar -czf "../${BIN_NAME}_${VERSION}_${goos}_${goarch}.tar.gz" "${BIN_NAME}${ext}" )
   done
   # Bare filenames, so `shasum -a 256 -c <file>` works from inside dist/.
   # Linux CI has sha256sum but not always shasum; macOS is the other way round.
@@ -268,7 +280,19 @@ if [ "$RELEASE" -eq 1 ]; then
   ls -1 dist/*.tar.gz
 else
   log "building bin/${BIN_NAME}, version ${VERSION}"
-  go_build "$("$GO" env GOOS)" "$("$GO" env GOARCH)" "bin/${BIN_NAME}"
-  log "built bin/${BIN_NAME}"
-  link_into_home
+  host_os="$("$GO" env GOOS)"
+  go_build "$host_os" "$("$GO" env GOARCH)" "bin/${BIN_NAME}"
+  case "$host_os" in
+    windows)
+      # No symlinks and no ~/.local/bin convention on Windows; linking there
+      # would create a broken link and print advice that does not apply.
+      log "built bin/${BIN_NAME}.exe"
+      log "add $(pwd)/bin to your PATH, or call bin\\${BIN_NAME}.exe directly"
+      "./bin/${BIN_NAME}.exe" skill install || warn "the agent skill was not linked; run: ${BIN_NAME} skill install"
+      ;;
+    *)
+      log "built bin/${BIN_NAME}"
+      link_into_home
+      ;;
+  esac
 fi

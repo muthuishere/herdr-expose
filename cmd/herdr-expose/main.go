@@ -12,11 +12,9 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/skip2/go-qrcode"
@@ -24,6 +22,7 @@ import (
 	"github.com/muthuishere/herdr-expose/internal/config"
 	"github.com/muthuishere/herdr-expose/internal/core"
 	"github.com/muthuishere/herdr-expose/internal/expose"
+	"github.com/muthuishere/herdr-expose/internal/platform"
 	"github.com/muthuishere/herdr-expose/internal/serve"
 	"github.com/muthuishere/herdr-expose/internal/upstream"
 )
@@ -32,6 +31,17 @@ import (
 var version = "dev"
 
 func main() {
+	// Started BY a service manager that speaks a control protocol rather than
+	// signals (the Windows SCM), this process is the service, not the CLI, and
+	// never sees an argv. No-op everywhere else.
+	if handled, serr := runUnderServiceManager(); handled {
+		if serr != nil {
+			fmt.Fprintln(os.Stderr, "error:", serr)
+			os.Exit(1)
+		}
+		return
+	}
+
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
@@ -308,8 +318,7 @@ func cmdServe(args []string) error {
 		fmt.Fprintf(os.Stderr, "  open: %s/?token=%s\n\n", res.URL, tok)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(),
-		syscall.SIGINT, syscall.SIGTERM)
+	ctx, stop := shutdownContext(context.Background())
 	defer stop()
 
 	// SIGHUP re-reads config, re-resolves the mode and the LAN IP.
@@ -414,7 +423,7 @@ func cmdDaemon() error {
 	cmd := exec.Command(exe, "serve")
 	cmd.Stdout, cmd.Stderr = logFile, logFile
 	cmd.Stdin = nil
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	platform.PrepareDetached(cmd)
 	cmd.Env = os.Environ()
 	if err := cmd.Start(); err != nil {
 		return err
@@ -459,6 +468,11 @@ func cmdOpen() error {
 		return exec.Command("open", url).Start()
 	case "linux":
 		return exec.Command("xdg-open", url).Start()
+	case "windows":
+		// `start` is a cmd BUILTIN, not a program, so it has to be run through
+		// cmd. The empty "" is the window title: without it cmd reads a quoted
+		// URL as the title and opens nothing at all.
+		return exec.Command("cmd", "/c", "start", "", url).Start()
 	}
 	return nil
 }
@@ -662,12 +676,19 @@ func cmdDevices(args []string) error {
 
 func cmdService(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: herdr-expose service install|uninstall|status [--force]")
+		return errors.New("usage: herdr-expose service install|uninstall|status [--force] [--task]")
 	}
 	force := hasFlag(args, "--force") || hasFlag(args, "--yes") || hasFlag(args, "-y")
+	// --task selects the weaker, no-admin supervisor on Windows. It is a real
+	// difference in the promise `service install` makes, so it is opt-in and
+	// named, never a silent fallback. Nothing else has a second supervisor.
+	task := hasFlag(args, "--task")
+	if task && runtime.GOOS != "windows" {
+		return errors.New("--task is a Windows-only option (Scheduled Task instead of a Service)")
+	}
 	switch args[0] {
 	case "install":
-		return cmdServiceInstall(force)
+		return cmdServiceInstall(force, task)
 	case "uninstall":
 		return cmdServiceUninstall()
 	case "status":
@@ -706,7 +727,7 @@ func printServiceState(st serviceState) {
 //     for one port is worse), but it is not something to do behind the
 //     operator's back, so it now needs --force and says exactly what it will
 //     stop.
-func cmdServiceInstall(force bool) error {
+func cmdServiceInstall(force, task bool) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return err
@@ -739,7 +760,7 @@ func cmdServiceInstall(force bool) error {
 		fmt.Printf("  --force given: taking over from pid %d.\n", pid)
 	}
 
-	path, err := installService(exe, state)
+	path, err := installService(exe, state, task)
 	if err != nil {
 		return err
 	}

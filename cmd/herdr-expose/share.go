@@ -16,7 +16,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 
 	crand "crypto/rand"
@@ -24,6 +23,7 @@ import (
 	"github.com/muthuishere/herdr-expose/internal/config"
 	"github.com/muthuishere/herdr-expose/internal/core"
 	"github.com/muthuishere/herdr-expose/internal/expose"
+	"github.com/muthuishere/herdr-expose/internal/platform"
 	"github.com/muthuishere/herdr-expose/internal/serve"
 	"github.com/muthuishere/herdr-expose/internal/upstream"
 )
@@ -322,10 +322,10 @@ func updateShare(id string, fn func(*shareRecord)) (*shareRecord, error) {
 		return nil, err
 	}
 	defer lock.Close()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+	if _, err := platform.LockFile(lock, true); err != nil {
 		return nil, err
 	}
-	defer func() { _ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) }()
+	defer func() { _ = platform.UnlockFile(lock) }()
 
 	rec, err := readShareFile(dir)
 	if err != nil {
@@ -360,7 +360,7 @@ func tryShareRunLock(dir string) (*os.File, bool) {
 	if err != nil {
 		return nil, false
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if held, err := platform.LockFile(f, false); err != nil || !held {
 		f.Close()
 		return nil, false
 	}
@@ -374,7 +374,7 @@ func shareIsRunning(dir string) bool {
 	if !ok {
 		return true
 	}
-	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	_ = platform.UnlockFile(f)
 	_ = f.Close()
 	return false
 }
@@ -1309,7 +1309,7 @@ func spawnShare(id, dir string) error {
 	cmd := exec.Command(exe, "share", "run-internal", "--id", id)
 	cmd.Stdout, cmd.Stderr = logFile, logFile
 	cmd.Stdin = nil
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	platform.PrepareDetached(cmd)
 	cmd.Env = os.Environ()
 	if err := cmd.Start(); err != nil {
 		return err
@@ -1883,7 +1883,7 @@ func killShareProcess(pid int) bool {
 		return true
 	}
 	if p, err := os.FindProcess(pid); err == nil {
-		_ = p.Signal(syscall.SIGTERM)
+		_ = platform.Terminate(p)
 	}
 	deadline := time.Now().Add(8 * time.Second)
 	for time.Now().Before(deadline) {
@@ -1893,7 +1893,7 @@ func killShareProcess(pid int) bool {
 		time.Sleep(100 * time.Millisecond)
 	}
 	if p, err := os.FindProcess(pid); err == nil {
-		_ = p.Signal(syscall.SIGKILL)
+		_ = platform.ForceKill(p)
 	}
 	deadline = time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
@@ -1912,22 +1912,10 @@ func killStrayCloudflared(configPath string) int {
 	if configPath == "" {
 		return 0
 	}
-	out, err := exec.Command("ps", "-axo", "pid=,command=").Output()
-	if err != nil {
-		return 0
-	}
 	killed := 0
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.Contains(line, configPath) || !strings.Contains(line, "cloudflared") {
-			continue
-		}
-		var pid int
-		if _, err := fmt.Sscanf(line, "%d", &pid); err != nil || pid <= 0 {
-			continue
-		}
+	for _, pid := range platform.ProcessesMatching(configPath, "cloudflared") {
 		if p, err := os.FindProcess(pid); err == nil {
-			_ = p.Signal(syscall.SIGTERM)
+			_ = platform.Terminate(p)
 			killed++
 		}
 	}
@@ -2175,7 +2163,7 @@ func cmdShareRun(args []string) error {
 		return err
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(context.Background(), platform.ShutdownSignals()...)
 	defer stop()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()

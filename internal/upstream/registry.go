@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/muthuishere/herdr-expose/internal/platform"
 )
 
 // A Herdr SESSION is a whole server with its own socket, its own workspace tree
@@ -126,11 +127,13 @@ func RunningSessions(all []Session) []Session {
 func sessionsRoot() (root, def string) {
 	base := os.Getenv("HERDR_CONFIG_DIR")
 	if base == "" {
-		home, err := os.UserHomeDir()
+		// Herdr's own config dir, which is NOT ~/.config/herdr everywhere:
+		// its src/config/io.rs uses %APPDATA%\herdr on Windows.
+		b, err := platform.HerdrConfigDir()
 		if err != nil {
 			return "", ""
 		}
-		base = filepath.Join(home, ".config", "herdr")
+		base = b
 	}
 	return filepath.Join(base, "sessions"), base
 }
@@ -171,7 +174,7 @@ func fileExists(p string) bool {
 }
 
 func socketAlive(path string) bool {
-	c, err := net.DialTimeout("unix", path, 300*time.Millisecond)
+	c, err := platform.DialControlTimeout(path, 300*time.Millisecond)
 	if err != nil {
 		return false
 	}

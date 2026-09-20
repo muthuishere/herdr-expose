@@ -2,9 +2,8 @@ package expose
 
 import (
 	"context"
+	"errors"
 	"fmt"
-
-	"github.com/muthuishere/herdr-expose/internal/config"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,9 +12,11 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
+
+	"github.com/muthuishere/herdr-expose/internal/config"
+	"github.com/muthuishere/herdr-expose/internal/platform"
 )
 
 // testLog collects (already scrubbed) log lines so tests can assert that no
@@ -601,6 +602,15 @@ func contains(list []string, want string) bool {
 
 // helpers ------------------------------------------------------------------
 
-func syscallKill0(pid int) error { return syscall.Kill(pid, 0) }
+// syscallKill0 answers "does this pid still exist?" It was literally
+// syscall.Kill(pid, 0); Windows has no signals, so it goes through the same
+// platform seam the production code uses and keeps the err==nil-means-alive
+// shape its call sites expect.
+func syscallKill0(pid int) error {
+	if platform.Alive(pid) {
+		return nil
+	}
+	return errors.New("process is gone")
+}
 
 func fmtSprintf(format string, args ...any) string { return fmt.Sprintf(format, args...) }

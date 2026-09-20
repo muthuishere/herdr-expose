@@ -3,10 +3,12 @@ module github.com/muthuishere/herdr-expose
 go 1.25.0
 
 require (
+	github.com/Microsoft/go-winio v0.6.2
 	github.com/dop251/goja v0.0.0-20260915173639-b3fa02110dbd
 	github.com/gorilla/websocket v1.5.3
 	github.com/pelletier/go-toml/v2 v2.4.3
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
+	golang.org/x/sys v0.47.0
 )
 
 require (

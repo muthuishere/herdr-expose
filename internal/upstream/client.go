@@ -14,6 +14,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/muthuishere/herdr-expose/internal/platform"
 )
 
 // ErrNoSocket is returned when HERDR_SOCKET_PATH is unset.
@@ -22,14 +24,11 @@ var ErrNoSocket = errors.New("upstream: HERDR_SOCKET_PATH is not set")
 // SocketPath returns the configured Herdr socket path.
 func SocketPath() string { return os.Getenv("HERDR_SOCKET_PATH") }
 
-// binCandidates are the directories a launchd/systemd unit will NOT have on
-// PATH. Units start with a minimal PATH, so a bare "herdr" fails exec and the
-// browser sees an endless reconnect loop. Resolve absolutely, up front, and
-// fail with a real error instead.
-var binCandidates = []string{
-	"~/.local/bin", "~/.cargo/bin", "~/bin",
-	"/opt/homebrew/bin", "/usr/local/bin", "/usr/bin",
-}
+// The directories a launchd / systemd unit -- or a Windows Service, which
+// inherits the MACHINE PATH and not the user's -- will NOT have on PATH. A bare
+// "herdr" then fails exec and the browser sees an endless reconnect loop.
+// Resolve absolutely, up front, and fail with a real error instead. The list is
+// per-platform; see internal/platform/exe_*.go.
 
 var (
 	binOnce sync.Once
@@ -58,14 +57,14 @@ func resolveHerdrBin() (string, error) {
 		}
 	}
 	home, _ := os.UserHomeDir()
-	for _, dir := range binCandidates {
-		if strings.HasPrefix(dir, "~/") {
+	for _, dir := range platform.BinCandidates() {
+		if strings.HasPrefix(dir, "~/") || strings.HasPrefix(dir, `~\`) {
 			if home == "" {
 				continue
 			}
 			dir = filepath.Join(home, dir[2:])
 		}
-		cand := filepath.Join(dir, "herdr")
+		cand := filepath.Join(dir, platform.ExeName("herdr"))
 		if isExec(cand) {
 			return cand, nil
 		}
@@ -73,13 +72,10 @@ func resolveHerdrBin() (string, error) {
 	return "", errors.New("upstream: cannot find the herdr binary; set $HERDR_BIN_PATH to its absolute path")
 }
 
-func isExec(p string) bool {
-	fi, err := os.Stat(p)
-	if err != nil || fi.IsDir() {
-		return false
-	}
-	return fi.Mode().Perm()&0o111 != 0
-}
+// isExec asks the platform, because "the execute bit is set" is a Unix-only
+// question: os.Stat on Windows has no execute bit to report and would answer
+// no for every real .exe.
+func isExec(p string) bool { return platform.IsExecutable(p) }
 
 // BinPath returns the resolved herdr binary, or "herdr" if resolution failed
 // (callers that care use ResolveHerdrBin and surface the error).
@@ -130,8 +126,7 @@ func (c *Client) dial(ctx context.Context) (net.Conn, error) {
 	if c.sock == "" {
 		return nil, ErrNoSocket
 	}
-	var d net.Dialer
-	return d.DialContext(ctx, "unix", c.sock)
+	return platform.DialControl(ctx, c.sock)
 }
 
 // Call issues one request and returns the raw `result` payload.

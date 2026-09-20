@@ -6,13 +6,12 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
+
+	"github.com/muthuishere/herdr-expose/internal/platform"
 )
 
 // Supervision is three layers (SPEC amendment B7):
@@ -28,7 +27,9 @@ import (
 // Everything that starts or stops the server routes through managerInCharge()
 // first: killing a supervised process just makes the manager respawn it.
 
-// StateDir is $HERDR_PLUGIN_STATE_DIR, else ~/.local/state/herdr-expose.
+// StateDir is $HERDR_PLUGIN_STATE_DIR, else the platform's per-user state dir:
+// ~/.local/state/herdr-expose on Unix, %LOCALAPPDATA%\herdr-expose\state on
+// Windows. See internal/platform/paths_*.go.
 func StateDir() (string, error) {
 	if d := os.Getenv("HERDR_PLUGIN_STATE_DIR"); d != "" {
 		return d, os.MkdirAll(d, 0o700)
@@ -37,7 +38,11 @@ func StateDir() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	d := filepath.Join(home, ".local", "state", "herdr-expose")
+	_ = home
+	d, err := platform.StateDir("herdr-expose")
+	if err != nil {
+		return "", err
+	}
 	return d, os.MkdirAll(d, 0o700)
 }
 
@@ -61,7 +66,7 @@ func acquirePidLock(state string) (*pidLock, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if held, err := platform.LockFile(f, false); err != nil || !held {
 		_ = f.Close()
 		return nil, ErrAlreadyRunning
 	}
@@ -80,7 +85,7 @@ func (p *pidLock) release() {
 	if p == nil || p.f == nil {
 		return
 	}
-	_ = syscall.Flock(int(p.f.Fd()), syscall.LOCK_UN)
+	_ = platform.UnlockFile(p.f)
 	_ = p.f.Close()
 	_ = os.Remove(p.path)
 }
@@ -98,17 +103,9 @@ func readPid(state string) int {
 	return pid
 }
 
-// pidAlive reports whether a pid exists (signal 0).
-func pidAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	return p.Signal(syscall.Signal(0)) == nil
-}
+// pidAlive reports whether a pid exists. Signal 0 on Unix; an OpenProcess +
+// GetExitCodeProcess probe on Windows, which has no signals at all.
+func pidAlive(pid int) bool { return platform.Alive(pid) }
 
 // ledgerEntry is one append-only record of a process we started.
 type ledgerEntry struct {
@@ -170,7 +167,7 @@ func reclaimStrays(state, addr string) {
 	}
 	for _, pid := range live {
 		if p, err := os.FindProcess(pid); err == nil {
-			_ = p.Signal(syscall.SIGTERM)
+			_ = platform.Terminate(p)
 		}
 	}
 	deadline := time.Now().Add(5 * time.Second)
@@ -183,7 +180,7 @@ func reclaimStrays(state, addr string) {
 	}
 	for _, pid := range live {
 		if p, err := os.FindProcess(pid); err == nil && pidAlive(pid) {
-			_ = p.Signal(syscall.SIGKILL)
+			_ = platform.ForceKill(p)
 		}
 	}
 	deadline = time.Now().Add(3 * time.Second)
@@ -212,117 +209,6 @@ func portFree(addr string) bool {
 	return true
 }
 
-// --- layer 2: real service units -------------------------------------------
-
-const serviceLabel = "com.deemwar.herdr-expose"
-
-// managerInCharge reports whether a launchd/systemd unit currently supervises
-// us. Killing a supervised process only makes the manager respawn it, so every
-// start/stop path checks this first.
-func managerInCharge() (bool, string) {
-	switch runtime.GOOS {
-	case "darwin":
-		out, err := exec.Command("launchctl", "list").Output()
-		if err == nil && strings.Contains(string(out), serviceLabel) {
-			return true, "launchd:" + serviceLabel
-		}
-	case "linux":
-		out, err := exec.Command("systemctl", "--user", "is-enabled", "herdr-expose.service").Output()
-		if err == nil && strings.HasPrefix(strings.TrimSpace(string(out)), "enabled") {
-			return true, "systemd:herdr-expose.service"
-		}
-	}
-	return false, ""
-}
-
-// installService writes and loads a real supervised unit for this platform.
-func installService(exePath, state string) (string, error) {
-	switch runtime.GOOS {
-	case "darwin":
-		return installLaunchAgent(exePath, state)
-	case "linux":
-		return installSystemdUnit(exePath, state)
-	default:
-		return "", fmt.Errorf("service install is not supported on %s", runtime.GOOS)
-	}
-}
-
-func installLaunchAgent(exePath, state string) (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	dir := filepath.Join(home, "Library", "LaunchAgents")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
-	}
-	plistPath := filepath.Join(dir, serviceLabel+".plist")
-	// PATH is spelled out: launchd gives a unit a minimal PATH that contains
-	// none of the places herdr is normally installed.
-	plist := launchAgentPlist(exePath, home, state)
-	if err := os.WriteFile(plistPath, []byte(plist), 0o644); err != nil {
-		return "", err
-	}
-	_ = exec.Command("launchctl", "unload", plistPath).Run()
-	if out, err := exec.Command("launchctl", "load", plistPath).CombinedOutput(); err != nil {
-		return plistPath, fmt.Errorf("launchctl load: %v: %s", err, out)
-	}
-	return plistPath, nil
-}
-
-func installSystemdUnit(exePath, state string) (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	dir := filepath.Join(home, ".config", "systemd", "user")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
-	}
-	unitPath := filepath.Join(dir, "herdr-expose.service")
-	unit := systemdUnit(exePath, home, state)
-	if err := os.WriteFile(unitPath, []byte(unit), 0o644); err != nil {
-		return "", err
-	}
-	_ = exec.Command("systemctl", "--user", "daemon-reload").Run()
-	if out, err := exec.Command("systemctl", "--user", "enable", "--now", "herdr-expose.service").CombinedOutput(); err != nil {
-		return unitPath, fmt.Errorf("systemctl enable: %v: %s", err, out)
-	}
-	return unitPath, nil
-}
-
-func uninstallService() error {
-	switch runtime.GOOS {
-	case "darwin":
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return err
-		}
-		plistPath := filepath.Join(home, "Library", "LaunchAgents", serviceLabel+".plist")
-		_ = exec.Command("launchctl", "unload", plistPath).Run()
-		// Uninstalling twice is success: the desired state is "no unit", and
-		// it is already reached. An ENOENT here used to make the second run
-		// exit 1 on a machine that was in exactly the state asked for.
-		if err := os.Remove(plistPath); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-		return nil
-	case "linux":
-		_ = exec.Command("systemctl", "--user", "disable", "--now", "herdr-expose.service").Run()
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return err
-		}
-		// Same rule as launchd above: already-absent is the desired state.
-		if err := os.Remove(filepath.Join(home, ".config", "systemd", "user",
-			"herdr-expose.service")); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-		return nil
-	}
-	return fmt.Errorf("service uninstall is not supported on %s", runtime.GOOS)
-}
-
 // --- service state, so install/uninstall can CONVERGE rather than repeat ----
 //
 // `service install` used to be a blind sequence: write the unit, unload it,
@@ -337,6 +223,10 @@ func uninstallService() error {
 // and can decline. So install now reads the world first, says what it is about
 // to do, and verifies afterwards that the unit genuinely came up.
 
+// serviceLabel is the unit's identity: a launchd label, a systemd unit name,
+// and (as "herdr-expose") a Windows service name.
+const serviceLabel = "com.deemwar.herdr-expose"
+
 // serviceState is what the platform's service manager says right now.
 type serviceState struct {
 	Installed bool   // the unit file exists on disk
@@ -349,68 +239,6 @@ type serviceState struct {
 
 // Healthy is the only state in which a second `service install` is a no-op.
 func (s serviceState) Healthy() bool { return s.Loaded && s.Active && s.PID > 0 }
-
-func readServiceState() serviceState {
-	st := serviceState{}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return st
-	}
-	switch runtime.GOOS {
-	case "darwin":
-		st.Who = "launchd:" + serviceLabel
-		st.UnitPath = filepath.Join(home, "Library", "LaunchAgents", serviceLabel+".plist")
-		if _, err := os.Stat(st.UnitPath); err == nil {
-			st.Installed = true
-		}
-		out, err := exec.Command("launchctl", "list", serviceLabel).Output()
-		if err != nil {
-			return st
-		}
-		st.Loaded = true
-		// `launchctl list <label>` prints a plist-ish dict with "PID" = N;
-		// when something is actually running, and omits it when it is not.
-		for _, line := range strings.Split(string(out), "\n") {
-			if !strings.Contains(line, "\"PID\"") {
-				continue
-			}
-			f := strings.FieldsFunc(line, func(r rune) bool { return r < '0' || r > '9' })
-			if len(f) > 0 {
-				if n, err := strconv.Atoi(f[len(f)-1]); err == nil && n > 0 {
-					st.PID, st.Active = n, true
-				}
-			}
-		}
-	case "linux":
-		st.Who = "systemd:herdr-expose.service"
-		st.UnitPath = filepath.Join(home, ".config", "systemd", "user", "herdr-expose.service")
-		if _, err := os.Stat(st.UnitPath); err == nil {
-			st.Installed = true
-		}
-		out, err := exec.Command("systemctl", "--user", "show", "herdr-expose.service",
-			"-p", "MainPID", "-p", "ActiveState", "-p", "LoadState").Output()
-		if err != nil {
-			return st
-		}
-		for _, line := range strings.Split(string(out), "\n") {
-			k, v, ok := strings.Cut(strings.TrimSpace(line), "=")
-			if !ok {
-				continue
-			}
-			switch k {
-			case "LoadState":
-				st.Loaded = v == "loaded"
-			case "ActiveState":
-				st.Active = v == "active"
-			case "MainPID":
-				if n, err := strconv.Atoi(v); err == nil {
-					st.PID = n
-				}
-			}
-		}
-	}
-	return st
-}
 
 // awaitServiceUp polls for the unit to actually be running something, so
 // install VERIFIES rather than assumes. A unit that loads and then exits

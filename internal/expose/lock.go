@@ -5,7 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"syscall"
+
+	"github.com/muthuishere/herdr-expose/internal/platform"
 )
 
 // exposeLock is the CROSS-PROCESS singleton for one deployment's tunnel.
@@ -17,10 +18,11 @@ import (
 // connectors for one named tunnel quite happily, so the failure is silent: two
 // supervised processes, two restart loops, and a `stop` that kills one of them.
 //
-// An advisory flock on a file under the deployment's own state dir fixes it by
+// An advisory lock on a file under the deployment's own state dir fixes it by
 // construction, and it is crash-safe in the way a pidfile is not: the kernel
-// drops the lock when the holder dies, so a SIGKILLed daemon leaves nothing to
-// clean up and the next start simply takes it. A share holds its own lock in
+// drops the lock when the holder dies, so a hard-killed daemon leaves nothing
+// to clean up and the next start simply takes it. (flock on Unix, LockFileEx
+// on Windows -- see internal/platform; both have exactly that property.) A share holds its own lock in
 // its own state dir, so shares never contend with the daemon or each other.
 type exposeLock struct {
 	f    *os.File
@@ -45,7 +47,8 @@ func tryExposeLock(stateDir string) (l *exposeLock, held bool, err error) {
 	if err != nil {
 		return nil, false, err
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	held, err = platform.LockFile(f, false)
+	if err != nil || !held {
 		f.Close()
 		return nil, false, nil
 	}
@@ -62,7 +65,7 @@ func (l *exposeLock) release() {
 		return
 	}
 	l.once.Do(func() {
-		_ = syscall.Flock(int(l.f.Fd()), syscall.LOCK_UN)
+		_ = platform.UnlockFile(l.f)
 		_ = l.f.Close()
 	})
 }

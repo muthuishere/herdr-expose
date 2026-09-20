@@ -97,6 +97,10 @@ func editFile(path string) error {
 		switch runtime.GOOS {
 		case "darwin":
 			ed = "open -t"
+		case "windows":
+			// notepad is the only editor guaranteed to be present, and `vi`
+			// is guaranteed NOT to be.
+			ed = "notepad"
 		default:
 			ed = "vi"
 		}

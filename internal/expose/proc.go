@@ -9,8 +9,9 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
+
+	"github.com/muthuishere/herdr-expose/internal/platform"
 )
 
 // procSpec describes a supervised external tunnel process (cloudflared, or
@@ -57,9 +58,13 @@ type procSpec struct {
 type procTunnel struct {
 	spec procSpec
 
-	mu        sync.RWMutex
-	url       string
-	pid       int
+	mu  sync.RWMutex
+	url string
+	pid int
+	// group owns the child's whole process TREE, so a stop cannot leave an
+	// orphaned cloudflared holding a tunnel open. A process group on Unix, a
+	// Job Object on Windows; see internal/platform.
+	group     *platform.ProcGroup
 	healthy   bool
 	restarts  int
 	lastErr   string
@@ -171,17 +176,26 @@ func (p *procTunnel) spawn(cmd *exec.Cmd) (func() error, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: stderr pipe: %w", p.spec.Name, err)
 	}
-	// Own the whole process group so that a kill takes children with it.
-	if cmd.SysProcAttr == nil {
-		cmd.SysProcAttr = &syscall.SysProcAttr{}
-	}
-	cmd.SysProcAttr.Setpgid = true
+	// Own the whole process tree so that a kill takes children with it.
+	platform.PrepareGroup(cmd)
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start %s: %w", p.spec.Bin, err)
 	}
 
+	// Adopt immediately: on Windows the tree guarantee comes from a Job Object
+	// that can only be created once there is a process to put in it. A failure
+	// is logged, not fatal -- KillTree still sweeps by pid.
+	group, gerr := platform.AdoptGroup(cmd)
+	if gerr != nil {
+		p.spec.Log("%s: could not take ownership of the process tree: %v", p.spec.Name, gerr)
+	}
+
 	p.mu.Lock()
+	if p.group != nil {
+		p.group.Close()
+	}
+	p.group = group
 	p.pid = cmd.Process.Pid
 	p.mu.Unlock()
 	p.spec.Log("%s: started %s (pid %d)", p.spec.Name, p.spec.Bin, cmd.Process.Pid)
@@ -486,12 +500,14 @@ func (p *procTunnel) Stop() error {
 		p.mu.Lock()
 		cancel := p.cancel
 		pid := p.pid
+		group := p.group
+		p.group = nil
 		p.running = false
 		p.mu.Unlock()
 		if cancel != nil {
 			cancel()
 		}
-		killProcessGroup(pid, p.spec.Log)
+		platform.KillTree(pid, group, p.spec.Log)
 		select {
 		case <-p.done:
 		case <-time.After(5 * time.Second):
@@ -501,27 +517,4 @@ func (p *procTunnel) Stop() error {
 		p.spec.Log("%s: stopped", p.spec.Name)
 	})
 	return nil
-}
-
-// killProcessGroup sends SIGTERM to the whole group, then SIGKILL if needed.
-func killProcessGroup(pid int, logf func(string, ...any)) {
-	if pid <= 0 {
-		return
-	}
-	pgid, err := syscall.Getpgid(pid)
-	if err != nil {
-		pgid = pid
-	}
-	_ = syscall.Kill(-pgid, syscall.SIGTERM)
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if syscall.Kill(-pgid, 0) != nil {
-			return // gone
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if logf != nil {
-		logf("process group %d ignored SIGTERM; sending SIGKILL", pgid)
-	}
-	_ = syscall.Kill(-pgid, syscall.SIGKILL)
 }

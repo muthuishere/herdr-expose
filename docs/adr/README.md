@@ -46,6 +46,7 @@ Herdr 0.9.0 verification.
 | [0034](0034-cloudflare-is-the-only-built-in-provider.md) | Cloudflare is the only built-in provider; everything else is an adapter | Accepted; **removes** 0005's `ngrok` clause and narrows 0028's provider parity |
 | [0035](0035-all-sessions-share.md) | `share --all`: an all-sessions share, confirmed out loud | Accepted; extends 0026's scoped share with the absence of a scope, and leaves 0029's ladder untouched |
 | [0036](0036-one-install-binary-plugin-and-skill.md) | One install: the binary, the plugin AND the agent skill | Accepted; adds the `skill` verb and makes 0001's build step finish the install |
+| [0037](0037-windows-is-a-build-tagged-platform-seam.md) | Windows is a build-tagged platform seam, not a `runtime.GOOS` branch | Accepted; adds `internal/platform` and a third platform, and changes no Unix behaviour |
 
 ## Supersessions
 
@@ -72,6 +73,7 @@ Herdr 0.9.0 verification.
 | 0034 | **removes** 0005's `ngrok = true` clause and narrows 0028's provider parity; promotes the JS adapter from escape hatch to the extension point |
 | 0035 | extends the scoped share with `--all` (no scope at all); changes nothing about the rung ladder, pairing or time-boxing |
 | 0036 | extends 0001's build step (it now links into $HOME, announced) and 0025's id set (`hex:install-skill`); changes no runtime behaviour |
+| 0037 | extends 0001's build matrix (six targets, `.exe`) and 0007's supervision with a Windows Service; moves every Unix syscall behind `internal/platform` without changing what it does |
 
 ## Themes
 
