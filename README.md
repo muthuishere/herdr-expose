@@ -73,13 +73,16 @@ you which part is unhappy.
 | [**Full guide**](docs/guide.md) | install, exposure modes, config, security model, troubleshooting |
 | [**API**](docs/api.md) | the WebSocket + HTTP contract, enough to build a native client |
 | [**Agent skill**](skill/SKILL.md) | say "share this session" to Claude Code and it does the rest |
-| [**Decisions**](docs/adr/) | 36 ADRs — what was chosen, and what it cost |
+| [**Decisions**](docs/adr/) | 37 ADRs — what was chosen, and what it cost |
 | [**Contributing**](CONTRIBUTING.md) | build it, run the gates, house rules |
 
-Requires Herdr 0.9.0+. macOS and Linux. MIT — see [LICENSE](LICENSE).
+Requires Herdr 0.9.0+. macOS, Linux and Windows. MIT — see [LICENSE](LICENSE).
 
-**Windows isn't supported yet.** Herdr itself runs there; this doesn't, because
-it dials a Unix socket where Windows uses a named pipe, and it relies on `flock`
-and process groups that have no Windows equivalent. That's real work rather than
-a build flag — [open an issue](https://github.com/muthuishere/herdr-expose/issues)
-if you want it.
+**Windows works, and needs no Administrator rights** — verified end to end on
+real hardware: the named-pipe transport, file locking, process-tree kill,
+`doctor`, `serve`, the web UI, a LAN share, and an agent using the skill to
+share its own session. One difference worth knowing before you rely on it:
+macOS and Linux install a supervisor that restarts the server if it crashes,
+and Windows installs nothing, because a desktop has someone sitting at it.
+[docs/windows.md](docs/windows.md) is the check-by-check claim — what was run,
+and what was not.

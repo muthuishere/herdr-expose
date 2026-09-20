@@ -682,12 +682,15 @@ footer a { color: var(--fg-dim); }
 
     <div class="hero-meta">
       <span>Herdr 0.9.0+</span>
-      <span>macOS · Linux</span><p class="platform-note" style="margin-top:.75rem;font-size:.85rem;opacity:.72;max-width:60ch">
-        Windows is not supported yet, and the badge says so rather than implying it.
-        Herdr itself runs on Windows; this does not, because it dials a Unix socket where
-        Windows uses a named pipe, and it uses <code>flock</code> and process groups that
-        have no Windows equivalent. Real work, not a build flag —
-        <a href="https://github.com/muthuishere/herdr-expose/issues">open an issue</a> if you want it.
+      <span>macOS · Linux · Windows</span><p class="platform-note" style="margin-top:.75rem;font-size:.85rem;opacity:.72;max-width:60ch">
+        Windows is supported and was verified end to end on real hardware — the
+        named-pipe transport, file locking, process-tree kill, the web UI, a LAN
+        share, and an agent using the skill to share its own session. It needs no
+        Administrator rights. One difference the badge will not tell you: macOS and
+        Linux install a supervisor that restarts the server if it crashes, and
+        Windows does not, because a desktop has someone sitting at it.
+        <a href="https://github.com/muthuishere/herdr-expose/blob/main/docs/windows.md">The full check-by-check claim</a>
+        says exactly what was run and what was not.
       </p>
       <span>no runtime deps</span>
       <span>MIT</span>
@@ -788,9 +791,63 @@ footer a { color: var(--fg-dim); }
     <h2>The same agents, on whatever you happen to be holding.</h2>
     <p class="lede" style="margin-bottom:30px">
       One layout for a wide screen, one for a narrow one — the same server, the
-      same session. Every panel below is hand-built HTML styled from the app's
-      own stylesheet: the real colours, spacing and states, drawn here rather
-      than screenshotted. Treat them as a faithful drawing, not a photograph.
+      same session.
+    </p>
+
+    <style>
+      .shots{margin:0 0 42px}
+      .shot-film{margin:0 0 14px;border-radius:14px;overflow:hidden;background:#0b0d10;
+        border:1px solid rgba(255,255,255,.09)}
+      .shot-film video{display:block;width:100%;height:auto}
+      .shot-cap{margin:0 0 34px;font-size:.85rem;opacity:.66;max-width:68ch}
+      .shot-row{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
+        align-items:start}
+      .shot{margin:0}
+      .shot img{display:block;width:100%;height:auto;border-radius:12px;
+        border:1px solid rgba(255,255,255,.09);background:#0b0d10}
+      .shot figcaption{margin-top:.5rem;font-size:.78rem;opacity:.6;line-height:1.45}
+      @media (max-width:560px){.shot-row{grid-template-columns:1fr 1fr;gap:12px}}
+    </style>
+
+    <div class="shots">
+      <div class="shot-film">
+        <video controls playsinline preload="metadata" poster="assets/desktop-1440.png"
+               aria-label="Screen recording: a blocked agent is answered from a phone, then the same session on a desktop.">
+          <source src="assets/demo.mp4" type="video/mp4">
+          <source src="assets/demo.webm" type="video/webm">
+        </video>
+      </div>
+      <p class="shot-cap">
+        A real session through a real tunnel — two Claude agents and a shell, no
+        mock-ups and nothing staged. One of them stops to ask whether it may
+        overwrite a file; it gets answered from the phone, and the reply lands
+        back in the terminal.
+      </p>
+
+      <div class="shot-row">
+        <figure class="shot">
+          <img src="assets/pane-list-375.png" alt="Pane list on a 375px phone: a blocked agent pinned under NEEDS YOU, an idle agent, and a shell." loading="lazy">
+          <figcaption>The blocked one is pinned to the top. That is the whole point of the list.</figcaption>
+        </figure>
+        <figure class="shot">
+          <img src="assets/blocked-pixel7.png" alt="A blocked agent's question rendered on a phone, with a key bar offering y, n, 1, 2, 3, escape and arrow keys." loading="lazy">
+          <figcaption>Its actual question, with the keys it is waiting for.</figcaption>
+        </figure>
+        <figure class="shot">
+          <img src="assets/transcript-375.png" alt="An agent transcript reflowed to phone width, with a provenance line naming every transform applied." loading="lazy">
+          <figcaption>Reflowed to the phone, with a line telling you exactly what was done to the text.</figcaption>
+        </figure>
+        <figure class="shot">
+          <img src="assets/desktop-1440.png" alt="The wide layout: a sidebar of sessions and panes beside one agent's full transcript." loading="lazy">
+          <figcaption>The same session on a laptop.</figcaption>
+        </figure>
+      </div>
+    </div>
+
+    <p class="lede" style="margin-bottom:30px">
+      The panels below are hand-built HTML styled from the app's own stylesheet —
+      a faithful drawing, not a photograph. They are here because they show the
+      two layouts side by side, which no single screenshot can.
     </p>
 
     <!-- ---- wide: the laptop in the other room ---- -->
