@@ -251,7 +251,17 @@ reading predicted. `herdr-expose doctor` then dialled it and got
    so a port a browser had just used sat in `TIME_WAIT`. Fixed by giving the
    check a 5s window, and by asking "is anything SERVING" rather than "can I
    bind" on Windows (`platform.PortBindable`).
-3. **`os.Symlink` needs a privilege an ordinary user does not have.**
+3. **A skill link into a directory that was about to be moved.** Herdr builds a
+   plugin in a STAGING directory (`…\plugins\.tmp-install-<pid>-<ts>\checkout`)
+   and moves it to its final home only after the build hook succeeds. Our build
+   script runs `skill install` as its last step, so the link pointed into the
+   staging path and Herdr then moved the checkout out from under it: the install
+   reported success, `~\.claude\skills\herdr-share` existed, and every read
+   through it failed. The agent skill was installed **broken**. Fixed by healing
+   a DANGLING link on `daemon` start — the startup hook is the first thing that
+   runs from the final location, so it is the first moment the real path is
+   knowable.
+4. **`os.Symlink` needs a privilege an ordinary user does not have.**
    `skill install` died with "A required privilege is not held by the client"
    unless Developer Mode was on. Fixed with a **directory junction** fallback
    (`mklink /J`, no privilege required) — and then a second bug behind it: Go
@@ -259,26 +269,35 @@ reading predicted. `herdr-expose doctor` then dialled it and got
    link, reinstall refused, and uninstall would not remove it. Both fixed by
    asking for `FILE_ATTRIBUTE_REPARSE_POINT`.
 
-### The install story is the weak part
+### The install story
 
-`herdr plugin install muthuishere/herdr-expose` — the command this document
-tells a user to run — **fails on a stock Windows box**:
+`herdr plugin install muthuishere/herdr-expose` **works on Windows**, verified
+from a wiped machine against the published repo:
 
 ```
-Error: Error { kind: NotFound, message: "program not found" }
+build commands: 2
+  build (skipped on windows): ./scripts/build.sh
+  build: powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/build.ps1
+Installed dev.deemwar.herdr-expose from muthuishere/herdr-expose.
+exit=0 in 51.6s
 ```
 
-Herdr shells out to `git` to clone, and the test machine had no `git`. It also
-had no `bash` and no `curl`, which means **both** halves of `scripts/build.sh`
-are unavailable: the from-source path needs a POSIX shell, and the release-asset
-fallback needs `curl`. Everything above was therefore verified with a
-hand-built binary copied into place.
+and `bin\herdr-expose.exe` was really there afterwards.
 
-So, plainly: **on Windows this currently installs only if you hand-build and
-hand-copy.** Making `herdr plugin install` work there needs the build hook to
-run without bash — the manifest takes a single `command`, so that is a real
-design question, not a one-line fix — and a published windows asset to fall
-back to.
+**It requires `git`** — not only to clone (Herdr shells out to it, and without
+it the install dies with `Error { kind: NotFound, message: "program not found" }`)
+but as the thing that makes the rest reachable at all. Note what it does **not**
+require: `bash`. A default Git for Windows install puts only `Git\cmd` on PATH,
+so `bash.exe` in `Git\bin` is **not** reachable — measured, not assumed — which
+is exactly why the build hook is a PowerShell script selected by the per-entry
+`platforms` filter on `[[build]]` rather than the `.sh` the other platforms use.
+`CreateProcess` cannot execute a `.sh` at all: there is no shebang handling,
+so even a bash on PATH would not have helped.
+
+Before that filter existed, a Windows install printed
+`build (skipped on windows)`, **reported success, and built nothing** — leaving
+the plugin enabled with every action pointing at a `./bin/herdr-expose` that did
+not exist. That is the failure mode this section exists to prevent recurring.
 
 ### The sentence we are entitled to publish
 
@@ -289,8 +308,8 @@ back to.
 > own session all work. Windows installs **no autostart service**: Herdr's own
 > plugin startup hook starts the daemon, nothing restarts it if it crashes, and
 > herdr-expose tells you the command when you reach for the UI and it is down.
-> `herdr plugin install` requires **git**, which is also what supplies the POSIX
-> shell the build hook needs.
+> `herdr plugin install` works on Windows and requires **git** (for the clone);
+> it does **not** require bash.
 
 ## Known gaps
 
@@ -307,8 +326,10 @@ back to.
 - **No restart-on-crash on Windows.** This is a design decision, not a gap —
   see "Why Windows installs no autostart at all" — but it is a real difference
   from macOS and Linux and the table above states it exactly.
-- `herdr plugin install` has not yet been run against a pushed commit that
-  contains the Windows build hook — see "The install story" below.
+- The version string is stamped `dev` on a Windows plugin install, because the
+  clone Herdr makes carries no tags and `git` is not on PATH in the environment
+  it runs the build hook in. Cosmetic, but it means `herdr-expose version` does
+  not identify the build.
 - There is no Windows runner in the release workflow. The floor CI enforces is
   cross-build **and cross-vet** of all six targets, which catches a Unix-only
   syscall landing in a shared file — it does not catch a runtime bug.

@@ -417,6 +417,11 @@ func cmdDaemon() error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+	// The plugin build hook linked the agent skill from Herdr's STAGING
+	// directory, which Herdr then moved. This is the first run from the final
+	// location, so it is where that dangling link gets healed. Best effort.
+	repairStaleSkillLink()
+
 	recordPID(state, ledgerEntry{PID: cmd.Process.Pid, At: time.Now(), Kind: "daemon"})
 	_ = cmd.Process.Release()
 	fmt.Println("started, pid", cmd.Process.Pid)

@@ -16,8 +16,10 @@ min_herdr_version = "0.9.0"
 # why that asymmetry with the macOS LaunchAgent and the Linux systemd --user
 # unit is the platforms being genuinely different, not an oversight.
 #
-# `herdr plugin install` on Windows requires git, which is also what supplies
-# the POSIX shell the build hook needs.
+# `herdr plugin install` works on Windows (verified from a wiped machine against
+# the published repo) and requires git for the clone. It does NOT require bash:
+# CreateProcess cannot execute a .sh at all, and a default Git for Windows does
+# not put bash.exe on PATH -- hence the per-platform [[build]] entries below.
 platforms = ["macos", "linux", "windows"]
 
 # Builds the React app, then the Go binary with the app embedded in it.

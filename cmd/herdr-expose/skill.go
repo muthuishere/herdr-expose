@@ -369,3 +369,56 @@ func cmdSkillUninstall() error {
 	}
 	return nil
 }
+
+// repairStaleSkillLink re-points a skill link whose target has vanished.
+//
+// THE BUG THIS EXISTS FOR, measured on a clean Windows `herdr plugin install`:
+// Herdr builds a plugin in a STAGING directory
+// (…\herdr\plugins\.tmp-install-<pid>-<ts>\checkout) and moves it to its final
+// home only after the build hook succeeds. Our build script runs `skill
+// install` as its last step — so the link was created pointing into the staging
+// path, and Herdr then moved the checkout out from under it. The install
+// reported success, `~\.claude\skills\herdr-share` existed, and every read
+// through it failed: the agent skill was installed BROKEN.
+//
+// The startup hook runs `daemon` from the FINAL location, which is the first
+// moment anything in this program knows where the checkout really ended up. So
+// that is where it is healed, automatically, once, and only when the existing
+// link is actually dangling — a link the user pointed somewhere deliberately is
+// left alone, and so is a real directory.
+//
+// Entirely best effort: a skill link is not a reason to fail starting a server.
+func repairStaleSkillLink() {
+	src, err := skillSourceDir()
+	if err != nil {
+		return
+	}
+	if _, err := os.Stat(filepath.Join(src, "SKILL.md")); err != nil {
+		return
+	}
+	targets, err := skillTargets()
+	if err != nil {
+		return
+	}
+	for _, t := range targets {
+		link := t.Link()
+		state, points := inspectSkillLink(link, src)
+		if state != linkStale {
+			continue // absent, already correct, or a real directory: not ours to touch
+		}
+		// Only heal a DANGLING link. One that resolves is somebody's choice.
+		abs := points
+		if abs != "" && !filepath.IsAbs(abs) {
+			abs = filepath.Join(filepath.Dir(link), abs)
+		}
+		if abs != "" {
+			if _, err := os.Stat(abs); err == nil {
+				continue
+			}
+		}
+		if err := os.Remove(link); err != nil {
+			continue
+		}
+		_ = linkDir(src, link)
+	}
+}
