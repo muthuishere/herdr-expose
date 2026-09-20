@@ -94,6 +94,7 @@ export function TranscriptView({ target }: { target: PaneId }) {
         source={frame?.source}
         truncated={!!frame?.truncated}
         collapsed={shaped.collapsed}
+        rejoined={shaped.rejoined}
       />
       {blocked ? <AnswerKeys target={target} /> : null}
       {hasAgent ? <PromptBox target={target} /> : null}
@@ -114,6 +115,7 @@ function TranscriptBody({
   source,
   truncated,
   collapsed,
+  rejoined,
 }: {
   target: PaneId
   lines: ReturnType<typeof shapeTranscript>['lines']
@@ -122,6 +124,7 @@ function TranscriptBody({
   source?: string
   truncated: boolean
   collapsed: number
+  rejoined: number
 }) {
   const ref = useRef<HTMLDivElement>(null)
   const pinnedRef = useRef(true)
@@ -178,6 +181,7 @@ function TranscriptBody({
         source={source}
         truncated={truncated}
         collapsed={collapsed}
+        rejoined={rejoined}
       />
     </>
   )
@@ -195,18 +199,31 @@ function Provenance({
   source,
   truncated,
   collapsed,
+  rejoined,
 }: {
   target: PaneId
   source?: string
   truncated: boolean
   collapsed: number
+  rejoined: number
 }) {
   const what = source ? (SOURCE_LABEL[source] ?? source) : 'this pane'
+  // Every transform is named. The list is built rather than hard-coded so a
+  // transform that did nothing this frame says nothing, and one we add later
+  // cannot be left out of the sentence by accident.
+  const applied = ['escape codes stripped']
+  if (collapsed > 0) applied.push(`${collapsed} blank line${collapsed === 1 ? '' : 's'} collapsed`)
+  if (rejoined > 0) {
+    applied.push(`${rejoined} line${rejoined === 1 ? '' : 's'} rejoined where the pane wrapped them`)
+  }
+  const transforms =
+    applied.length === 1
+      ? applied[0]
+      : `${applied.slice(0, -1).join(', ')} and ${applied[applied.length - 1]}`
   return (
     <p className="tr-provenance">
       This is what <b>{target.split('/').pop()}</b> is showing on screen — {what}, via
-      herdr <code>{source ?? '…'}</code>, with escape codes stripped
-      {collapsed > 0 ? ` and ${collapsed} blank line${collapsed === 1 ? '' : 's'} collapsed` : ''}.
+      herdr <code>{source ?? '…'}</code>, with {transforms}.
       {truncated ? ' Older output is above what the buffer keeps.' : ''} It is not a
       reconstructed conversation log: herdr exposes the screen, not the agent&apos;s message
       history. Opening it does not resize the pane.
