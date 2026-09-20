@@ -27,7 +27,10 @@ platforms = ["macos", "linux", "windows"]
 # TWO entries, filtered by platform, because Herdr runs a build command with
 # CreateProcess on Windows and CreateProcess cannot execute a .sh file -- there
 # is no shebang handling, and Git for Windows puts bash.exe in Git\bin which a
-# default install does NOT add to PATH. Measured: with a manifest that did not
+# default install does NOT add to PATH. It is a .cmd rather than a .ps1 because
+# running a PowerShell FILE needs -ExecutionPolicy Bypass, and "bypass the
+# execution policy" is exactly the pattern endpoint security blocks or flags.
+# Measured: with a manifest that did not
 # list windows, `herdr plugin install` printed "build (skipped on windows)",
 # reported success, enabled the plugin, and left every action below pointing at
 # a ./bin/herdr-expose that was never built. A build that is skipped must not
@@ -45,7 +48,7 @@ command = ["./scripts/build.sh"]
 
 [[build]]
 platforms = ["windows"]
-command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "./scripts/build.ps1"]
+command = ["cmd", "/c", "scripts\\build.cmd"]
 
 # Startup hooks are one-shot and unsupervised, so `daemon` fork-execs the real
 # server and returns immediately. `serve` holds an exclusive flock on the

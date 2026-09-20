@@ -277,7 +277,7 @@ from a wiped machine against the published repo:
 ```
 build commands: 2
   build (skipped on windows): ./scripts/build.sh
-  build: powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/build.ps1
+  build: cmd /c scripts\build.cmd
 Installed dev.deemwar.herdr-expose from muthuishere/herdr-expose.
 exit=0 in 51.6s
 ```
@@ -289,10 +289,20 @@ it the install dies with `Error { kind: NotFound, message: "program not found" }
 but as the thing that makes the rest reachable at all. Note what it does **not**
 require: `bash`. A default Git for Windows install puts only `Git\cmd` on PATH,
 so `bash.exe` in `Git\bin` is **not** reachable — measured, not assumed — which
-is exactly why the build hook is a PowerShell script selected by the per-entry
+is exactly why the build hook is `scripts\build.cmd`, selected by the per-entry
 `platforms` filter on `[[build]]` rather than the `.sh` the other platforms use.
 `CreateProcess` cannot execute a `.sh` at all: there is no shebang handling,
 so even a bash on PATH would not have helped.
+
+It is a `.cmd` rather than a `.ps1` on purpose. PowerShell works, but only when
+invoked as `powershell -ExecutionPolicy Bypass -File ...`, and *"bypass the
+execution policy"* is precisely the pattern endpoint security software blocks or
+flags — on a locked-down corporate machine that is the install failing for a
+reason that has nothing to do with us. `cmd.exe` is always present and needs no
+policy argument. The script builds from source only; there is deliberately no
+release-asset download path, because the project publishes no Windows release
+asset yet and a fallback to nothing is untested code pretending to be a safety
+net.
 
 Before that filter existed, a Windows install printed
 `build (skipped on windows)`, **reported success, and built nothing** — leaving

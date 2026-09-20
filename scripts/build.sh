@@ -52,10 +52,10 @@ PKG="./cmd/herdr-expose"
 BIN_NAME="herdr-expose"
 
 VERSION="${VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo dev)}"
-COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
-BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-LDFLAGS="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.buildDate=${BUILD_DATE}"
+# Only main.version exists; the linker silently ignores -X for a symbol that
+# is not there, so stamping commit and buildDate discarded both values.
+LDFLAGS="-s -w -X main.version=${VERSION}"
 
 RELEASE=0
 SKIP_WEB=0
@@ -93,9 +93,10 @@ download_release() {
   case "$(uname -s)" in
     Darwin) os=darwin ;;
     Linux)  os=linux ;;
-    # This script only ever runs under a POSIX shell. On Windows that means Git
-    # Bash / MSYS2, which is what `herdr plugin install` uses there, and which
-    # reports these.
+    # This script only ever runs under a POSIX shell. `herdr plugin install`
+    # does NOT use it on Windows -- the manifest selects scripts/build.cmd
+    # there -- but someone running this by hand from Git Bash / MSYS2 gets
+    # these, so the case stays.
     MINGW*|MSYS*|CYGWIN*) os=windows; ext=".exe" ;;
     *) die "no prebuilt binary for $(uname -s); install Go 1.22+ and node 20+ and rebuild from source." ;;
   esac
