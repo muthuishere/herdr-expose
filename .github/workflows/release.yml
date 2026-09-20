@@ -3,9 +3,10 @@
 # One runner builds all six targets: the binary is CGO-free, so Go
 # cross-compiles them and the embedded web app is identical in each.
 #
-# Windows (amd64 + arm64) is built here but is NOT verified here — see the
-# cross-vet step below and docs/windows.md for exactly what is and is not
-# claimed.
+# Windows (amd64 + arm64) is built here but not EXERCISED here — there is no
+# Windows runner in this workflow, so the floor is cross-compiling and
+# cross-vetting every target. Windows has been verified end to end on real
+# hardware; docs/windows.md says check by check what was run and what was not.
 #
 # The artifacts are NOT signed or notarized. macOS Gatekeeper will quarantine a
 # downloaded build; `xattr -d com.apple.quarantine ./herdr-expose` clears it.
@@ -76,14 +77,19 @@ jobs:
             echo "Prebuilt binaries for macOS, Linux and Windows (amd64 + arm64),"
             echo "with the web UI embedded. Not signed or notarized."
             echo
-            echo "Windows support is EXPERIMENTAL. See docs/windows.md for what has"
-            echo "been verified on real hardware and what has not."
+            echo "Windows works and needs no Administrator rights — verified end to"
+            echo "end on real hardware. See docs/windows.md for the check-by-check"
+            echo "claim, including what was not run."
             echo
-            echo "Install as a Herdr plugin. That builds from source when Go and"
-            echo "node are present, and falls back to these binaries when they are"
-            echo "not:"
+            echo "Install as a Herdr plugin:"
             echo
             echo '    herdr plugin install muthuishere/herdr-expose'
+            echo
+            echo "On macOS and Linux that builds from source when Go and node are"
+            echo "present and falls back to these binaries when they are not."
+            echo "On Windows it builds from source only, and requires git plus Go"
+            echo "1.25+ and node 20+ on PATH — there is no download fallback there,"
+            echo "so a missing toolchain fails loudly rather than half-installing."
             echo
             echo "Or take a binary directly:"
             echo
