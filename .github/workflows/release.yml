@@ -36,7 +36,11 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          # Read the version from go.mod rather than pinning one here. A pinned
+          # 1.22 against a go.mod that said 1.25 is what failed the v0.1.0 tag
+          # ("Command failed: go env GOPATH"), and a pin drifts silently every
+          # time the module's toolchain moves.
+          go-version-file: go.mod
           check-latest: true
 
       - name: Test
