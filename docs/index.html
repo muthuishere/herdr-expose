@@ -188,6 +188,7 @@ strong, b { font-weight: 650; color: var(--fg); }
 .hero-meta {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 8px 10px;
   margin-top: 22px;
   font-family: var(--mono);
@@ -644,6 +645,10 @@ table.cmp td.us, table.cmp thead th.us { color: var(--fg); background: var(--bg-
 table.cmp thead th.us { color: var(--accent); }
 table.cmp td.us b { color: var(--fg); }
 table.cmp .no { color: var(--fg-faint); }
+.platform-note {
+  margin-top: 14px; font-size: 13.5px; line-height: 1.6;
+  color: var(--fg-faint); max-width: 64ch;
+}
 .cmp-note { font-size: 14px; color: var(--fg-faint); max-width: 70ch; margin-top: 16px; }
 </style>
 </head>
@@ -691,20 +696,30 @@ table.cmp .no { color: var(--fg-faint); }
         <button class="copy" type="button" data-copy="share this">Copy</button>
       </div>
       <p class="cmd-note">
-        The first command installs three things: the binary, the Herdr plugin,
-        and the agent skill. After that the second line is not a command — it is
-        what you say to the agent. It runs <code>herdr-expose share</code> for
-        you and reports back the URL and the pairing code. Type it yourself if
-        you would rather. Or skip sharing entirely:
-        <code>herdr-expose daemon</code>, then <code>127.0.0.1:21118</code>
-        right where you are sitting.
+        <b>Yes, the first command really does install the skill too</b> — all
+        three things, in one line: the binary, the Herdr plugin, and the agent
+        skill, which it links into <code>~/.claude/skills/herdr-share</code>
+        (and <code>~/.agents/skills</code>) during the plugin's build step.
+        There is no second install to remember. One honest caveat: that link is
+        best-effort, because a skill that would not link is not a reason to
+        lose the plugin — so if it warns, the plugin is still fine and
+        <code>herdr-expose skill install</code> fixes the skill on its own.
+        After that the second line is not a command at all — it is what you say
+        to the agent. It runs <code>herdr-expose share</code> for you and reads
+        back the URL and the pairing code. Type it yourself if you would
+        rather. Or skip sharing entirely: <code>herdr-expose daemon</code>,
+        then <code>127.0.0.1:21118</code> right where you are sitting.
       </p>
     </div>
 
     <div class="hero-meta">
       <span>Herdr 0.9.0+</span>
       <span>installs the agent skill</span>
-      <span>macOS · Linux · Windows</span><p class="platform-note" style="margin-top:.75rem;font-size:.85rem;opacity:.72;max-width:60ch">
+      <span>macOS · Linux · Windows</span>
+      <span>no runtime deps</span>
+      <span>MIT</span>
+    </div>
+    <p class="platform-note">
         Windows is supported and was verified end to end on real hardware — the
         named-pipe transport, file locking, process-tree kill, the web UI, a LAN
         share, and an agent using the skill to share its own session. It needs no
@@ -714,9 +729,6 @@ table.cmp .no { color: var(--fg-faint); }
         <a href="https://github.com/muthuishere/herdr-expose/blob/main/docs/windows.md">The full check-by-check claim</a>
         says exactly what was run and what was not.
       </p>
-      <span>no runtime deps</span>
-      <span>MIT</span>
-    </div>
   </div>
 </section>
 

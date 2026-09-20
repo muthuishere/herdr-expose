@@ -28,6 +28,13 @@ binary, the Herdr plugin, and the skill.
 herdr plugin install muthuishere/herdr-expose   # binary + plugin + agent skill
 ```
 
+That one line installs all three: the binary, the Herdr plugin, and the agent
+skill — the skill is linked into `~/.claude/skills/herdr-share` (and
+`~/.agents/skills`) by the plugin's build step, so there is no second install
+to remember. It is best-effort by design: a skill that won't link is not a
+reason to lose the plugin, so if it warns, the plugin is still fine and
+`herdr-expose skill install` repairs the skill on its own.
+
 Then, in any agent session on that machine, just say it:
 
 > **share this**
