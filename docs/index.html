@@ -655,7 +655,7 @@ footer a { color: var(--fg-dim); }
     <p class="eyebrow">A Herdr plugin · one Go binary</p>
     <h1>Your agents run on one machine. <em>You aren't always at it.</em></h1>
     <p class="lede">
-      Reach every Claude Code — or any agent in a
+      Reach every Claude Code, Codex, Devin, Gemini, Copilot, Cursor — any of the 21 agent kinds Herdr detects, in a
       <a href="https://herdr.dev">Herdr</a> pane — from any browser on your
       network: the laptop in the other room, the desktop upstairs, a tablet, a
       phone. Answer the ones that are blocked. Hand a teammate a link scoped to
@@ -682,7 +682,13 @@ footer a { color: var(--fg-dim); }
 
     <div class="hero-meta">
       <span>Herdr 0.9.0+</span>
-      <span>macOS · Linux</span>
+      <span>macOS · Linux</span><p class="platform-note" style="margin-top:.75rem;font-size:.85rem;opacity:.72;max-width:60ch">
+        Windows is not supported yet, and the badge says so rather than implying it.
+        Herdr itself runs on Windows; this does not, because it dials a Unix socket where
+        Windows uses a named pipe, and it uses <code>flock</code> and process groups that
+        have no Windows equivalent. Real work, not a build flag —
+        <a href="https://github.com/muthuishere/herdr-expose/issues">open an issue</a> if you want it.
+      </p>
       <span>no runtime deps</span>
       <span>MIT</span>
     </div>

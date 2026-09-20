@@ -6,8 +6,10 @@ else a link when they need to work on one.**
 Your agents run on one machine. You are not always at that machine, and
 sometimes the person who should answer an agent's question isn't you.
 
-herdr-expose puts a [Herdr](https://herdr.dev) session in a browser: your other
-laptop, a tablet, your phone, or a client's machine. They read what the agent is
+herdr-expose puts a [Herdr](https://herdr.dev) session in a browser — Claude
+Code, Codex, Devin, Gemini, Copilot, Cursor and the other 15 agent kinds Herdr
+detects, or any plain shell — reachable
+from your other laptop, a tablet, your phone, or a client's machine. They read what the agent is
 doing, answer it, drive it — through a link scoped to one session that expires
 on its own.
 
@@ -74,4 +76,10 @@ you which part is unhappy.
 | [**Decisions**](docs/adr/) | 36 ADRs — what was chosen, and what it cost |
 | [**Contributing**](CONTRIBUTING.md) | build it, run the gates, house rules |
 
-Requires Herdr 0.9.0+. MIT — see [LICENSE](LICENSE).
+Requires Herdr 0.9.0+. macOS and Linux. MIT — see [LICENSE](LICENSE).
+
+**Windows isn't supported yet.** Herdr itself runs there; this doesn't, because
+it dials a Unix socket where Windows uses a named pipe, and it relies on `flock`
+and process groups that have no Windows equivalent. That's real work rather than
+a build flag — [open an issue](https://github.com/muthuishere/herdr-expose/issues)
+if you want it.
