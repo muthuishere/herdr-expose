@@ -1,9 +1,15 @@
 # herdr-expose
 
-**Your terminal agents, on your phone.**
+**Reach your terminal agents from anywhere on your network — and hand someone
+else a link when they need to work on one.**
 
-Watch Claude Code — or any agent running in a [Herdr](https://herdr.dev) pane —
-from a browser, send it a reply, and share one session with a link that expires.
+Your agents run on one machine. You are not always at that machine, and
+sometimes the person who should answer an agent's question isn't you.
+
+herdr-expose puts a [Herdr](https://herdr.dev) session in a browser: your other
+laptop, a tablet, your phone, or a client's machine. They read what the agent is
+doing, answer it, drive it — through a link scoped to one session that expires
+on its own.
 
 One Go binary. The web app is inside it.
 
@@ -16,8 +22,8 @@ herdr plugin install muthuishere/herdr-expose   # binary + plugin + agent skill
 herdr-expose share                              # a URL for this session
 ```
 
-That's it. The second command prints a link and a pairing code — open the link
-on your phone, and you're looking at your agent.
+That's it. The second command prints a link and a pairing code. Open it on any
+device on your network — or send it to whoever needs to work on that agent.
 
 Or skip the sharing and just open it locally: `herdr-expose daemon` then
 [127.0.0.1:21118](http://127.0.0.1:21118).
@@ -30,8 +36,8 @@ Or skip the sharing and just open it locally: `herdr-expose daemon` then
 |---|---|
 | **Read an agent** | Agent panes render as readable text that reflows to your screen — not a shrunken copy of a terminal grid |
 | **Answer it** | Type a reply, or tap y/n when it's blocked on a question |
-| **Share one session** | `herdr-expose share` — scoped to that session, pairing-gated, gone when it expires |
-| **Or all of them** | `herdr-expose share --all` — every session, after it reads back exactly what that means |
+| **Give someone a link** | `herdr-expose share` — one session, pairing-gated, gone when it expires. Not SSH to your laptop forever |
+| **Reach your own machines** | `herdr-expose share --all` — every session on this box, from any device on the network |
 | **Reach it from anywhere** | `--quick` for a throwaway `trycloudflare.com` URL, `--domain yours.com` for your own |
 | **Stop everything** | `herdr-expose panic` |
 
