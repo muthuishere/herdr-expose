@@ -1,19 +1,24 @@
 # herdr-expose
 
-**Reach your terminal agents from anywhere on your network — and hand someone
-else a link when they need to work on one.**
+**Tell your coding agent "share this" — it hands back a link to itself.**
 
 Your agents run on one machine. You are not always at that machine, and
 sometimes the person who should answer an agent's question isn't you.
 
-herdr-expose puts a [Herdr](https://herdr.dev) session in a browser — Claude
-Code, Codex, Devin, Gemini, Copilot, Cursor and the other 15 agent kinds Herdr
-detects, or any plain shell — reachable
-from your other laptop, a tablet, your phone, or a client's machine. They read what the agent is
-doing, answer it, drive it — through a link scoped to one session that expires
-on its own.
+**The agent skill is the point.** You don't learn a CLI and you don't leave the
+session you're in: you say *share this*, and the agent turns that session into a
+private URL — open it on your phone, or send it to whoever should answer it.
+Everything below is what the agent is driving on your behalf, available to you
+too when you'd rather type it.
 
-One Go binary. The web app is inside it.
+What lands in the browser is a [Herdr](https://herdr.dev) session — Claude
+Code, Codex, Devin, Gemini, Copilot, Cursor and the other 15 agent kinds Herdr
+detects, or any plain shell — reachable from your other laptop, a tablet, your
+phone, or a client's machine. They read what the agent is doing, answer it,
+drive it — through a link scoped to one session that expires on its own.
+
+One Go binary. The web app is inside it. One command installs all three: the
+binary, the Herdr plugin, and the skill.
 
 ---
 
@@ -21,11 +26,19 @@ One Go binary. The web app is inside it.
 
 ```bash
 herdr plugin install muthuishere/herdr-expose   # binary + plugin + agent skill
-herdr-expose share                              # a URL for this session
 ```
 
-That's it. The second command prints a link and a pairing code. Open it on any
-device on your network — or send it to whoever needs to work on that agent.
+Then, in any agent session on that machine, just say it:
+
+> **share this**
+
+The agent runs `herdr-expose share` for you and reports back the link and the
+pairing code. Open it on any device on your network — or send it to whoever
+needs to work on that agent. Same thing by hand, if you prefer:
+
+```bash
+herdr-expose share                              # a URL for this session
+```
 
 Or skip the sharing and just open it locally: `herdr-expose daemon` then
 [127.0.0.1:21118](http://127.0.0.1:21118).
@@ -36,6 +49,7 @@ Or skip the sharing and just open it locally: `herdr-expose daemon` then
 
 | | |
 |---|---|
+| **Just ask** | Say *share this* in the session — the bundled `herdr-share` skill turns your words into the right command and hands back the link |
 | **Read an agent** | Agent panes render as readable text that reflows to your screen — not a shrunken copy of a terminal grid |
 | **Answer it** | Type a reply, or tap y/n when it's blocked on a question |
 | **Give someone a link** | `herdr-expose share` — one session, pairing-gated, gone when it expires. Not SSH to your laptop forever |
