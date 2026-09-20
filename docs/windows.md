@@ -336,10 +336,6 @@ not exist. That is the failure mode this section exists to prevent recurring.
 - **No restart-on-crash on Windows.** This is a design decision, not a gap —
   see "Why Windows installs no autostart at all" — but it is a real difference
   from macOS and Linux and the table above states it exactly.
-- The version string is stamped `dev` on a Windows plugin install, because the
-  clone Herdr makes carries no tags and `git` is not on PATH in the environment
-  it runs the build hook in. Cosmetic, but it means `herdr-expose version` does
-  not identify the build.
 - There is no Windows runner in the release workflow. The floor CI enforces is
   cross-build **and cross-vet** of all six targets, which catches a Unix-only
   syscall landing in a shared file — it does not catch a runtime bug.
