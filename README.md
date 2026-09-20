@@ -116,7 +116,7 @@ herdr-expose status
 | `pair` | mint a single-use pairing code and show a QR |
 | `expose start\|stop\|status` | bring the tunnel up or down |
 | `expose destroy` | remove the DNS record and delete the tunnel (explicit, and only what it created) |
-| `share [--lan\|--quick\|--domain X]` | expose ONE session on a time-boxed, self-destructing URL |
+| `share [--lan\|--quick\|--domain X\|--local]` | expose ONE session on a time-boxed, self-destructing URL (no flag = LAN) |
 | `share list\|extend\|pair\|revoke\|restore` | manage shares (every verb takes `--json`) |
 | `panic` | revoke every share and stop the main tunnel |
 | `install-service` / `uninstall-service` | install or remove a launchd / systemd unit for crash recovery |
@@ -130,15 +130,21 @@ control**, which is deliberate, because this binary runs commands.
 
 | mode | reachable from | device token | installable PWA |
 |---|---|---|---|
-| `local` (default) | this machine only | not required | yes |
-| `lan` | anyone on your wifi | **required** | **no** (see below) |
+| `local` (the **daemon's** default) | this machine only | not required | yes |
+| `lan` (a **share's** default) | anyone on your wifi | **required** | **no** (see below) |
 | `quick` | the internet, on a throwaway hostname | **required** | not usefully (see below) |
 | `cloudflare` | the internet, on your domain | **required** | yes |
 
 `local`, `lan` and `cloudflare` are what the long-lived server runs in. `quick`
 belongs to [`share`](#sharing-one-session) alone and cannot be configured here.
 
-### local — the default
+The daemon defaults to `local` and a `share` defaults to `lan`, deliberately:
+the daemon serves whoever is sitting at this machine, while a share exists to
+be opened from somewhere else. Same principle — the least exposure that still
+does the job — two different jobs. Nothing above those defaults is ever reached
+without asking for it.
+
+### local — the daemon's default
 
 Bound to `127.0.0.1`. No token needed: anyone who can reach loopback already has
 shell on the box. Origin and Host pinning are enforced instead, which is what
@@ -306,24 +312,49 @@ safe to call twice. Copy `adapters/template.js` to start.
 does the opposite: **one session, one URL, one deadline, then gone.**
 
 ```bash
-herdr-expose share --lan                    # http://<lan-ip>:<port>   no internet
+herdr-expose share                          # http://<lan-ip>:<port>   THE DEFAULT
+herdr-expose share --lan                    # the same, said out loud
 herdr-expose share --quick                  # https://<random>.trycloudflare.com
 herdr-expose share --domain x.example.com   # https://x.example.com    your zone
-herdr-expose share                          # auto — prints which it chose and why
+herdr-expose share --local                  # http://127.0.0.1:<port>  testing only
 ```
 
-| transport | needs | teardown at expiry |
-|---|---|---|
-| `--lan` | nothing | stop the process, wipe the state |
-| `--quick` | `cloudflared` | stop the process, wipe the state (nothing exists in Cloudflare) |
-| `--domain` | `cloudflared` + a zone your token reaches | the above **plus** delete the DNS record and the named tunnel |
+### The ladder is climbed, never guessed (AMENDMENTS 16)
 
-The three flags are mutually exclusive. With none of them, auto picks the
-configured domain if it is usable, else `--quick`, else `--lan` — and prints one
-line naming the choice and the reason. `--quick` is what makes this usable
-without a Cloudflare account at all.
+| rung | flag | reach | needs | teardown at expiry |
+|---|---|---|---|---|
+| **lan** | **none** (default) | this machine **and this network** | nothing | stop the process, wipe the state |
+| quick | `--quick` | anyone on the internet | `cloudflared` | stop the process, wipe the state (nothing exists in Cloudflare) |
+| domain | `--domain X` | anyone on the internet, on a name you own | `cloudflared` + a zone your token reaches | the above **plus** delete the DNS record and the named tunnel |
+| local | `--local` | this machine only — an opt-**in** for testing | nothing | stop the process, wipe the state |
 
-Everything else is identical across the three: **scope is enforced in the
+The flags are mutually exclusive, and **no flag means LAN**. Never `--quick`,
+never a configured domain. There is no auto-escalation: a bare `share` will not
+put a session on the public internet because `[expose] domain` happens to be
+set for the permanent deployment.
+
+LAN is the default rather than loopback because a share exists to be **opened
+from somewhere else** — at this machine you would just use the daemon on
+`localhost:21118`. Binding `0.0.0.0` covers loopback and the wifi in one, and
+goes no further. (The daemon's own `[expose]` default stays `local`. Same
+principle — the least exposure that still does the job — different job.)
+
+**Fallback only ever goes down.** An explicit `--quick` or `--domain` with no
+`cloudflared` installed degrades to LAN and prints the reason, because you did
+ask to be reachable and a LAN address is the nearest honest answer. Nothing
+ever escalates above what you asked for.
+
+Why the ceremony: this binary runs arbitrary commands inside your agent
+sessions. The blast radius of each rung differs by orders of magnitude — this
+machine, this room, the entire internet — and that difference must never be a
+config key you forgot you set. Typing `--quick` takes a second and makes the
+reach a conscious choice, which is the only thing that makes the pairing, scope
+and TTL guarantees below mean anything.
+
+The chosen rung and its reach are printed at create time (`exposure: lan —
+anyone on this network`), so you never have to infer it from the URL.
+
+Everything else is identical across all four: **scope is enforced in the
 server** (the shared instance's tree contains only that session — other sessions
 are absent from the tree, from subscribe, and rejected at the hub), **pairing is
 mandatory**, and every share is time-boxed three ways (an in-process timer, a
@@ -338,10 +369,11 @@ herdr-expose share revoke <id> | --all      # immediate, idempotent, verified ag
 herdr-expose panic                          # every share down AND the main tunnel stopped
 ```
 
-`revoke --all` and `panic` handle a mix of lan + quick + domain shares in one
-pass; one transport's failure never aborts the others. Teardown reports per
-component and exits non-zero if anything survived — for `lan` and `quick` the
-DNS and tunnel lines read as not-applicable, because nothing was ever created.
+`revoke --all` and `panic` handle a mix of local + lan + quick + domain shares
+in one pass; one rung's failure never aborts the others. Teardown reports per
+component and exits non-zero if anything survived — for `local`, `lan` and
+`quick` the DNS and tunnel lines read as not-applicable, because nothing was
+ever created.
 
 ---
 
@@ -374,15 +406,16 @@ lan         = false          # also the automatic fallback if cloudflared is mis
 autostart   = false
 
 [share]
-domain_suffix  = ""          # `share --name review` -> review.<suffix>
+domain_suffix  = ""          # with default_mode = "domain": `share --name review` -> review.<suffix>
 default_hours  = 1           # TTL when neither --hours nor --days is given
-default_mode   = "auto"      # auto | lan | quick | domain
+default_mode   = "lan"       # local | lan | quick | domain — the rung a bare `share` climbs to
 max_concurrent = 10
 ```
 
-`default_mode = "auto"` resolves: your configured domain when it is usable and
-`cloudflared` is installed, else `quick` when `cloudflared` is installed, else
-`lan`. There is no `quick` key under `[expose]`, on purpose.
+`default_mode` ships as `"lan"` and is the only key that can move a bare
+`share` off the LAN — setting it is asking, in the same sense that typing
+`--quick` is asking. A `"auto"` written before AMENDMENTS 16 still loads and now
+means `"lan"`. There is no `quick` key under `[expose]`, on purpose.
 
 **There are no secrets in this file.** Tokens live as SHA-256 hashes in the state
 directory at mode 0600; the Cloudflare token is read from the environment. See

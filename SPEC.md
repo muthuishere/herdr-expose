@@ -1107,3 +1107,78 @@ discover it by re-pairing.
 
 Permanent deployment: unchanged. `[expose] cloudflare = true` still REQUIRES
 `domain`, still refuses to be ephemeral. C1 stands where it was aimed.
+
+---
+
+# AMENDMENTS 16 — least exposure by default. The ladder is climbed, never guessed.
+
+Owner: "default is local, and then they ask for lan, and they ask for
+cloudflare, and cloudflare custom domain."
+
+This WITHDRAWS the auto-escalation in K1. A bare `share` currently resolves
+domain -> quick -> lan, which means the tool can put a session on the public
+internet because a config key happened to be set. Exposure must always be a
+thing the user asked for.
+
+## L1. Four rungs, each one an explicit request
+
+| rung | flag | reach |
+|---|---|---|
+| **local** (DEFAULT) | none | `http://127.0.0.1:<port>` — this machine only |
+| lan | `--lan` | `http://<lan-ip>:<port>` — anyone on the wifi |
+| cloudflare | `--quick` | `https://<random>.trycloudflare.com` — the internet |
+| custom domain | `--domain X` | `https://X` — the internet, on a name you own |
+
+No flag means **local**. Never quick, never lan, never a configured domain.
+The same ladder governs the daemon: `[expose]` with nothing set is local, and
+`cloudflare`/`lan` are opt-in keys, which is already true — do not change it.
+
+## L2. A failed request degrades LOUDLY; it never quietly climbs
+
+Fallback stays, but only as the failure mode of an EXPLICIT ask, never as a
+default. `--quick` or `--domain` with no cloudflared resolvable falls back to
+lan with a printed reason, because the user did ask to be reachable and a LAN
+address is the nearest honest answer. But nothing ever escalates ABOVE what was
+requested: a `--lan` request never becomes a tunnel, and a bare `share` never
+becomes anything but loopback.
+
+`[share] default_mode` still exists for someone who wants a different personal
+default, but its shipped value is `local`.
+
+## L3. Why this is worth the small inconvenience
+
+This binary runs arbitrary commands in the user's agent sessions. The blast
+radius of each rung is different by orders of magnitude — this machine, this
+room, the entire internet — and the difference between rung 1 and rung 3 must
+never be a config file the user forgot they set. Typing `--quick` takes a
+second and makes the reach a conscious choice, which is the only way the
+security properties elsewhere in this spec (pairing, scope, TTL) mean anything.
+
+---
+
+# AMENDMENTS 17 — a SHARE defaults to lan; the DAEMON defaults to local
+
+Owner: "i think no flag means lan and local, no one wants to do only localhost
+right." Correct, and it corrects L1.
+
+A share exists to be reached from somewhere else. Someone sitting at the machine
+would open the main daemon on `localhost:21118`; a loopback-only share is the one
+rung that makes the feature pointless.
+
+| rung | flag | reach |
+|---|---|---|
+| **lan (DEFAULT for a share)** | none | `http://<lan-ip>:<port>` — this machine AND this network (0.0.0.0 covers both) |
+| cloudflare | `--quick` | `https://<random>.trycloudflare.com` |
+| custom domain | `--domain X` | `https://X` |
+| local | `--local` | `http://127.0.0.1:<port>` — explicit opt-in, for testing |
+
+`[share] default_mode` ships as `lan`.
+
+**The daemon's own `[expose]` default stays `local`.** Same principle — least
+exposure that still does the job — different job: the daemon serves the person
+at the machine, so loopback is right there; a share's whole reason to exist is
+reach, so lan is right here.
+
+L2 is unchanged and remains the important half: **the ladder is never climbed
+for you.** A bare `share` must never become a tunnel because a domain happens to
+be configured. Fallback degrades downward on an explicit ask, never upward.

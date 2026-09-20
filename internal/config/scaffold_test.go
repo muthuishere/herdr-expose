@@ -34,7 +34,7 @@ func TestFirstRunWritesEverySectionAndKey(t *testing.T) {
 		`theme = "auto"`, `default_view = "grid"`,
 		"cloudflare = false", `domain = ""`, `tunnel_name = "herdr-expose"`,
 		"ngrok = false", "lan = false", "autostart = false",
-		`domain_suffix = ""`, "default_hours = 1", `default_mode = "auto"`, "max_concurrent = 10",
+		`domain_suffix = ""`, "default_hours = 1", `default_mode = "lan"`, "max_concurrent = 10",
 		`level = "info"`, `format = "text"`, `file = ""`, "max_size_mb = 10", "keep = 3",
 	} {
 		if !strings.Contains(text, want) {
@@ -71,7 +71,7 @@ func TestFirstRunWritesEverySectionAndKey(t *testing.T) {
 		cfg.Log.MaxSizeMB != DefaultLogMaxSizeMB || cfg.Log.Keep != DefaultLogKeep {
 		t.Errorf("log defaults: %+v", cfg.Log)
 	}
-	if cfg.Share.DefaultHours != 1 || cfg.Share.DefaultMode != "auto" || cfg.Share.MaxConcurrent != 10 {
+	if cfg.Share.DefaultHours != 1 || cfg.Share.DefaultMode != "lan" || cfg.Share.MaxConcurrent != 10 {
 		t.Errorf("share defaults: %+v", cfg.Share)
 	}
 }

@@ -58,7 +58,7 @@ type shareRecord struct {
 	// any Cloudflare teardown to do at all. It comes from expose.Resolve —
 	// the SAME resolver the main daemon uses (AMENDMENTS 5 / E1), not a
 	// second copy of the rules.
-	Mode          string `json:"mode"` // cloudflare | quick | lan
+	Mode          string `json:"mode"` // local | lan | quick | cloudflare
 	Bind          string `json:"bind"`
 	SecureContext bool   `json:"secure_context"`
 	FellBack      string `json:"fell_back,omitempty"`
@@ -118,13 +118,29 @@ func (r *shareRecord) view() shareView {
 	}
 }
 
-// mode defaults an old record (written before LAN shares existed) to cloudflare.
+// mode defaults an old record (written before LAN shares existed) to
+// cloudflare. That is the one place in this file where the ABSENCE of an
+// answer means the top rung rather than the bottom, and it is correct: this is
+// read by teardown, and a record from before modes existed really did have a
+// DNS record and a named tunnel behind it. Guessing "local" there would leave
+// a real hostname resolving with nothing to clean it up.
 func (r *shareRecord) mode() string {
 	if r.Mode == "" {
 		return string(config.ModeCloudflare)
 	}
 	return r.Mode
 }
+
+// rung places this share on the exposure ladder, for the lines that have to
+// state its reach plainly.
+func (r *shareRecord) rung() config.Rung { return config.RungOf(config.Mode(r.mode())) }
+
+// isLocal reports the bottom rung (AMENDMENTS 16 L1): a loopback-only share.
+// Nothing off this machine can reach it, no tunnel process exists, and — like
+// LAN and quick — there is nothing in anybody's Cloudflare account to tear
+// down. It is still scoped, still pairing-gated and still time-boxed: the rung
+// decides REACH, never the other guarantees.
+func (r *shareRecord) isLocal() bool { return r.mode() == string(config.ModeLocal) }
 
 // isLAN reports whether this share has no tunnel and no DNS to tear down.
 func (r *shareRecord) isLAN() bool { return r.mode() == string(config.ModeLAN) }
@@ -139,7 +155,9 @@ func (r *shareRecord) isQuick() bool { return r.mode() == string(config.ModeQuic
 // hasCloudflareResources reports whether this share created anything in the
 // Cloudflare account that teardown has to delete. Only a named-tunnel share on
 // a real zone does.
-func (r *shareRecord) hasCloudflareResources() bool { return !r.isLAN() && !r.isQuick() }
+func (r *shareRecord) hasCloudflareResources() bool {
+	return !r.isLocal() && !r.isLAN() && !r.isQuick()
+}
 
 // CurrentURL re-resolves a LAN share's address every time it is asked for.
 //
@@ -147,6 +165,9 @@ func (r *shareRecord) hasCloudflareResources() bool { return !r.isLAN() && !r.is
 // worse than no URL — the daemon already re-resolves the main listener every
 // 30s, so `share list` does the same rather than printing history.
 func (r *shareRecord) CurrentURL() string {
+	if r.isLocal() {
+		return fmt.Sprintf("http://127.0.0.1:%d", r.Port)
+	}
 	if !r.isLAN() {
 		// A quick share's hostname is whatever the edge assigned this run; the
 		// instance writes it back to share.json as soon as it verifies, so the
@@ -341,16 +362,26 @@ func cmdShare(args []string) error {
 func shareUsage() {
 	fmt.Fprint(os.Stderr, `herdr-expose share — one scoped, time-boxed, self-destructing tunnel
 
-  share [--domain X | --quick | --lan] [--session NAME] [--pane TARGET]
+  share [--local | --lan | --quick | --domain X] [--session NAME] [--pane TARGET]
         [--hours N] [--days N] [--json]
         expose ONE herdr session (default: this one) for N hours (default 1)
-          --domain X  public https on X through a Cloudflare named tunnel
-          --quick     public https on a random *.trycloudflare.com — no account,
-                      no zone, no DNS, no API token, nothing to clean up
-          --lan       http://<lan-ip>:<port>, no DNS and no tunnel
-          none        auto: the configured domain when it is usable and
-                      cloudflared is installed, else --quick when cloudflared is
-                      installed, else --lan. The choice and reason are printed.
+
+        FOUR RUNGS. Every rung above the default is an explicit request.
+          (none)      http://<lan-ip>:<port>   — this machine and this
+                      network. THE DEFAULT: a share exists to be opened from
+                      somewhere else, and this goes no further than the wifi.
+          --lan       the same, said out loud (overrides [share] default_mode)
+          --quick     https://<random>.trycloudflare.com — anyone on the
+                      internet; no account, no zone, no DNS, no API token,
+                      nothing to clean up
+          --domain X  https://X — the internet, on a name you own
+          --local     http://127.0.0.1:<port>  — this machine only; an opt-IN
+                      for testing, not reachable by anybody you send it to
+
+        A failed EXPLICIT request degrades LOUDLY and says why (--quick with no
+        cloudflared installed falls back to --lan). Nothing ever escalates
+        above what you asked for: a bare 'share' never becomes a tunnel just
+        because [expose] has a domain configured.
   share list [--json]              list shares; reaps any whose deadline passed
   share extend <id> --hours N|--days N [--json]
   share pair <id> [--name NAME] [--json]
@@ -368,6 +399,11 @@ Every share expires. There is no permanent share: a long one is --days 30.
 // --- create -----------------------------------------------------------------
 
 type shareFlags struct {
+	// The four rungs of AMENDMENTS 16 L1. At most ONE may be set, and when
+	// none is, the share is LAN: this machine and this network, and not one
+	// hop further. Every rung above that is an explicit request, and `--local`
+	// is the explicit way DOWN, for testing.
+	local   bool
 	lan     bool
 	quick   bool
 	domain  string
@@ -421,6 +457,8 @@ func parseShareFlags(args []string) (shareFlags, error) {
 			}
 		case "--name":
 			f.name, err = next()
+		case "--local":
+			f.local = true
 		case "--lan":
 			f.lan = true
 		case "--quick":
@@ -438,6 +476,31 @@ func parseShareFlags(args []string) (shareFlags, error) {
 		f.hours = 1 // G1 default
 	}
 	return f, nil
+}
+
+// namedARung reports whether the command line asked for a specific rung.
+// `--local` counts: saying "local" out loud is how somebody with a different
+// `[share] default_mode` gets back to loopback for one share.
+func (f shareFlags) namedARung() bool {
+	return f.local || f.lan || f.quick || strings.TrimSpace(f.domain) != ""
+}
+
+// rung is the exposure the user ASKED for — the ceiling for this share.
+// Resolution may land below it (a loud, explained fallback) and may never land
+// above it (AMENDMENTS 16 L2).
+func (f shareFlags) rung() config.Rung {
+	switch {
+	case strings.TrimSpace(f.domain) != "":
+		return config.RungDomain
+	case f.quick:
+		return config.RungQuick
+	case f.local:
+		return config.RungLocal
+	default:
+		// Including `--lan`, and including no flag at all. The two are the
+		// same request; the flag only exists so it can be said explicitly.
+		return config.RungLAN
+	}
 }
 
 // ttl is the share's lifetime. It is always finite and always > 0.
@@ -468,20 +531,40 @@ func (f *shareFlags) applyConfigDefaults() error {
 	if !f.hoursSet && f.days == 0 && cfg.Share.DefaultHours > 0 {
 		f.hours = cfg.Share.DefaultHours
 	}
-	// `share --name review` with a configured suffix means review.<suffix>.
-	// Never when a transport was named explicitly: --quick and --lan mean the
-	// person does not want a hostname on the zone.
-	if strings.TrimSpace(f.domain) == "" && !f.lan && !f.quick {
-		if suffix := strings.TrimSpace(cfg.Share.DomainSuffix); suffix != "" && f.name != "" && f.name != "share" {
-			f.domain = f.name + "." + suffix
-		}
-	}
-	if strings.TrimSpace(f.domain) == "" && !f.lan && !f.quick {
-		switch cfg.Share.DefaultMode {
-		case "lan":
+	// The rung. AMENDMENTS 16 L1: a transport flag is an explicit request and
+	// the config never overrides one, so this whole block is skipped the
+	// moment the person named a rung on the command line.
+	//
+	// When they did NOT, `[share] default_mode` decides — and it ships as
+	// "lan". It is deliberately the ONLY config key that can move a bare
+	// `share` off the LAN: the withdrawn "auto" ladder used to consult
+	// `[expose] domain`, which meant an unrelated key set months ago for the
+	// permanent deployment silently put a session on the public internet.
+	// Setting default_mode is asking, in the same sense that typing --quick is
+	// asking; reading someone else's domain key is guessing.
+	if !f.namedARung() {
+		switch config.ShareRung(cfg.Share.DefaultMode) {
+		case config.RungLAN:
 			f.lan = true
-		case "quick":
+		case config.RungQuick:
 			f.quick = true
+		case config.RungLocal:
+			f.local = true
+		case config.RungDomain:
+			// `share --name review` with a configured suffix means
+			// review.<suffix>. Only reachable from default_mode = "domain":
+			// the suffix is a NAMING convention, and on its own it must never
+			// be what promotes a share to the public internet.
+			if suffix := strings.TrimSpace(cfg.Share.DomainSuffix); suffix != "" && f.name != "" && f.name != "share" {
+				f.domain = f.name + "." + suffix
+			} else if d := strings.TrimSpace(cfg.Expose.Domain); d != "" {
+				f.domain = d
+			} else {
+				return errors.New(`[share] default_mode = "domain" but no hostname is configured: ` +
+					`set [share] domain_suffix (and pass --name) or [expose] domain, or pass --domain X`)
+			}
+		default:
+			f.lan = true
 		}
 	}
 	if n := cfg.Share.MaxConcurrent; n > 0 {
@@ -506,116 +589,140 @@ func defaultSessionName() string {
 	return ""
 }
 
-// resolveShareMode decides domain vs quick vs lan through expose.Resolve — the
-// same resolver the main daemon uses (E1). There is deliberately no second set
-// of rules here: this function only chooses which [expose] table to hand it,
-// and explains the choice.
+// shareBinaryFound is the helper-binary probe expose.Resolve uses. It is a
+// package var ONLY so a test can say "pretend cloudflared is not installed"
+// and watch an explicit --quick degrade to lan instead of climbing anywhere.
+// nil means the real check.
+var shareBinaryFound func(string) bool
+
+// resolveShareMode turns the requested rung into a Resolution, through
+// expose.Resolve — the same resolver the main daemon uses (E1). There is
+// deliberately no second set of rules here: this function only chooses which
+// [expose] table to hand it, and explains the choice.
 //
-// The ladder (AMENDMENTS 15 K1), when no transport flag is given:
+// AMENDMENTS 16 L1 — THE LADDER IS CLIMBED, NEVER GUESSED:
 //
-//	usable configured domain AND cloudflared installed -> domain
-//	cloudflared installed                              -> quick
-//	otherwise                                          -> lan
+//	no flag / --lan  ->  lan     http://<lan-ip>:<port>  this machine + this network
+//	--quick          ->  quick   https://<rand>.trycloudflare.com
+//	--domain X       ->  domain  https://X
+//	--local          ->  local   127.0.0.1:<port>        explicit opt-IN, for testing
 //
-// "Usable" excludes a hostname that already belongs to something else — in
-// practice the permanent deployment, whose record is tagged `herdr-expose`. A
-// share may only ever create and delete records tagged `herdr-expose-share`, so
-// taking the daemon's hostname is not on the table.
+// LAN is the default because a SHARE exists to be reached from somewhere else.
+// Sitting at this machine you would just open the daemon on localhost:21118,
+// so a loopback-only share is the one rung that makes the feature pointless —
+// and binding 0.0.0.0 covers loopback and the network in one. (The daemon's
+// own [expose] default stays LOCAL, and that asymmetry is deliberate: same
+// principle, least exposure that still does the job, different job.)
 //
-// Before AMENDMENTS 15 that case fell all the way to LAN, which meant a share
-// needed a zone in the owner's Cloudflare account to reach the internet at all.
-// Quick removes that: it needs no account, no zone and no token.
+// There is no auto branch. The withdrawn AMENDMENTS 15 ladder resolved a bare
+// `share` as domain -> quick -> lan by consulting `[expose] domain`, which
+// meant the tool could publish a session to the public INTERNET because a
+// config key happened to be set for something else entirely. This binary runs
+// arbitrary commands inside the owner's agent sessions; the blast radius of
+// each rung differs by orders of magnitude — this machine, this room, the
+// entire internet — and the step from "this room" to "the entire internet"
+// must be a flag the person typed.
+//
+// L2 — FALLBACK ONLY EVER GOES DOWN. An explicit --quick or --domain with no
+// cloudflared resolvable degrades to lan with a printed reason, because the
+// person DID ask to be reachable and a LAN address is the nearest honest
+// answer. Nothing may move the other way, and the guard at the bottom of this
+// function enforces that by comparing rungs rather than trusting the branches.
 func resolveShareMode(ctx context.Context, f shareFlags, port int, tunnelName string) (expose.Resolution, config.Expose, error) {
+	res, e, err := resolveShareModeUnchecked(ctx, f, port, tunnelName)
+	if err != nil {
+		return expose.Resolution{}, config.Expose{}, err
+	}
+	// The invariant, checked rather than assumed: whatever the branches above
+	// decided, this share does not reach further than what was asked for. A
+	// future edit that reintroduces an auto-escalation fails HERE, loudly, at
+	// the one place every path passes through, instead of quietly publishing a
+	// session.
+	if got, want := config.RungOf(res.Mode), f.rung(); got > want {
+		return expose.Resolution{}, config.Expose{}, fmt.Errorf(
+			"refusing to expose further than you asked: requested %s (%s), resolved %s (%s). "+
+				"This is a bug in herdr-expose, not something you did — exposure never escalates (AMENDMENTS 16 L2)",
+			want, want.Reach(), got, got.Reach())
+	}
+	return res, e, nil
+}
+
+func resolveShareModeUnchecked(ctx context.Context, f shareFlags, port int, tunnelName string) (expose.Resolution, config.Expose, error) {
 	var none config.Expose
-	// Three transports, exactly one of them.
+	// Four rungs, exactly one of them.
 	named := 0
-	for _, on := range []bool{f.lan, f.quick, strings.TrimSpace(f.domain) != ""} {
+	for _, on := range []bool{f.local, f.lan, f.quick, strings.TrimSpace(f.domain) != ""} {
 		if on {
 			named++
 		}
 	}
 	if named > 1 {
 		return expose.Resolution{}, none, errors.New(
-			"--lan, --quick and --domain are mutually exclusive: pick a LAN address, " +
-				"a throwaway *.trycloudflare.com hostname, or a hostname on your own zone")
+			"--local, --lan, --quick and --domain are mutually exclusive: pick loopback, " +
+				"a LAN address, a throwaway *.trycloudflare.com hostname, or a hostname on your own zone")
 	}
 
-	if f.lan {
-		e := config.Expose{LAN: true}
-		return expose.Resolve(e, port, nil), e, nil
-	}
-
-	// Explicit --quick: no token is read, no zone is looked up, no DNS call is
-	// made. The ONLY precondition is cloudflared, and if it is missing the
-	// person asked for a public URL and must be told, not quietly put on the
-	// wifi.
-	if f.quick {
-		e := config.Expose{Quick: true}
-		res := expose.Resolve(e, port, nil)
-		if res.Mode != config.ModeQuick {
-			return expose.Resolution{}, none, fmt.Errorf("cannot start a quick tunnel: %s (pass --lan to expose on this network instead)",
-				res.FellBack)
-		}
-		return res, e, nil
-	}
-
-	// Explicit --domain: a failure here is a hard error, never a silent
-	// downgrade. The person asked for a public hostname on their own zone.
-	if d := strings.TrimSpace(f.domain); d != "" {
-		if _, rec, err := expose.CheckZoneAccess(ctx, d); err != nil {
-			return expose.Resolution{}, none, err
-		} else if rec.Exists && rec.Comment != expose.ShareDNSComment {
-			return expose.Resolution{}, none, fmt.Errorf("%s already has a DNS record tagged %q — a share only ever creates and deletes "+
-				"records tagged %q, so it will not take this hostname over. Pick another hostname",
-				d, rec.Comment, expose.ShareDNSComment)
-		}
-		e := config.Expose{Cloudflare: true, Domain: d, TunnelName: tunnelName}
-		res := expose.Resolve(e, port, nil)
-		if res.Mode != config.ModeCloudflare {
-			return expose.Resolution{}, none, fmt.Errorf("cannot share on %s: %s (pass --lan to expose on this network instead)",
-				d, res.FellBack)
-		}
-		return res, e, nil
-	}
-
-	// Auto. Every rung below the top one is an explained fallback, never a
-	// silent one: the owner must never have to guess which transport he got.
-	fallback := func(why string) (expose.Resolution, config.Expose, error) {
-		// Quick before LAN: it needs nothing but cloudflared, and a share that
-		// is only reachable from this wifi is a much bigger downgrade than a
-		// hostname that changes.
-		if quick := (config.Expose{Quick: true}); expose.Resolve(quick, port, nil).Mode == config.ModeQuick {
-			r := expose.Resolve(quick, port, nil)
-			r.FellBack = why + "; using a throwaway *.trycloudflare.com hostname instead " +
-				"(no account, no DNS, nothing to clean up)"
-			return r, quick, nil
-		}
+	// lan: fall back to a LAN address for an explicit tunnel request that
+	// cannot be honoured. Never reached from a bare `share` — that is the whole
+	// asymmetry of L2.
+	lanFallback := func(why string) (expose.Resolution, config.Expose, error) {
 		lan := config.Expose{LAN: true}
-		r := expose.Resolve(lan, port, nil)
-		r.FellBack = why + ", and cloudflared is not installed either"
+		r := expose.Resolve(lan, port, shareBinaryFound)
+		r.FellBack = why
 		return r, lan, nil
 	}
-	cfg, err := config.Load()
-	if err != nil {
-		return fallback("could not read the config, so no public domain is known")
+
+	switch {
+	// RUNG 1 — LOCAL, by explicit `--local` only. The zero Expose is local by
+	// construction, so this branch hands over a table with nothing switched
+	// on: no tunnel process, no DNS, no 0.0.0.0 bind. Kept as an opt-IN for
+	// testing; it is not the default, because a share nobody else can open is
+	// not a share. On loopback the F1 local-mode bypass applies — see
+	// internal/serve/localmode.go, where Origin allowlisting and Host pinning
+	// replace the device token rather than removing it.
+	case f.local:
+		e := config.Expose{}
+		return expose.Resolve(e, port, shareBinaryFound), e, nil
+
+	// RUNG 2 — LAN. The DEFAULT, and the case for a bare `share`. Cannot fail,
+	// and must never be "upgraded": a person who asked for the wifi — or who
+	// asked for nothing at all — did not ask for the internet. Binding
+	// 0.0.0.0 covers loopback too, so the owner's own browser still works.
+	case f.lan || (!f.quick && strings.TrimSpace(f.domain) == ""):
+		e := config.Expose{LAN: true}
+		return expose.Resolve(e, port, shareBinaryFound), e, nil
+
+	// RUNG 3 — QUICK. No token is read, no zone is looked up, no DNS call is
+	// made; the ONLY precondition is cloudflared. Missing it degrades to lan
+	// with the reason printed, because the ask was "make this reachable".
+	case f.quick:
+		e := config.Expose{Quick: true}
+		res := expose.Resolve(e, port, shareBinaryFound)
+		if res.Mode != config.ModeQuick {
+			return lanFallback("you asked for a quick tunnel, but " + res.FellBack)
+		}
+		return res, e, nil
 	}
-	domain := strings.TrimSpace(cfg.Expose.Domain)
-	if domain == "" {
-		return fallback("no domain is configured under [expose], so there is no hostname of your own to put a share on")
+
+	// RUNG 4 — DOMAIN. cloudflared first (a missing binary is an environment
+	// problem and degrades to lan), then the zone. A hostname that belongs to
+	// something else is a mistake in the ARGUMENT, so it is a hard error with
+	// the fix in it: silently putting that share on the wifi instead would not
+	// be what the person meant by `--domain`.
+	d := strings.TrimSpace(f.domain)
+	e := config.Expose{Cloudflare: true, Domain: d, TunnelName: tunnelName}
+	res := expose.Resolve(e, port, shareBinaryFound)
+	if res.Mode != config.ModeCloudflare {
+		return lanFallback(fmt.Sprintf("you asked to share on %s, but %s", d, res.FellBack))
 	}
-	if res := expose.Resolve(config.Expose{Cloudflare: true, Domain: domain}, port, nil); res.Mode != config.ModeCloudflare {
-		return fallback(res.FellBack)
+	if _, rec, err := expose.CheckZoneAccess(ctx, d); err != nil {
+		return expose.Resolution{}, none, err
+	} else if rec.Exists && rec.Comment != expose.ShareDNSComment {
+		return expose.Resolution{}, none, fmt.Errorf("%s already has a DNS record tagged %q — a share only ever creates and deletes "+
+			"records tagged %q, so it will not take this hostname over. Pick another hostname",
+			d, rec.Comment, expose.ShareDNSComment)
 	}
-	_, rec, err := expose.CheckZoneAccess(ctx, domain)
-	if err != nil {
-		return fallback(fmt.Sprintf("the zone for %s is not reachable with the configured Cloudflare token (%v)", domain, err))
-	}
-	if rec.Exists && rec.Comment != expose.ShareDNSComment {
-		return fallback(fmt.Sprintf("%s is the permanent deployment's hostname (record tagged %q), which a share must never take over",
-			domain, rec.Comment))
-	}
-	e := config.Expose{Cloudflare: true, Domain: domain, TunnelName: tunnelName}
-	return expose.Resolve(e, port, nil), e, nil
+	return res, e, nil
 }
 
 func cmdShareCreate(args []string) (err error) {
@@ -689,9 +796,12 @@ func cmdShareCreate(args []string) (err error) {
 		return err
 	}
 	if res.FellBack != "" {
-		// ONE clear line naming the choice and the reason. The owner must never
-		// have to guess which of the three transports he got.
-		fmt.Fprintf(os.Stderr, "\n  NOTE: using %s — %s\n\n", shareTransportName(res.Mode), res.FellBack)
+		// ONE clear line naming the rung actually chosen and the reason. A
+		// fallback only ever goes DOWN (L2), so this line always reports LESS
+		// reach than was asked for — never more — and the owner never has to
+		// guess which rung he got.
+		fmt.Fprintf(os.Stderr, "\n  NOTE: falling back to %s (%s) — %s\n\n",
+			shareTransportName(res.Mode), res.Reach(), res.FellBack)
 	}
 
 	dir, err := shareDirFor(id)
@@ -776,14 +886,30 @@ func cmdShareCreate(args []string) (err error) {
 	}
 	fmt.Printf("\n  shared %s on %s\n\n", scope.String(), url)
 	printQR(url + "/?pair=" + code)
-	fmt.Printf("\n  url:           %s\n  mode:          %s\n  pairing code:  %s  (valid until %s)\n",
-		url, final.mode(), code, codeExp.Format(time.Kitchen))
+	// The RUNG and its reach, stated plainly, at the top of the block. Which
+	// of the four ladders this share is on is the single most consequential
+	// fact about it, so it is never left to be inferred from the URL.
+	fmt.Printf("\n  url:           %s\n  exposure:      %s — %s\n  pairing code:  %s  (valid until %s)\n",
+		url, final.mode(), final.rung().Reach(), code, codeExp.Format(time.Kitchen))
 	fmt.Printf("  scope:         %s  (nothing else on this machine is in this instance's tree)\n", scope.String())
 	switch {
+	case final.isLocal():
+		fmt.Printf("  expires:       %s  (in %s) — the instance exits and its state is wiped then\n",
+			final.ExpiresAt.Format(time.RFC1123), time.Until(final.ExpiresAt).Round(time.Minute))
+		fmt.Printf("  reachable by:  nothing off this machine. No tunnel was started, no DNS record\n" +
+			"                 exists, and the port is bound to 127.0.0.1 — not to the network.\n")
+		fmt.Printf("  still guarded: a web page you visit CANNOT drive this. Local mode swaps the\n" +
+			"                 device token for a strict Origin allowlist and Host pinning (F1),\n" +
+			"                 both enforced here exactly as on any other rung.\n")
+		fmt.Printf("  note:          --local is an opt-IN for testing, so this link works for NOBODY\n" +
+			"                 you send it to. Drop the flag for the LAN default, or:\n" +
+			"                 herdr-expose share --quick   (anyone on the internet)\n" +
+			"                 herdr-expose share --domain X\n")
 	case final.isLAN():
 		fmt.Printf("  expires:       %s  (in %s) — the instance exits and its state is wiped then\n",
 			final.ExpiresAt.Format(time.RFC1123), time.Until(final.ExpiresAt).Round(time.Minute))
-		fmt.Printf("  reachable by:  anyone on this network who ALSO has the pairing code above\n")
+		fmt.Printf("  reachable by:  anyone on this network who ALSO has the pairing code above.\n" +
+			"                 NOT the internet: no tunnel was started and no DNS record exists.\n")
 		fmt.Printf("  not installable: plain HTTP on a LAN IP is not a secure context, so no PWA install\n" +
 			"                   and no service worker (that is the mode, not a bug)\n")
 		fmt.Printf("  note:          this QR goes stale if the DHCP lease changes the LAN IP —\n"+
@@ -809,10 +935,12 @@ func cmdShareCreate(args []string) (err error) {
 	return nil
 }
 
-// shareTransportName names a resolved mode the way the three flags do, so the
-// one-line explanation reads as an answer to "which transport did I get?".
+// shareTransportName names a resolved mode the way the four flags do, so the
+// one-line explanation reads as an answer to "which rung did I get?".
 func shareTransportName(m config.Mode) string {
 	switch m {
+	case config.ModeLocal:
+		return "this machine only (--local)"
 	case config.ModeQuick:
 		return "a quick tunnel (--quick)"
 	case config.ModeLAN:
@@ -1177,6 +1305,8 @@ func printTeardown(r teardownResult) {
 	}
 	fmt.Printf("  process      %s\n", mark(r.ProcessGone))
 	switch {
+	case r.Mode == string(config.ModeLocal):
+		fmt.Printf("  dns/tunnel   n/a (local share: it never left this machine)\n")
 	case r.Mode == string(config.ModeLAN):
 		fmt.Printf("  dns/tunnel   n/a (LAN share: nothing was ever created)\n")
 	case r.Mode == string(config.ModeQuick):
@@ -1232,21 +1362,24 @@ func revokeShareRecord(rec *shareRecord) teardownResult {
 	// 1. the process
 	res.ProcessGone = killShareProcess(rec.PID)
 
-	// A LAN share and a QUICK share both have no DNS record and no named
-	// tunnel, so the Cloudflare path is SKIPPED rather than run and no-opped:
+	// A LOCAL, LAN or QUICK share has no DNS record and no named tunnel, so
+	// the Cloudflare path is SKIPPED rather than run and no-opped:
 	// no API call, no token read, nothing that can fail. Teardown is exactly
 	// "process gone, port free, state wiped" — and `revoke --all` / `panic`
-	// therefore handle a mix of lan + quick + domain shares in one pass,
-	// without one transport's failure aborting the others.
+	// therefore handle a mix of local + lan + quick + domain shares in one
+	// pass, without one rung's failure aborting the others.
 	//
 	// A quick tunnel additionally leaves a cloudflared behind if the instance
 	// was SIGKILLed, so it is matched on the --url argument derived from this
 	// share's own port and killed. Matching on a derived argument rather than
 	// on the binary name is what keeps this away from the permanent
 	// deployment's cloudflared, which runs with --config.
-	if rec.isLAN() || rec.isQuick() {
+	if rec.isLocal() || rec.isLAN() || rec.isQuick() {
 		res.DNSGone, res.TunnelGone, res.CloudflareNA = true, true, true
 		bindAddr := fmt.Sprintf("0.0.0.0:%d", rec.Port)
+		if rec.isLocal() {
+			bindAddr = fmt.Sprintf("127.0.0.1:%d", rec.Port)
+		}
 		if rec.isQuick() {
 			pattern := expose.QuickURLPattern(rec.Port)
 			killStrayCloudflared(pattern)
@@ -1557,10 +1690,16 @@ func cmdShareRun(args []string) error {
 	}
 
 	// The [expose] table is rebuilt from the RECORD, so the instance resolves
-	// the same mode it was created with — a LAN share never tries a tunnel and
-	// a tunnel share never silently degrades to LAN on restart.
+	// the same rung it was created with. This is where "never escalate"
+	// survives a RESTART: a local share comes back on loopback, a LAN share
+	// never tries a tunnel, and a tunnel share never silently degrades to LAN.
+	// Nothing here consults the config file, so editing [expose] under a live
+	// share cannot move it up the ladder either.
 	exp := config.Expose{LAN: true}
 	switch {
+	case rec.isLocal():
+		// The zero table: loopback, no tunnel, nothing to start.
+		exp = config.Expose{}
 	case rec.isQuick():
 		// Quick is reconstructed from the record too, so a restored share
 		// stays quick and never silently acquires a domain — and, just as

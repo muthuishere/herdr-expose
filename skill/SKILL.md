@@ -1,6 +1,6 @@
 ---
 name: herdr-share
-description: Expose ONE Herdr agent session as a private web URL — on this network, on a throwaway *.trycloudflare.com hostname, or on a domain you own — for a bounded time, then have it destroy itself. Use when the owner says "expose this session", "share this agent", "give me a URL for this pane", "put this agent on <domain>", "quick share this", "share it without a domain", "let someone see this agent", "share my terminal", "list my shares", "extend that share", "revoke the share", "stop all shares", or "panic / kill every exposure". Wraps the herdr-expose CLI: one scoped detached server plus a lan address, a quick tunnel or a Cloudflare named tunnel, always time-boxed, always pairing-gated.
+description: Expose ONE Herdr agent session as a private web URL — on this network by default, or (only when asked) on a throwaway *.trycloudflare.com hostname or a domain you own — for a bounded time, then have it destroy itself. Use when the owner says "expose this session", "share this agent", "give me a URL for this pane", "put this agent on <domain>", "quick share this", "share it without a domain", "let someone see this agent", "share my terminal", "list my shares", "extend that share", "revoke the share", "stop all shares", or "panic / kill every exposure". Wraps the herdr-expose CLI: one scoped detached server plus a lan address, a quick tunnel or a Cloudflare named tunnel, always time-boxed, always pairing-gated.
 ---
 
 # herdr-share
@@ -20,10 +20,10 @@ command -v herdr-expose || echo "build it: cd ~/muthu/gitworkspace/herdr-plugins
 herdr-expose status --json | jq -r '.mode, .listen'
 ```
 
-- `--quick` and `--lan` need **nothing but cloudflared** (and `--lan` not even
-  that). No Cloudflare account, no zone, no token, no DNS. If all you need is a
-  URL, that is the whole precondition.
-- `--domain` is the only transport with real preconditions:
+- The **default (LAN) rung and `--local` need nothing at all**, and `--quick`
+  needs nothing but cloudflared. No Cloudflare account, no zone, no token, no
+  DNS. If all you need is a URL, that is the whole precondition.
+- `--domain` is the only rung with real preconditions:
   - The **domain's zone must live in the Cloudflare account** the token reaches.
     `*.deemwar.com` works. An arbitrary domain does not. The CLI checks zone
     access before creating anything and fails clearly — do not pre-empt it with
@@ -34,45 +34,67 @@ herdr-expose status --json | jq -r '.mode, .listen'
 
 ## Create a share
 
-Three transports, one ladder:
+### Pick the rung the owner actually asked for
 
-| flag | URL | needs | cleans up |
-|---|---|---|---|
-| `--lan` | `http://<lan-ip>:<port>` | nothing | process + state |
-| `--quick` | `https://<random>.trycloudflare.com` | cloudflared | process + state |
-| `--domain X` | `https://X` | cloudflared + a zone the token reaches | process + state + DNS + tunnel |
+Four rungs. **The ladder is climbed, never guessed** (AMENDMENTS 16): no flag
+means LAN, and every rung above that is an explicit request.
+
+| rung | flag | reach | needs | cleans up |
+|---|---|---|---|---|
+| **lan** | **none** (default) | this machine + this network | nothing | process + state |
+| quick | `--quick` | anyone on the internet | cloudflared | process + state |
+| domain | `--domain X` | the internet, on a name the owner owns | cloudflared + a zone the token reaches | process + state + DNS + tunnel |
+| local | `--local` | this machine only (testing) | nothing | process + state |
+
+**When the owner just says "share this" / "give me a URL for this pane", run a
+bare `herdr-expose share`.** That is LAN, and it is almost always what they
+meant: a phone on the same wifi opens it. Do NOT reach for `--quick` to be
+helpful — that is the public internet, and putting an agent session there is
+the owner's call to make, not yours. Ask, or wait to be told.
+
+Escalate only on an actual signal:
+
+| the owner says | run |
+|---|---|
+| "share this", "give me a URL", "let me open it on my phone" | `herdr-expose share --json` |
+| "I'm not on the same wifi", "send it to <someone elsewhere>", "public link", "quick share" | `herdr-expose share --quick --json` |
+| "put it on <hostname>", "use our domain", "a stable link" | `herdr-expose share --domain X --json` |
+| "just for me to test locally" | `herdr-expose share --local --json` |
 
 ```bash
-# On this network, one hour. No domain, no DNS, no tunnel — works offline.
-herdr-expose share --lan --json
+# THE DEFAULT. This network, one hour. No domain, no DNS, no tunnel; works offline.
+herdr-expose share --json
 
 # Public, in about ten seconds, with NO Cloudflare account and nothing to
-# clean up afterwards. Zero setup — this is the one that works anywhere.
+# clean up afterwards. Only when the owner asked to be reachable off the wifi.
 herdr-expose share --quick --json
 
 # Public, on a hostname in a zone the Cloudflare token reaches.
 herdr-expose share --domain agent1.deemwar.com --json
-
-# No flag = auto: the configured domain when it is usable and cloudflared is
-# installed, else --quick when cloudflared is installed, else --lan. It prints
-# one line saying which it chose and why.
-herdr-expose share --json
 
 # A specific session, or a single pane, for longer.
 herdr-expose share --domain review.deemwar.com --session crypto-desk --days 7 --json
 herdr-expose share --quick --pane herdr-plugins/w2:p1 --hours 4 --json
 ```
 
-Defaults: the session you are running in, and `--hours 1`. `--lan`, `--quick`
-and `--domain` are mutually exclusive. `[share] default_mode` in the config
-(`auto | lan | quick | domain`) sets the default when no flag is given.
+Defaults: the session you are running in, `--hours 1`, and the **LAN** rung.
+`--local`, `--lan`, `--quick` and `--domain` are mutually exclusive. `[share]
+default_mode` in the config (`local | lan | quick | domain`, shipped `lan`) sets
+the rung when no flag is given.
 
-**Auto never takes the permanent deployment's hostname** — that would hijack the
-daemon's own URL, and a share may only ever create or delete records tagged
-`herdr-expose-share`. So on this machine auto resolves to `--quick`: still
-public, still https, just on a throwaway hostname. If the owner wants a stable
-public name, pass `--domain` with a hostname of its own; a failure there is a
-hard error rather than a silent downgrade.
+**Nothing escalates on its own.** A bare `share` never becomes a tunnel because
+`[expose] domain` happens to be configured — that auto-escalation was withdrawn
+precisely because it published sessions nobody asked to publish. Report the rung
+you got (`.share.mode` in the JSON) rather than assuming.
+
+**Fallback only goes down, loudly.** An explicit `--quick` or `--domain` with no
+cloudflared installed degrades to LAN and prints why. If the owner needed the
+public URL, install cloudflared and re-run — do not paper over it.
+
+**`--domain` never takes the permanent deployment's hostname** — that would
+hijack the daemon's own URL, and a share may only ever create or delete records
+tagged `herdr-expose-share`. That collision is a hard error naming the fix, not
+a silent downgrade.
 
 **The one thing to say when you hand over a quick URL:** its hostname is new
 every time, and device tokens are origin-bound, so a phone paired to a previous

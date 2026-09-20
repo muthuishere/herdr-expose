@@ -16,11 +16,15 @@ That is the whole thing. It builds, sets up, asserts, and tears down.
 1. Builds `web/dist` and the Go binary into a temp dir.
 2. Starts its **own** throwaway Herdr session (`hexe2e-<n>`), with three panes:
    an agent pane (`claude`), and two plain shells.
-3. `share --lan --hours 1` on that session only, and mints a pairing code.
-4. Drives Chromium through the pairing screen, the `?pair=` deep link, the pane
+3. Asserts the AMENDMENTS 16 default: a BARE `share` (no transport flag) must
+   resolve to the **lan** rung — a plain-HTTP LAN URL, no tunnel process, no
+   Cloudflare credentials, no DNS — even though `[expose]` on this machine has
+   a domain configured. That share is revoked immediately.
+4. `share --lan --hours 1` on that session only, and mints a pairing code.
+5. Drives Chromium through the pairing screen, the `?pair=` deep link, the pane
    tree, the terminal, typing, the blocked-agent panel, a 65-second idle soak
    and a 375px viewport.
-5. Revokes the share, stops the session, deletes it, and sweeps for orphans.
+6. Revokes the share, stops the session, deletes it, and sweeps for orphans.
 
 Teardown runs from a shell trap, so it happens on failure and on Ctrl-C too.
 
@@ -81,7 +85,8 @@ It only ever touches what it created:
 
 - the session name is forced to start with `hexe2e-`;
 - every `herdr` call is pinned to that session's socket by environment;
-- the share is `--lan`, scoped with `--session`, and expires in an hour;
+- every share it creates is LAN-or-lower, scoped with `--session`, and expires
+  in an hour — it never raises a tunnel and never touches DNS;
 - teardown revokes the share, stops only its own server, and reports (does not
   kill) anything left holding the session name;
 - afterwards it checks that the daemon on `:21118` still answers `/healthz`.

@@ -10,14 +10,43 @@ import (
 	"github.com/muthuishere/herdr-expose/internal/config"
 )
 
-// Exposure modes (AMENDMENT E1), resolved in this order:
+// Exposure modes (AMENDMENT E1), on the four-rung ladder of AMENDMENTS 16 L1:
 //
-//  1. a tunnel mode — cloudflare (or ngrok, or a JS adapter). Binds loopback;
-//     the tunnel is the only remote path.
-//  2. lan — binds 0.0.0.0, reachable by anyone on the wifi. Chosen when
-//     `lan = true`, or AUTOMATICALLY when a tunnel was requested but its
-//     binary is not installed. That fallback logs loudly; it never fails.
-//  3. local — binds loopback. The default.
+//	local   127.0.0.1:<port>                  this machine only
+//	lan     http://<lan-ip>:<port>            this machine + this network
+//	quick   https://<rand>.trycloudflare.com  the internet
+//	domain  https://<your host>               the internet, your name
+//
+// The DEFAULT differs by caller, and deliberately so: the DAEMON defaults to
+// local (it serves whoever is sitting at this machine, who just opens
+// localhost:21118), while a SHARE defaults to lan (it exists to be opened from
+// somewhere else, so loopback-only would make the feature pointless). Same
+// principle — the least exposure that still does the job — applied to two
+// different jobs. Both defaults live at the CALLER, in the [expose] table it
+// builds; this function never picks one.
+//
+// Resolve is a PURE FUNCTION of the [expose] table it is handed: every rung
+// above local has to be switched on in that table, and this function never
+// turns one on by itself. Nothing here reads a config file, so the only way to
+// climb is for the caller to ask — `share --quick` / `--domain` build the
+// table from the FLAG, a bare `share` builds the LAN table, and `--local`
+// hands over a zero Expose, which is loopback by construction
+// (AMENDMENTS 16 L1).
+//
+// The ONE automatic movement is DOWNWARD: a requested tunnel whose binary is
+// not installed falls back to lan, loudly, via FellBack. That is a failure
+// mode of an explicit ask, not a default — the person did ask to be reachable,
+// and a LAN address is the nearest honest answer. Nothing in here can move
+// UPWARD (L2): every branch below either keeps the requested rung or lowers
+// it, and cmd/herdr-expose's TestResolveNeverEscalates holds the whole table
+// of user-requestable rungs to that.
+//
+// Why the asymmetry is worth the inconvenience: this binary runs arbitrary
+// commands inside the owner's agent sessions, and the blast radius of each
+// rung differs by orders of magnitude. The difference between rung 1 and rung
+// 3 must never be a config key somebody forgot they set, because that is what
+// makes the pairing, scope and TTL guarantees elsewhere in this spec mean
+// anything.
 //
 // LAN mode is only acceptable because auth is mandatory in every mode and the
 // pairing code is shown ONLY on the physically-present machine: no HTTP
@@ -92,8 +121,23 @@ func (r Resolution) AllowedOrigins(configured []string) []string {
 	return out
 }
 
+// Rung is where this resolution sits on the exposure ladder (AMENDMENTS 16
+// L1). Callers compare rungs rather than re-deriving "is this more exposed
+// than that" from a mode name.
+func (r Resolution) Rung() config.Rung { return config.RungOf(r.Mode) }
+
+// Reach is the plain-language answer to "who can actually get at this?", for
+// the line printed when an exposure is created.
+func (r Resolution) Reach() string { return r.Rung().Reach() }
+
 // Resolve decides the mode. binaryFound reports whether a helper binary is
 // installed; pass nil for the real check.
+//
+// It starts at the bottom rung and only climbs where the [expose] table it was
+// handed explicitly asks it to (AMENDMENTS 16 L1). A zero Expose therefore
+// resolves to loopback, which is what makes the daemon's local default — and
+// `share --local` — true by construction rather than by a default somewhere up
+// the call stack.
 func Resolve(e config.Expose, port int, binaryFound func(string) bool) Resolution {
 	if binaryFound == nil {
 		binaryFound = func(name string) bool {
@@ -101,6 +145,8 @@ func Resolve(e config.Expose, port int, binaryFound func(string) bool) Resolutio
 			return err == nil
 		}
 	}
+	// The floor. Every branch below either leaves this alone or is a rung the
+	// caller explicitly switched on.
 	r := Resolution{Port: port, Bind: config.BindLoopback, Mode: ModeLocal}
 
 	// Quick (AMENDMENTS 15) is checked FIRST and is deliberately unreachable
@@ -180,6 +226,11 @@ func (r Resolution) Describe() string {
 	fmt.Fprintf(&b, "expose: mode=%s bind=%s:%d url=%s", r.Mode, r.Bind, r.Port, url)
 	if r.FellBack != "" {
 		fmt.Fprintf(&b, " (fallback: %s)", r.FellBack)
+	}
+	fmt.Fprintf(&b, " reach=%q", r.Reach())
+	if r.Mode == ModeLocal {
+		b.WriteString(" — loopback only: nothing off this machine can reach it, " +
+			"and the Origin allowlist plus Host pinning still stand between it and any web page you visit.")
 	}
 	if r.Mode == ModeLAN {
 		b.WriteString(" — WARNING: anyone on this network can reach the port. " +

@@ -42,8 +42,23 @@ const (
 
 	// [share] — AMENDMENTS 9/10: every share is time-boxed, so these are
 	// defaults for a TTL, never a way to switch time-boxing off.
-	DefaultShareHours      = 1.0
-	DefaultShareMode       = "auto"
+	DefaultShareHours = 1.0
+	// DefaultShareMode is `lan` (AMENDMENTS 16 L1): the least exposure that
+	// still does the job a SHARE exists to do.
+	//
+	// Note the deliberate asymmetry with the daemon, whose [expose] default is
+	// LOCAL and stays that way. Same principle, different job: the daemon
+	// serves the person sitting at this machine, who just opens
+	// localhost:21118, so loopback is right there. A share's entire reason to
+	// exist is reach — nobody hands someone a link they cannot open — so a
+	// loopback-only share is the one rung that makes the feature pointless.
+	//
+	// What this is NOT is the old "auto", which resolved domain -> quick ->
+	// lan and could put a session on the public internet because an unrelated
+	// `[expose] domain` key happened to be set. LAN covers loopback AND this
+	// network in one bind and stops there; every rung above it is still an
+	// explicit request.
+	DefaultShareMode       = "lan"
 	DefaultShareConcurrent = 10
 
 	// [log] — a real FILE by default, rotated in-process. A detached daemon's
@@ -78,6 +93,95 @@ const (
 	BindLoopback = "127.0.0.1"
 	BindAll      = "0.0.0.0"
 )
+
+// Rung is the exposure ladder of AMENDMENTS 16 L1, expressed as an ORDER.
+//
+// The whole point of the amendment is that exposure never climbs above what
+// the user asked for, and that is a property about ORDERING — "the resolved
+// mode is <= the requested mode" — not about any particular pair of modes. So
+// it is a comparison the code can actually make, and a test can assert, rather
+// than an invariant a reviewer has to re-derive from a chain of if-statements.
+//
+// The blast radius of each rung differs by orders of magnitude: this machine,
+// this room, the entire internet. This binary runs arbitrary commands inside
+// the owner's agent sessions, so the distance between rung 0 and rung 2 must
+// never be a config key somebody forgot they set. That is what makes the
+// pairing, scope and TTL guarantees elsewhere in this spec mean anything.
+type Rung int
+
+const (
+	RungLocal  Rung = iota // 127.0.0.1 — this machine only
+	RungLAN                // http://<lan-ip>:<port> — anyone on this network
+	RungQuick              // https://<random>.trycloudflare.com — the internet
+	RungDomain             // https://<your host> — the internet, on a name you own
+)
+
+func (r Rung) String() string {
+	switch r {
+	case RungLocal:
+		return "local"
+	case RungLAN:
+		return "lan"
+	case RungQuick:
+		return "quick"
+	case RungDomain:
+		return "domain"
+	}
+	return "unknown"
+}
+
+// Reach is the one-line, plain-language answer to "who can get at this?".
+// It is printed at create time so the chosen rung is never something the
+// person has to infer from a URL.
+func (r Rung) Reach() string {
+	switch r {
+	case RungLocal:
+		return "this machine only"
+	case RungLAN:
+		return "anyone on this network"
+	case RungQuick:
+		return "anyone on the internet"
+	case RungDomain:
+		return "anyone on the internet"
+	}
+	return "unknown"
+}
+
+// RungOf maps a resolved Mode onto the ladder. The tunnel modes that are not
+// on the share ladder (ngrok, a JS adapter) are still the internet, so they
+// sort at the top: an unknown mode must never look SAFER than it is.
+func RungOf(m Mode) Rung {
+	switch m {
+	case ModeLocal:
+		return RungLocal
+	case ModeLAN:
+		return RungLAN
+	case ModeQuick:
+		return RungQuick
+	default:
+		return RungDomain
+	}
+}
+
+// ShareRung reads the [share] default_mode key as a rung.
+//
+// An unrecognised or empty value — including the withdrawn "auto" — means LAN,
+// the shipped default. The failure mode of a misread config key is therefore
+// a share that reaches this machine and this network and stops: never a tunnel,
+// never the public internet. Nothing above RungLAN is reachable from this
+// function without the key spelling it out.
+func ShareRung(defaultMode string) Rung {
+	switch strings.ToLower(strings.TrimSpace(defaultMode)) {
+	case "local":
+		return RungLocal
+	case "quick":
+		return RungQuick
+	case "domain":
+		return RungDomain
+	default:
+		return RungLAN
+	}
+}
 
 // Server is the [server] table.
 type Server struct {
@@ -124,7 +228,17 @@ type Share struct {
 	DomainSuffix string `toml:"domain_suffix" json:"domain_suffix"`
 	// DefaultHours is the TTL used when neither --hours nor --days is given.
 	DefaultHours float64 `toml:"default_hours" json:"default_hours"`
-	// DefaultMode is auto | lan | quick | domain.
+	// DefaultMode is local | lan | quick | domain — the rung a `share` with no
+	// transport flag climbs to. It ships as "lan" (AMENDMENTS 16 L1) and
+	// exists only so somebody with a different personal default can set one;
+	// it is never a way for a rung to be reached by accident, because the
+	// person who edits this file is asking for it in exactly the same sense
+	// that typing `--quick` asks for it.
+	//
+	// "auto" is the WITHDRAWN AMENDMENTS 15 ladder (domain -> quick -> lan).
+	// It still loads, so an existing config file keeps working, but it now
+	// means `lan`: the reading of the old key that cannot put anything on the
+	// public internet that the user did not ask to put there. See ShareRung.
 	DefaultMode string `toml:"default_mode" json:"default_mode"`
 	// MaxConcurrent caps live shares.
 	MaxConcurrent int `toml:"max_concurrent" json:"max_concurrent"`
@@ -519,9 +633,16 @@ func (c *Config) Validate() error {
 
 func (c *Config) validateShare() error {
 	switch c.Share.DefaultMode {
-	case "auto", "lan", "quick", "domain":
+	// "auto" is the withdrawn AMENDMENTS 15 ladder. It stays LOADABLE so that
+	// a config file written before AMENDMENTS 16 does not break, but it now
+	// resolves to `lan` (see ShareRung) — a reading of the old key that cannot
+	// publish a session the user never asked to publish.
+	case "local", "auto", "lan", "quick", "domain":
 	default:
-		return fmt.Errorf("share.default_mode %q is not one of auto|lan|quick|domain", c.Share.DefaultMode)
+		return fmt.Errorf("share.default_mode %q is not one of local|lan|quick|domain "+
+			"(the default is \"lan\": a share reaches this machine and this network, and goes "+
+			"no further unless you ask it to with --quick or --domain)",
+			c.Share.DefaultMode)
 	}
 	if c.Share.DefaultHours <= 0 {
 		return fmt.Errorf("share.default_hours must be positive, got %v — every share is time-boxed (AMENDMENTS 10); "+

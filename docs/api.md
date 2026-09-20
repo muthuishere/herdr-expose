@@ -63,7 +63,15 @@ This API can run arbitrary commands on the machine hosting it. `pane.run` and
 `agent.prompt` are, by design, remote code execution as the logged-in user.
 
 The server runs in one of **four exposure modes**, and the mode decides both the
-bind address and whether you need a token:
+bind address and whether you need a token.
+
+**The mode is always something a human asked for** (AMENDMENTS 16). The ladder —
+`local` -> `lan` -> `quick` -> `cloudflare` — is climbed only by an explicit
+flag or config key, never automatically: the daemon defaults to `local`, a
+`share` defaults to `lan`, and nothing escalates above what was requested. A
+failed explicit request for a tunnel may degrade DOWN to `lan`, with the reason
+in `fell_back`. As a client, read `mode` and `secure_context` from
+`GET /v1/config` and `status`; never infer reach from the URL you were handed.
 
 | mode | bind | device token | Origin + Host pinning | secure context |
 |---|---|---|---|---|
@@ -72,14 +80,16 @@ bind address and whether you need a token:
 | `quick` | `127.0.0.1` + tunnel | **required** | required | yes |
 | `cloudflare` | `127.0.0.1` + tunnel | **required** | required | yes |
 
-- **`local`** — the default. Anyone who can reach loopback already has shell on
-  the box, so no token is required. Origin and Host pinning replace it, and they
+- **`local`** — the **daemon's** default, and `herdr-expose share --local`.
+  Anyone who can reach loopback already has shell on the box, so no token is
+  required. Origin and Host pinning replace it, and they
   are strictly enforced: only `http://127.0.0.1:<port>` and
   `http://localhost:<port>` are accepted, a **missing `Origin` on a WebSocket
   upgrade is rejected**, and a `Host` that does not match is rejected. That is
   what defeats DNS rebinding, which is the real attack on a loopback service.
-- **`lan`** — bound to `0.0.0.0`, reachable by anyone on the wifi. A device token
-  is mandatory. **Plain HTTP on a LAN IP is not a secure context**, so
+- **`lan`** — bound to `0.0.0.0`, reachable by anyone on the wifi, and the
+  **default for `herdr-expose share`** (AMENDMENTS 16). A device token is
+  mandatory. **Plain HTTP on a LAN IP is not a secure context**, so
   `status.secure_context` is `false`, **the service worker does not register and
   the PWA cannot be installed**. Your client must detect this and not offer an
   install prompt that cannot work. A native mobile client is unaffected.

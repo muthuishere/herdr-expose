@@ -32,6 +32,7 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/hexe2e.XXXXXX")"
 SESSION_DIR="$HOME/.config/herdr/sessions/$SESSION"
 BIN="${HEX_BIN:-$WORK/herdr-expose}"
 SHARE_ID=""
+BARE_ID=""
 SERVER_PID=""
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
@@ -52,6 +53,7 @@ teardown() {
   fi
   log "teardown"
   [ -n "$SHARE_ID" ] && "$BIN" share revoke "$SHARE_ID" >/dev/null 2>&1 || true
+  [ -n "$BARE_ID" ] && "$BIN" share revoke "$BARE_ID" >/dev/null 2>&1 || true
   hx server stop >/dev/null 2>&1 || true
   sleep 1
   herdr session delete "$SESSION" >/dev/null 2>&1 || true
@@ -111,6 +113,44 @@ BLOCKED_PANE=w1:p3
 # TITLE and carries no `label` field, so today they do not.
 hx pane rename "$SHELL_PANE"   hexe2e-idle    >/dev/null
 hx pane rename "$BLOCKED_PANE" hexe2e-blocked >/dev/null
+
+# ------------------------------------------------- AMENDMENTS 16: the default
+# A BARE `share` — no transport flag at all — must land on the LAN rung and
+# nowhere above it: a LAN URL, no tunnel process, and no DNS record. This is
+# the whole point of AMENDMENTS 16, and it is asserted against the real binary
+# on a real machine where [expose] HAS a domain configured, because that is
+# exactly the config that used to make a bare share public.
+log "AMENDMENTS 16: a bare 'share' must be LAN, with no tunnel and no DNS"
+"$BIN" share --session "$SESSION" --hours 1 --json >"$WORK/bare.json" 2>"$WORK/bare.err" \
+  || { cat "$WORK/bare.err" >&2; die "a bare share failed"; }
+python3 -c 'import sys,json; raw=open(sys.argv[1]).read(); json.dump(json.loads(raw[raw.index("{"):]), sys.stdout)' \
+  "$WORK/bare.json" >"$WORK/bare.clean.json"
+BARE_ID="$(jget "['share']['id']"   <"$WORK/bare.clean.json")"
+BARE_MODE="$(jget "['share']['mode']" <"$WORK/bare.clean.json")"
+BARE_URL="$(jget "['share']['url']"  <"$WORK/bare.clean.json")"
+BARE_DOMAIN="$(jget "['share']['domain']" <"$WORK/bare.clean.json")"
+
+[ "$BARE_MODE" = "lan" ] \
+  || die "a bare share resolved to mode '$BARE_MODE', not lan — the ladder escalated (AMENDMENTS 16 L1)"
+case "$BARE_URL" in
+  http://*) ;;
+  *) die "a bare share produced '$BARE_URL'; expected a plain-HTTP LAN address" ;;
+esac
+case "$BARE_URL" in
+  *trycloudflare.com*|https://*) die "a bare share produced a PUBLIC url: $BARE_URL" ;;
+esac
+[ -z "$BARE_DOMAIN" ] || die "a bare share claimed the domain '$BARE_DOMAIN'"
+# It must serve on the LAN address it just printed, with no tunnel behind it.
+curl -fsS --max-time 5 "$BARE_URL/healthz" >/dev/null \
+  || die "the bare share is not answering on $BARE_URL"
+# No cloudflared was raised for this share's state dir, and no DNS was touched.
+if pgrep -fl cloudflared 2>/dev/null | grep -q "shares/$BARE_ID"; then
+  die "a bare share started a cloudflared process"
+fi
+[ -d "$HOME/.local/state/herdr-expose/shares/$BARE_ID/cloudflare" ] \
+  && die "a bare share provisioned Cloudflare credentials" || true
+log "bare share $BARE_ID = lan at $BARE_URL, no tunnel, no DNS"
+"$BIN" share revoke "$BARE_ID" >/dev/null 2>&1 || die "could not revoke the bare share"
 
 # --------------------------------------------------------------------- share
 log "sharing $SESSION on the LAN for 1 hour"

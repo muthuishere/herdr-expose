@@ -109,21 +109,39 @@ autostart = false                   # bring the tunnel up when the server starts
 # tunnel onto ONE session. Every share expires; there is no permanent share, a
 # long one is just --days 30 (AMENDMENTS 10).
 #
-# Three transports, one ladder (AMENDMENTS 15):
-#   --lan      http://<lan-ip>:<port>        no internet, no secure context
-#   --quick    https://<random>.trycloudflare.com
+# FOUR RUNGS (AMENDMENTS 16). The ladder is climbed, never guessed:
+#   (none)     http://<lan-ip>:<port>        this machine + this network  <- DEFAULT
+#                                            (plain HTTP on a LAN IP is not a
+#                                            secure context: no PWA install)
+#   --quick    https://<random>.trycloudflare.com    anyone on the internet
 #              no account, no zone, no DNS, no API token, nothing to clean up.
 #              The hostname is NEW every time, so paired device tokens (which
 #              are origin-bound) do not carry over to the next quick share.
-#   --domain   https://x.you.com             stable, your zone, your token
+#   --domain   https://x.you.com             the internet, on a name you own
+#   --local    http://127.0.0.1:<port>       this machine only; an opt-IN for
+#                                            testing, not the default — a share
+#                                            nobody else can open is not a share
+#
+# A failed EXPLICIT request degrades LOUDLY (--quick with no cloudflared falls
+# back to lan, and says why). Nothing ever escalates ABOVE what was asked for:
+# a bare 'share' never becomes a tunnel because [expose] happens to have a
+# domain configured. This binary runs arbitrary commands in your agent
+# sessions, so the step from "this room" to "the entire internet" is a flag you
+# typed, never a key in this file you forgot about.
+#
+# [expose] above keeps its own default of LOCAL, deliberately: the daemon
+# serves whoever is sitting at this machine, a share exists to be reached from
+# elsewhere. Same principle, different job.
+#
 # The quick tunnel is confined to shares on purpose: [expose] keeps its static
 # domain so the daily driver stays installable and paired (C1).
 [share]
-domain_suffix = ""                  # 'share --name review' -> review.<suffix>; empty = pass --domain explicitly
+domain_suffix = ""                  # with default_mode = "domain": 'share --name review' -> review.<suffix>
 default_hours = 1                   # TTL when neither --hours nor --days is given
-default_mode = "auto"               # auto | lan | quick | domain
-                                    # auto: configured domain if usable and cloudflared is installed,
-                                    #       else quick if cloudflared is installed, else lan
+default_mode = "lan"                # local | lan | quick | domain — the rung a bare 'share' climbs to.
+                                    # "lan" is the shipped default; change it only if you want a
+                                    # different PERSONAL default. ("auto" from before AMENDMENTS 16
+                                    # still loads and now means "lan".)
 max_concurrent = 10                 # refuse to create more than this many live shares
 `},
 
