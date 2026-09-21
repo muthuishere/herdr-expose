@@ -20,6 +20,15 @@ drive it — through a link scoped to one session that expires on its own.
 One Go binary. The web app is inside it. One command installs all three: the
 binary, the Herdr plugin, and the skill.
 
+<p align="center">
+  <img src="docs/assets/demo.gif" alt="A blocked agent asks whether it may overwrite a file; the question is answered from a phone and the reply lands back in the terminal." width="640">
+</p>
+
+<p align="center">
+  <em>A real session through a real tunnel — nothing staged. An agent stops to
+  ask whether it may overwrite a file, and gets answered from a phone.</em>
+</p>
+
 ---
 
 ## Quick start

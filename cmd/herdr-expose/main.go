@@ -95,16 +95,17 @@ func usage() {
   stop                  stop a running server
   pair [--name NAME] [--pane]
                         mint a one-time pairing code and show its QR LOCALLY
-  install-service [--force]
-                        install and load the launchd / systemd --user unit.
-                        Idempotent: already healthy means nothing to do.
-                        --force is required to take over a server that is
-                        already running without a manager (it names the pid it
-                        will stop), and to rewrite a healthy unit.
-  uninstall-service     unload and remove it, and say what is left serving
   devices [--revoke ID] list or revoke paired devices
   service install [--force] | uninstall | status
-                        install a supervised unit (launchd / systemd --user)
+                        install a supervised unit: a launchd LaunchAgent on
+                        macOS, systemd --user on Linux. On WINDOWS it installs
+                        NOTHING and says so -- Herdr's own startup hook already
+                        starts the daemon, and a desktop has someone sitting at
+                        it. Idempotent: already healthy means nothing to do.
+                        --force is required to take over a server running
+                        without a manager (it names the pid it will stop), and
+                        to rewrite a healthy unit. install-service and
+                        uninstall-service still work as aliases.
   skill install | uninstall | status
                         link this checkout's skill/ into ~/.claude/skills (and
                         ~/.agents/skills when it exists) as the herdr-share
