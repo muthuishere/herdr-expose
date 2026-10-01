@@ -392,13 +392,13 @@ func (s *Session) SetViewport(decl map[string]string) {
 				s.lastLive = target
 				s.mu.Unlock()
 			}
-		case ModeTranscript:
+		case ModeTranscript, ModeTranscriptClean:
 			// No startStream, and therefore no `herdr terminal session
 			// observe --cols --rows` subprocess: the pane's own geometry is
 			// never touched. That is the whole mode.
 			s.stopStream(target)
 			s.hub.summary.unsubscribe(target, s)
-			s.hub.transcript.subscribe(target, s)
+			s.hub.transcript.subscribe(target, s, mode == ModeTranscriptClean)
 		case ModeSummary:
 			s.stopStream(target)
 			s.hub.transcript.unsubscribe(target, s)
@@ -431,7 +431,7 @@ func (s *Session) Input(target string, data []byte) error {
 	// transcript go through the geometry-free `command` path
 	// (agent.send_keys / agent.prompt) instead.
 	s.mu.Lock()
-	transcript := s.modes[target] == ModeTranscript
+	transcript := s.modes[target].IsTranscript()
 	s.mu.Unlock()
 	if transcript {
 		return ErrTranscriptInput
@@ -526,7 +526,7 @@ func (s *Session) startStream(target string, mode upstream.TerminalMode) (*liveS
 	// Clamp() floor and squeeze a real agent into a 20-column terminal.
 	// Guarding here means the property holds no matter which path asks.
 	s.mu.Lock()
-	transcript := s.modes[target] == ModeTranscript
+	transcript := s.modes[target].IsTranscript()
 	s.mu.Unlock()
 	if transcript {
 		return nil, ErrTranscriptStream

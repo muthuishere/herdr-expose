@@ -25,9 +25,28 @@ const (
 	// history you attached in order to read. A transcript subscriber never
 	// touches the pane's geometry, so reading is non-destructive.
 	ModeTranscript Mode = "transcript"
+	// ModeTranscriptClean is ModeTranscript with the terminal's own furniture
+	// removed server-side: rules, the input line, status and timing banners.
+	//
+	// It exists because that cleaning had been written twice already — once in
+	// the web client, once in a chat bridge — and both copies grew the same
+	// subtle bugs. The transform is PURE, so there is one right answer and no
+	// reason for every client to derive it again. It is opt-in, and the frame
+	// reports what it removed, so nobody is silently handed a different shape.
+	ModeTranscriptClean Mode = "transcript_clean"
 	// ModeNone is offscreen: state changes only, no output at all.
 	ModeNone Mode = "none"
 )
+
+// IsTranscript is true for every transcript flavour.
+//
+// Every "is this a transcript" test goes through this rather than comparing to
+// ModeTranscript, so adding a flavour cannot leave one call site behind — which
+// is exactly how a pane would end up polled but never delivered, or delivered
+// while declaring a geometry it must never declare.
+func (m Mode) IsTranscript() bool {
+	return m == ModeTranscript || m == ModeTranscriptClean
+}
 
 // ParseMode maps a client-declared render mode onto a server mode.
 // Clients declare what they RENDER; the server decides what it SENDS.
@@ -39,6 +58,8 @@ func ParseMode(s string) Mode {
 		return ModeSummary
 	case "transcript":
 		return ModeTranscript
+	case "transcript_clean":
+		return ModeTranscriptClean
 	default:
 		return ModeNone
 	}

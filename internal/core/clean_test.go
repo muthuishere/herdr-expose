@@ -1,0 +1,159 @@
+package core
+
+import (
+	"strings"
+	"testing"
+)
+
+func newTestCleaner(t *testing.T) *Cleaner {
+	t.Helper()
+	c, bad := NewCleaner(DefaultChrome)
+	if len(bad) != 0 {
+		t.Fatalf("DefaultChrome does not compile: %v", bad)
+	}
+	return c
+}
+
+func TestCleanStripsChromeAndKeepsContent(t *testing.T) {
+	c := newTestCleaner(t)
+	in := strings.Join([]string{
+		"Real content line one.",
+		"",
+		"────────────────────────────────",
+		"❯ sto",
+		"",
+		"  Image in clipboard · ctrl+v to paste",
+		"herdr-expose  ctx 550K 55% /clear soon",
+		"▸▸ auto mode on (shift+tab to cycle)",
+		"> a genuine quoted line",
+		"Second real line.",
+	}, "\n")
+
+	got := c.Clean(in)
+	want := "Real content line one.\n\n> a genuine quoted line\nSecond real line."
+	if got.Text != want {
+		t.Fatalf("cleaned text:\n got %q\nwant %q", got.Text, want)
+	}
+	if got.Chrome != 5 {
+		t.Errorf("chrome removed = %d, want 5", got.Chrome)
+	}
+}
+
+// ASCII '>' is a quote marker in real output and must survive; only the TUI's
+// own carets are the input line.
+func TestCleanKeepsAsciiQuote(t *testing.T) {
+	c := newTestCleaner(t)
+	got := c.Clean("> quoted\n❯ typed")
+	if got.Text != "> quoted" {
+		t.Fatalf("got %q, want %q", got.Text, "> quoted")
+	}
+}
+
+// A line that survives must be byte-identical bar trailing padding: cleaning
+// removes lines, it never rewrites them.
+func TestCleanNeverRewritesASurvivingLine(t *testing.T) {
+	c := newTestCleaner(t)
+	in := "  indented keeps its indent   \n\tand its tab"
+	got := c.Clean(in)
+	want := "  indented keeps its indent\n\tand its tab"
+	if got.Text != want {
+		t.Fatalf("got %q, want %q", got.Text, want)
+	}
+}
+
+func TestCleanCollapsesBlankRuns(t *testing.T) {
+	c := newTestCleaner(t)
+	got := c.Clean("a\n\n\n\n\nb\n\n\n")
+	if got.Text != "a\n\nb" {
+		t.Fatalf("got %q, want %q", got.Text, "a\n\nb")
+	}
+	// Four blanks between a and b, one of which survives as the paragraph
+	// break, so three are collapsed; the three trailing ones are all dropped.
+	if got.Blank != 6 {
+		t.Errorf("blank collapsed = %d, want 6", got.Blank)
+	}
+}
+
+// A screen that is nothing but furniture cleans to nothing, rather than to a
+// pile of blank lines that still costs a notification.
+func TestCleanAllChromeYieldsEmpty(t *testing.T) {
+	c := newTestCleaner(t)
+	got := c.Clean("──────────────\n❯\n\nctx 10K 1%\n")
+	if got.Text != "" {
+		t.Fatalf("got %q, want empty", got.Text)
+	}
+}
+
+// One bad pattern must not disable the rest, and must not panic: these come
+// from user config.
+func TestNewCleanerSkipsBadPatternsAndKeepsGoodOnes(t *testing.T) {
+	c, bad := NewCleaner([]string{`^KEEPOUT`, `([unclosed`})
+	if len(bad) != 1 || bad[0] != `([unclosed` {
+		t.Fatalf("bad = %v, want the one uncompilable pattern", bad)
+	}
+	if got := c.Clean("KEEPOUT me\nkeep me").Text; got != "keep me" {
+		t.Fatalf("got %q, want %q", got, "keep me")
+	}
+}
+
+// No patterns at all is a valid configuration: blanks still collapse, nothing
+// is stripped.
+func TestCleanWithNoPatterns(t *testing.T) {
+	c, _ := NewCleaner(nil)
+	got := c.Clean("────────\n\n\nreal")
+	if got.Text != "────────\n\nreal" {
+		t.Fatalf("got %q", got.Text)
+	}
+	if got.Chrome != 0 {
+		t.Errorf("chrome = %d, want 0", got.Chrome)
+	}
+}
+
+// The timing and progress lines an agent prints around a turn. They carry a
+// clock and a token count, so they change every second while saying nothing —
+// the most expensive kind of furniture to let through.
+func TestCleanStripsTimingAndProgressLines(t *testing.T) {
+	c := newTestCleaner(t)
+	for _, line := range []string{
+		"✻ Sautéed for 1m 6s · done 10:10 PM",
+		"⁂ Crunched for 52s · done 12:31 PM",
+		"* Baked for 13s · done 4:49 PM",
+		"✽ Canoodling… (6m 39s · ↓ 28.1k tokens)",
+		"  271.3k tokens",
+	} {
+		if got := c.Clean(line).Text; got != "" {
+			t.Errorf("kept %q, want it stripped (got %q)", line, got)
+		}
+	}
+}
+
+// Prose that happens to mention a duration or a token count is CONTENT. Too
+// little cleaning is untidy; too much is lying about what the pane said.
+func TestCleanKeepsProseThatMentionsTime(t *testing.T) {
+	c := newTestCleaner(t)
+	for _, line := range []string{
+		"The build takes about 30s on this machine.",
+		"I ran it for 2m and it never finished.",
+		"We are done with the migration.",
+	} {
+		if got := c.Clean(line).Text; got != line {
+			t.Errorf("stripped %q, want it kept (got %q)", line, got)
+		}
+	}
+}
+
+// The reason this mode exists: a status bar that ticks changes the RAW screen
+// every second while saying nothing. A raw subscriber is woken; a clean one
+// must not be, because after cleaning the two screens are identical.
+func TestCleanSuppressesATickingCounter(t *testing.T) {
+	c := newTestCleaner(t)
+	before := "Agent is thinking about the plan.\nherdr-expose  ctx 550K 55% /clear soon"
+	after := "Agent is thinking about the plan.\nherdr-expose  ctx 551K 55% /clear soon"
+
+	if before == after {
+		t.Fatal("fixture is wrong: the raw screens must differ")
+	}
+	if a, b := c.Clean(before).Text, c.Clean(after).Text; a != b {
+		t.Fatalf("cleaned screens differ and should not:\n %q\n %q", a, b)
+	}
+}

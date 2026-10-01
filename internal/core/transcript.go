@@ -91,6 +91,16 @@ type TranscriptFrame struct {
 	State string `json:"state,omitempty"`
 	// At is when the read happened.
 	At time.Time `json:"at"`
+	// Cleaned is present only on a transcript_clean frame, and says what was
+	// removed. A client must be able to tell that it is not looking at the
+	// raw screen without having to compare it to one.
+	Cleaned *CleanReport `json:"cleaned,omitempty"`
+}
+
+// CleanReport accounts for what server-side cleaning took out.
+type CleanReport struct {
+	Chrome int `json:"chrome"`
+	Blank  int `json:"blank"`
 }
 
 // transcriptSub is one connection's subscription to one target.
@@ -100,6 +110,11 @@ type transcriptSub struct {
 	// 26 panes × a full screen every 0.65s into 206KB/s.
 	hash uint64
 	sent bool
+	// clean is this subscriber's chosen flavour. Dedup is per-flavour because
+	// the two differ exactly when the cleaning matters: a token counter ticking
+	// changes the RAW screen and not the clean one, and waking a clean
+	// subscriber for it is the noise this mode exists to remove.
+	clean bool
 }
 
 // transcriptPoller deduplicates transcript reads across connections, exactly as
@@ -110,25 +125,36 @@ type transcriptPoller struct {
 	store *Store
 	log   *slog.Logger
 
-	mu   sync.Mutex
-	subs map[string]map[*Session]*transcriptSub
-	wake chan struct{}
+	mu      sync.Mutex
+	subs    map[string]map[*Session]*transcriptSub
+	cleaner *Cleaner
+	wake    chan struct{}
 }
 
 func newTranscriptPoller(store *Store, log *slog.Logger) *transcriptPoller {
-	return &transcriptPoller{store: store, log: log,
+	c, bad := NewCleaner(DefaultChrome)
+	if len(bad) > 0 {
+		log.Warn("transcript: skipping uncompilable chrome patterns", "patterns", bad)
+	}
+	return &transcriptPoller{store: store, log: log, cleaner: c,
 		subs: map[string]map[*Session]*transcriptSub{}, wake: make(chan struct{}, 1)}
 }
 
-func (p *transcriptPoller) subscribe(target string, s *Session) {
+func (p *transcriptPoller) subscribe(target string, s *Session, clean bool) {
 	p.mu.Lock()
 	m := p.subs[target]
 	if m == nil {
 		m = map[*Session]*transcriptSub{}
 		p.subs[target] = m
 	}
-	if _, ok := m[s]; !ok {
-		m[s] = &transcriptSub{}
+	if sub, ok := m[s]; !ok {
+		m[s] = &transcriptSub{clean: clean}
+	} else if sub.clean != clean {
+		// Changed flavour on an existing subscription: the next frame is a
+		// different shape, so the dedup state is meaningless and must not
+		// suppress it.
+		sub.clean = clean
+		sub.sent = false
 	}
 	p.mu.Unlock()
 	select {
@@ -284,16 +310,28 @@ func (p *transcriptPoller) poll(ctx context.Context, target string) {
 	// ANSI is stripped SERVER-side. The client renders text, never an emulator.
 	text := strings.TrimRight(StripANSI(res.Read.Text), "\n \t")
 
+	now := time.Now()
 	frame := TranscriptFrame{
 		Target: target, Source: source, Text: text, Lines: lines,
 		Truncated: res.Read.Truncated, Agent: hasAgent, State: state,
-		At: time.Now(),
+		At: now,
+	}
+
+	// Cleaned ONCE for every subscriber that wants it: the transform is pure,
+	// so doing it per connection would be the same answer computed N times.
+	cleanFrame := frame
+	if p.cleaner != nil {
+		r := p.cleaner.Clean(text)
+		cleanFrame.Text = r.Text
+		cleanFrame.Cleaned = &CleanReport{Chrome: r.Chrome, Blank: r.Blank}
 	}
 	// The identity is the text PLUS what it is: the same characters read from
 	// `detection` instead of `recent_unwrapped`, or read while the agent's
 	// state changed, are a different thing to show and must not be suppressed
 	// as "unchanged".
-	p.deliver(target, frame, source+"\x00"+state+"\x00"+text)
+	p.deliver(target, frame, cleanFrame,
+		source+"\x00"+state+"\x00"+text,
+		source+"\x00"+state+"\x00"+cleanFrame.Text)
 }
 
 // deliver applies per-subscriber change detection and fans the frame out.
@@ -302,25 +340,45 @@ func (p *transcriptPoller) poll(ctx context.Context, target string) {
 // would mean a connection that subscribed a moment ago sees nothing until the
 // agent happens to move — an empty pane on a phone, indistinguishable from a
 // broken one. Suppression is the optimisation; the first frame is the product.
-func (p *transcriptPoller) deliver(target string, frame TranscriptFrame, identity string) {
-	h := fnv.New64a()
-	_, _ = h.Write([]byte(identity))
-	sum := h.Sum64()
+func (p *transcriptPoller) deliver(target string, raw, clean TranscriptFrame, rawID, cleanID string) {
+	sum := func(s string) uint64 {
+		h := fnv.New64a()
+		_, _ = h.Write([]byte(s))
+		return h.Sum64()
+	}
+	rawSum, cleanSum := sum(rawID), sum(cleanID)
 
+	type out struct {
+		s     *Session
+		clean bool
+	}
 	p.mu.Lock()
-	out := make([]*Session, 0, len(p.subs[target]))
+	send := make([]out, 0, len(p.subs[target]))
 	for s, sub := range p.subs[target] {
-		if sub.sent && sub.hash == sum {
+		want := rawSum
+		if sub.clean {
+			want = cleanSum
+		}
+		if sub.sent && sub.hash == want {
 			continue
 		}
-		sub.hash = sum
+		sub.hash = want
 		sub.sent = true
-		out = append(out, s)
+		send = append(send, out{s, sub.clean})
 	}
 	p.mu.Unlock()
 
-	for _, s := range out {
-		s.sink.SendJSON("transcript", frame)
+	for _, o := range send {
+		if o.clean {
+			// A screen that was ALL furniture cleans to nothing. Sending an
+			// empty frame costs a notification and says less than silence.
+			if clean.Text == "" {
+				continue
+			}
+			o.s.sink.SendJSON("transcript", clean)
+			continue
+		}
+		o.s.sink.SendJSON("transcript", raw)
 	}
 }
 
