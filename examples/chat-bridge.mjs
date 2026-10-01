@@ -187,6 +187,49 @@ async function pairToken() {
   return (await r.json()).token
 }
 
+/*
+ * ONE BRIDGE AT A TIME, per channel.
+ *
+ * Two bridges on one Telegram token both long-poll getUpdates, both receive
+ * the same update, and every command runs twice -- which looked exactly like a
+ * code bug and cost an hour chasing one. A lock file keyed on the channel makes
+ * it impossible rather than merely unlikely.
+ *
+ * A stale lock from a crashed run is reclaimed: the pid is checked, and only a
+ * LIVE owner refuses. A lock nobody can clear is worse than no lock.
+ */
+import { openSync, writeSync, closeSync, readFileSync, unlinkSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+const lockPath = join(tmpdir(), `herdr-chat-bridge.${args.channel ?? 'console'}.lock`)
+function claimLock() {
+  try {
+    const fd = openSync(lockPath, 'wx')
+    writeSync(fd, String(process.pid))
+    closeSync(fd)
+  } catch (e) {
+    if (e.code !== 'EEXIST') throw e
+    const owner = Number(readFileSync(lockPath, 'utf8').trim())
+    try {
+      process.kill(owner, 0)   // signal 0: does this pid exist?
+      console.error(`another ${args.channel ?? 'console'} bridge is already running (pid ${owner}).`)
+      console.error(`stop it first, or: kill ${owner}`)
+      process.exit(1)
+    } catch {
+      console.error(`reclaiming stale lock from pid ${owner}`)
+      unlinkSync(lockPath)
+      return claimLock()
+    }
+  }
+  const release = () => { try { unlinkSync(lockPath) } catch {} }
+  process.on('exit', release)
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+    process.on(sig, () => { release(); process.exit(0) })
+  }
+}
+claimLock()
+
 const make = CHANNELS[args.channel ?? 'console']
 if (!make) throw new Error(`unknown --channel. have: ${Object.keys(CHANNELS).join(', ')}`)
 const channel = make()
@@ -197,6 +240,14 @@ const ws = new WebSocket(BASE.replace(/^http/, 'ws') + '/v1/stream',
 
 let seq = 0
 const send = (f) => ws.readyState === 1 && ws.send(JSON.stringify({ seq: ++seq, ...f }))
+/*
+ * The parameter is `target`, NOT `pane_id`.
+ *
+ * Both look equally plausible -- api.md uses pane_id for agent.read and
+ * pane.send_text -- and the wrong one fails SILENTLY: the command is accepted,
+ * nothing is delivered, and the only symptom is an answer that never arrives.
+ * Herdr's own CLI takes <TARGET>, which is the thing to check against.
+ */
 const call = (method, params) => send({ type: 'command', data: { id: `c-${seq + 1}`, method, params } })
 
 /** pane id -> last state we told anyone about. The digest is a DIFF, not a dump. */
@@ -258,6 +309,11 @@ ws.onmessage = (ev) => {
       }
     }
   }
+
+  // Log EVERY command result, not just failures. A command that is accepted
+  // and does nothing looks identical to one that worked -- which is how the
+  // wrong parameter name survived three rounds of testing.
+  if (m.type === 'result') console.error(`[cmd] ${JSON.stringify(m.data).slice(0, 200)}`)
 
   if (m.type === 'transcript') {
     if (muted) return
@@ -353,11 +409,11 @@ async function handle(text, thread) {
     case '/say':
       if (!following) return reply('/follow one first.')
       if (!arg) return reply('/say what?')
-      call('agent.prompt', { pane_id: following, text: arg })
+      call('agent.prompt', { target: following, text: arg })
       return reply(`sent to ${short(following)} — watching for the reply`)
     case '/key':
       if (!following) return reply('/follow one first.')
-      call('agent.send_keys', { pane_id: following, keys: [arg || 'enter'] })
+      call('agent.send_keys', { target: following, keys: [arg || 'enter'] })
       return reply(`${arg || 'enter'} -> ${short(following)}`)
     case '/mute': muted = true; return reply('muted')
     case '/unmute': muted = false; return reply('unmuted')
@@ -365,7 +421,7 @@ async function handle(text, thread) {
       // Bare text is a prompt for whatever you are following. That is the
       // thing people actually want to type, so it is not behind a command.
       if (!cmd.startsWith('/') && following) {
-        call('agent.prompt', { pane_id: following, text })
+        call('agent.prompt', { target: following, text })
           return reply(`sent to ${short(following)} — watching for the reply`)
       }
       /*
