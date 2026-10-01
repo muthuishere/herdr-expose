@@ -42,6 +42,20 @@ const DIGEST_MS = Number(args.digest ?? 30000)
  * you into a backlog that arrives after it stopped being true.
  */
 const QUIET_MS = Number(args.quiet ?? 30000)
+/*
+ * How long after you SEND something the bridge stays eager.
+ *
+ * Asking a question and getting nothing back is the failure that makes the
+ * whole thing feel broken, and the quiet gate caused it: a prompt went out,
+ * the agent answered, and the answer was suppressed because a screen had been
+ * sent moments earlier when the pane was opened.
+ *
+ * Sending implies wanting the reply, so a prompt or a keypress opens a window
+ * in which the next CHANGED screen comes straight through. Change detection
+ * still applies -- this never resends an unchanged screen -- and once the
+ * window closes the 30s floor governs again.
+ */
+const REPLY_MS = Number(args.reply ?? 120000)
 
 /* ------------------------------------------------------------------ channels */
 
@@ -199,6 +213,13 @@ let tailUntil = 0        // epoch ms; while in the future, transcripts are forwa
 let showOnce = null      // pane whose next transcript frame is shown unasked
 /** target -> { at, text } of the last screen actually sent for it. */
 const lastSent = new Map()
+/** target -> epoch ms until which we are expecting an answer we asked for. */
+const awaitingReply = new Map()
+
+/** Called whenever WE put something into a pane. */
+function expectReply(target) {
+  awaitingReply.set(target, Date.now() + REPLY_MS)
+}
 
 /**
  * May we send this screen now?
@@ -215,9 +236,12 @@ const lastSent = new Map()
 function maySend(target, text, force = false) {
   const prev = lastSent.get(target)
   const now = Date.now()
+  const eager = now < (awaitingReply.get(target) ?? 0)
   if (!force) {
+    // Unchanged is never worth a notification, in any mode.
     if (prev && prev.text === text) return false
-    if (prev && now - prev.at < QUIET_MS) return false
+    // The floor applies only when we are NOT waiting on a reply we asked for.
+    if (!eager && prev && now - prev.at < QUIET_MS) return false
   }
   lastSent.set(target, { at: now, text })
   return true
@@ -293,9 +317,12 @@ ws.onmessage = (ev) => {
     }
     // Only forward a screen when it was ASKED for: a blocked agent's question,
     // or an explicit /tail. Otherwise this becomes the mirror we refused to be.
+    // Forward a screen when it was asked for: a live /tail, an agent that is
+    // blocked, or an answer to something we just sent.
     const wanted = Date.now() < tailUntil && t === following
     const isBlocked = lastState.get(t) === 'blocked'
-    if (!muted && (wanted || isBlocked) && maySend(t, m.data.text)) {
+    const answering = Date.now() < (awaitingReply.get(t) ?? 0)
+    if (!muted && (wanted || isBlocked || answering) && maySend(t, m.data.text)) {
       const tail = m.data.text.trimEnd().split('\n').slice(-18).join('\n')
       channel.send(`${short(t)}\n\n${tail}`, null, { choices: paneActions(t) })
     }
@@ -384,10 +411,12 @@ async function handle(text, thread) {
       if (!following) return reply('/follow one first.')
       if (!arg) return reply('/say what?')
       call('agent.prompt', { pane_id: following, text: arg })
-      return reply(`sent to ${short(following)}`)
+      expectReply(following)
+      return reply(`sent to ${short(following)} — watching for the reply`)
     case '/key':
       if (!following) return reply('/follow one first.')
       call('agent.send_keys', { pane_id: following, keys: [arg || 'enter'] })
+      expectReply(following)
       return reply(`${arg || 'enter'} -> ${short(following)}`)
     case '/tail': {
       if (!following) return reply('/follow one first.')
@@ -402,7 +431,8 @@ async function handle(text, thread) {
       // thing people actually want to type, so it is not behind a command.
       if (!cmd.startsWith('/') && following) {
         call('agent.prompt', { pane_id: following, text })
-        return reply(`sent to ${short(following)}`)
+        expectReply(following)
+        return reply(`sent to ${short(following)} — watching for the reply`)
       }
       /*
        * Anything else, including the "hi" everybody opens with. Answering a
