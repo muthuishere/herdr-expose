@@ -117,13 +117,37 @@ function clean(text) {
  * overlap at all the screen was replaced wholesale, which is as new as it
  * gets.
  */
+const OVERLAP_SAME = Number(args.overlap ?? 0.8)
+const OVERLAP_MIN = 3
+
 function newLines(prev, next) {
   const n = next.split('\n')
   if (!prev) return n
   const o = prev.split('\n')
-  for (let k = Math.min(o.length, n.length); k > 0; k--) {
-    if (o.slice(o.length - k).join('\n') === n.slice(0, k).join('\n')) return n.slice(k)
+
+  /*
+   * Find the largest block at the end of the old screen that is ALSO the start
+   * of the new one, and call everything after it new.
+   *
+   * The match is deliberately fuzzy. An exact comparison looked right and was
+   * useless in practice: a terminal redraws its lines, and one repainted
+   * character -- a changed elapsed time, a moved cursor, a re-rendered badge --
+   * made the overlap fail, so the whole screen counted as new and got sent
+   * again. Eighty percent of the lines matching means it is the same block of
+   * output with some of it repainted.
+   *
+   * Largest k first, so the answer is the LONGEST overlap rather than the first
+   * coincidental one. A floor of three lines stops a pair of blanks matching
+   * everything.
+   */
+  for (let k = Math.min(o.length, n.length); k >= OVERLAP_MIN; k--) {
+    const a = o.slice(o.length - k)
+    const b = n.slice(0, k)
+    let same = 0
+    for (let i = 0; i < k; i++) if (a[i] === b[i]) same++
+    if (same / k >= OVERLAP_SAME) return n.slice(k)
   }
+  // No overlap: the screen was replaced wholesale, which is as new as it gets.
   return n
 }
 
