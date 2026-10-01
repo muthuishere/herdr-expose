@@ -66,6 +66,48 @@ const REPLY_MS = Number(args.reply ?? 120000)
  */
 const MIN_NEW_LINES = Number(args.minlines ?? 10)
 
+/*
+ * TUI chrome: everything a terminal draws that is furniture, not content.
+ *
+ * This matters twice over. It is unreadable on a phone -- a 119-character
+ * divider wraps into six lines of nothing -- and, worse, it CHANGES. A token
+ * counter ticking from 550K to 551K, a spinner, a clock: each one makes the
+ * screen "new" and would push a notification that carries no information.
+ *
+ * So chrome is stripped BEFORE anything is compared, which is the only order
+ * that works: strip after comparing and the counter still votes.
+ */
+const CHROME = [
+  /^[\s\u2500-\u257f_=\-\u2014\u2013]{8,}$/,          // rules and box drawing
+  // The input line. U+276F / U+203A are the TUI's own prompt carets, and what
+  // follows is what somebody is TYPING, not what the agent said. ASCII '>' is
+  // deliberately not here: it is a quote marker in real output.
+  /^\s*[\u276f\u203a]/,
+  /ctx\s+[\d.]+[KM]?\s+\d+%/i,                          // context meter
+  /\b(auto mode|bypass permissions|accept edits)\b.*\(/i, // mode banners
+  /shift\+tab to cycle/i,
+  /^\s*Image in clipboard/i,
+  /^\s*\u2191\s*\d+\s*(tokens|lines)/i,
+]
+
+/** Strip chrome and collapse blank runs. Content only. */
+function clean(text) {
+  const out = []
+  for (const raw of text.split('\n')) {
+    const line = raw.replace(/[ \t]+$/, '')
+    if (CHROME.some((re) => re.test(line))) continue
+    if (line === '') {
+      if (out.length && out[out.length - 1] === '') continue
+      out.push('')
+      continue
+    }
+    out.push(line)
+  }
+  while (out.length && out[0] === '') out.shift()
+  while (out.length && out[out.length - 1] === '') out.pop()
+  return out.join('\n')
+}
+
 /**
  * How many lines at the end of `next` were not already in `prev`.
  *
@@ -335,13 +377,14 @@ ws.onmessage = (ev) => {
 
   if (m.type === 'transcript') {
     const t = m.data.target
+    const screen = clean(m.data.text)
     // Just followed: show the screen ONCE, unprompted. "Follow it and then
     // wait for it to say something" is a dead end when the pane is idle --
     // which is most of them, most of the time.
     if (showOnce === t) {
       showOnce = null
-      if (!maySend(t, m.data.text, true)) return
-      const tail = m.data.text.trimEnd().split('\n').slice(-20).join('\n')
+      if (!maySend(t, screen, true)) return
+      const tail = screen.split('\n').slice(-20).join('\n')
       channel.send(`${short(t)} — last ${Math.min(20, tail.split('\n').length)} lines\n\n${tail}`,
         null, { choices: paneActions(t) })
       return
@@ -355,7 +398,7 @@ ws.onmessage = (ev) => {
     const answering = Date.now() < (awaitingReply.get(t) ?? 0)
     if (!muted && (wanted || isBlocked || answering)) {
       const prev = lastSent.get(t)?.text
-      if (maySend(t, m.data.text)) {
+      if (maySend(t, screen)) {
         /*
          * Send only what is NEW. Re-sending a screen that is mostly lines the
          * reader already has is how a chat becomes unreadable -- they have to
@@ -365,9 +408,9 @@ ws.onmessage = (ev) => {
          * have arrived in an earlier frame, so the tail goes with it. Being
          * told an agent needs you without being told what it asked is useless.
          */
-        const delta = newLines(prev, m.data.text.trimEnd()).filter((l) => l.trim())
+        const delta = newLines(prev, screen).filter((l) => l.trim())
         const body = isBlocked
-          ? m.data.text.trimEnd().split('\n').filter((l) => l.trim()).slice(-14).join('\n')
+          ? screen.split('\n').filter((l) => l.trim()).slice(-14).join('\n')
           : delta.slice(-40).join('\n')
         if (body) channel.send(`${short(t)}\n\n${body}`, null, { choices: paneActions(t) })
       }
