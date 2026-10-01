@@ -395,6 +395,25 @@ strong, b { font-weight: 650; color: var(--fg); }
 }
 .d-tile-foot { font-size: 11px; color: var(--fg-faint); font-variant-numeric: tabular-nums; }
 
+/* Scale-to-fit for the wide mock on a narrow screen.
+   The wide layout is a FIXED 760px illustration -- that is the point of it, so
+   it cannot reflow without becoming the narrow layout it is contrasted with.
+   The default is to pan it inside .browser-body, which works but asks the
+   reader to drag a thing they cannot see the shape of first.
+   When the script runs we scale it down instead, so the whole layout is
+   visible at a glance. Transform does not affect layout size, so the script
+   sets the host's height to the scaled height; without JS this class is never
+   added and the pannable original is what you get. */
+.browser-body.is-scaled { overflow-x: hidden; }
+/* The swipe hint is instructions for a gesture that is no longer needed once
+   the panel is scaled to fit. Telling someone to swipe a thing that does not
+   move is worse than saying nothing. */
+.mock-wide.is-fit .swipe-hint { display: none; }
+.browser-body.is-scaled > .screen-wide {
+  transform: scale(var(--mock-scale, 1));
+  transform-origin: top left;
+}
+
 .swipe-hint { color: var(--fg-faint); }
 @media (min-width: 800px) { .swipe-hint { display: none; } }
 
@@ -650,6 +669,67 @@ table.cmp .no { color: var(--fg-faint); }
   color: var(--fg-faint); max-width: 64ch;
 }
 .cmp-note { font-size: 14px; color: var(--fg-faint); max-width: 70ch; margin-top: 16px; }
+
+/* ------------------------------------------------- the table, on a phone ---
+   A six-column comparison does not fit in 375px, and the honest options are
+   PAN or REFLOW. Panning hides the columns that make the argument: at 375px
+   every rival column was sliced mid-word ("Or", "Yo", "ac $9 pla on se"), so
+   the row a reader is meant to compare was never visible as a row.
+
+   So below 760px each ROW becomes a card: the criterion is the heading, and
+   every cell carries its column's name as a label. The DOM is unchanged and it
+   is still one <table>, so nothing is hidden from a reader, a crawler or a
+   screen reader -- the labels come from data-c, written from the <thead> the
+   wide layout already shows. */
+@media (max-width: 760px) {
+  .cmp-scroll { overflow-x: visible; }
+  table.cmp { min-width: 0; width: 100%; display: block; font-size: 15px; }
+  table.cmp thead { display: none; }
+  table.cmp tbody { display: block; }
+
+  table.cmp tbody tr {
+    display: block;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 4px 14px 12px;
+    margin-bottom: 14px;
+    background: var(--bg);
+  }
+  table.cmp tbody th,
+  table.cmp tbody td {
+    display: block;
+    width: auto;
+    border: 0;
+    padding: 10px 0 0;
+    white-space: normal;
+  }
+  /* The criterion heads the card. */
+  table.cmp tbody th {
+    font-size: 16px;
+    padding: 12px 0 2px;
+    border-bottom: 1px solid var(--line);
+    margin-bottom: 4px;
+  }
+  /* Each value says which product it belongs to, since the header row is gone. */
+  table.cmp tbody td::before {
+    content: attr(data-c);
+    display: block;
+    font-size: 11.5px;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--fg-faint);
+    margin-bottom: 3px;
+  }
+  /* Ours stays visually first and marked, exactly as in the wide layout. */
+  table.cmp tbody td.us {
+    background: var(--bg-1);
+    border-radius: 8px;
+    padding: 10px 10px 11px;
+    margin-top: 10px;
+  }
+  table.cmp tbody td.us::before { color: var(--accent); }
+  table.cmp tbody td code { white-space: normal; word-break: break-word; }
+}
 </style>
 </head>
 
@@ -1233,67 +1313,67 @@ is not reversible.<span class="m-tr-rule"></span>Run migration 0042 against dev?
         <tbody>
           <tr>
             <th>Who starts the share</th>
-            <td class="us"><b>The agent — you say “share this”</b></td>
-            <td class="no">You do</td>
-            <td class="no">You do</td>
-            <td class="no">You do</td>
-            <td class="no">You do — scan a QR</td>
+            <td class="us" data-c="herdr-expose"><b>The agent — you say “share this”</b></td>
+            <td class="no" data-c="VibeTunnel">You do</td>
+            <td class="no" data-c="Omnara">You do</td>
+            <td class="no" data-c="Happy Coder">You do</td>
+            <td class="no" data-c="Claude Remote Control">You do — scan a QR</td>
           </tr>
           <tr>
             <th>Ships an agent skill</th>
-            <td class="us"><b>Yes — <code>herdr-share</code></b></td>
-            <td class="no">No — a terminal proxy, no skill or MCP</td>
-            <td class="no">No</td>
-            <td class="no">No</td>
-            <td class="no">n/a</td>
+            <td class="us" data-c="herdr-expose"><b>Yes — <code>herdr-share</code></b></td>
+            <td class="no" data-c="VibeTunnel">No — a terminal proxy, no skill or MCP</td>
+            <td class="no" data-c="Omnara">No</td>
+            <td class="no" data-c="Happy Coder">No</td>
+            <td class="no" data-c="Claude Remote Control">n/a</td>
           </tr>
           <tr>
             <th>Account or relay</th>
-            <td class="us"><b>None — your own network, direct</b></td>
-            <td>None</td>
-            <td class="no">Relay + account, $9/mo; plaintext on their servers unless self-hosted</td>
-            <td>Free relay, end-to-end encrypted, self-hostable</td>
-            <td class="no">Through Anthropic's servers</td>
+            <td class="us" data-c="herdr-expose"><b>None — your own network, direct</b></td>
+            <td data-c="VibeTunnel">None</td>
+            <td class="no" data-c="Omnara">Relay + account, $9/mo; plaintext on their servers unless self-hosted</td>
+            <td data-c="Happy Coder">Free relay, end-to-end encrypted, self-hostable</td>
+            <td class="no" data-c="Claude Remote Control">Through Anthropic's servers</td>
           </tr>
           <tr>
             <th>On a name you own</th>
-            <td class="us"><b><code>--domain yours.com</code></b> — your Cloudflare account; expiry deletes the DNS record and the tunnel it made</td>
-            <td>Bring your own tunnel, wired up by hand</td>
-            <td class="no">Their hostname</td>
-            <td class="no">Their hostname</td>
-            <td class="no">No</td>
+            <td class="us" data-c="herdr-expose"><b><code>--domain yours.com</code></b> — your Cloudflare account; expiry deletes the DNS record and the tunnel it made</td>
+            <td data-c="VibeTunnel">Bring your own tunnel, wired up by hand</td>
+            <td class="no" data-c="Omnara">Their hostname</td>
+            <td class="no" data-c="Happy Coder">Their hostname</td>
+            <td class="no" data-c="Claude Remote Control">No</td>
           </tr>
           <tr>
             <th>Windows</th>
-            <td class="us"><b>Yes</b> — verified on real hardware, no Administrator rights</td>
-            <td class="no">“Windows is not yet supported”</td>
-            <td>not claimed</td>
-            <td>Yes</td>
-            <td>Through WSL</td>
+            <td class="us" data-c="herdr-expose"><b>Yes</b> — verified on real hardware, no Administrator rights</td>
+            <td class="no" data-c="VibeTunnel">“Windows is not yet supported”</td>
+            <td data-c="Omnara">not claimed</td>
+            <td data-c="Happy Coder">Yes</td>
+            <td data-c="Claude Remote Control">Through WSL</td>
           </tr>
           <tr>
             <th>Agents it covers</th>
-            <td class="us"><b>21 kinds Herdr detects, plus any plain shell</b></td>
-            <td>Any terminal</td>
-            <td>Claude Code</td>
-            <td>Claude Code and Codex</td>
-            <td class="no">Claude Code only</td>
+            <td class="us" data-c="herdr-expose"><b>21 kinds Herdr detects, plus any plain shell</b></td>
+            <td data-c="VibeTunnel">Any terminal</td>
+            <td data-c="Omnara">Claude Code</td>
+            <td data-c="Happy Coder">Claude Code and Codex</td>
+            <td class="no" data-c="Claude Remote Control">Claude Code only</td>
           </tr>
           <tr>
             <th>What a link exposes</th>
-            <td class="us"><b>One session</b> — pairing-gated, expires on its own</td>
-            <td>Server-wide auth; no per-session expiry documented</td>
-            <td>Your account's sessions</td>
-            <td>Your account's sessions</td>
-            <td>The session you paired</td>
+            <td class="us" data-c="herdr-expose"><b>One session</b> — pairing-gated, expires on its own</td>
+            <td data-c="VibeTunnel">Server-wide auth; no per-session expiry documented</td>
+            <td data-c="Omnara">Your account's sessions</td>
+            <td data-c="Happy Coder">Your account's sessions</td>
+            <td data-c="Claude Remote Control">The session you paired</td>
           </tr>
           <tr>
             <th>What it costs you</th>
-            <td class="us">It needs Herdr</td>
-            <td>—</td>
-            <td class="no">$9/mo</td>
-            <td>—</td>
-            <td class="no">A Pro or Max plan</td>
+            <td class="us" data-c="herdr-expose">It needs Herdr</td>
+            <td data-c="VibeTunnel">—</td>
+            <td class="no" data-c="Omnara">$9/mo</td>
+            <td data-c="Happy Coder">—</td>
+            <td class="no" data-c="Claude Remote Control">A Pro or Max plan</td>
           </tr>
         </tbody>
       </table>
@@ -1426,6 +1506,48 @@ document.querySelectorAll('.copy').forEach(function (btn) {
     }
   });
 });
+
+// Fit the wide mock to the viewport rather than making it a blind drag.
+// Re-run on resize and rotate; ResizeObserver catches the container changing
+// for any other reason (a font loading, the address bar collapsing).
+(function () {
+  var hosts = document.querySelectorAll('.mock-wide .browser-body');
+  if (!hosts.length) return;
+
+  function fit() {
+    hosts.forEach(function (host) {
+      var screen = host.querySelector('.screen-wide');
+      if (!screen) return;
+      // Measure unscaled: read the CSS min-width, not the painted box.
+      var natural = parseFloat(getComputedStyle(screen).minWidth) || screen.scrollWidth;
+      var avail = host.clientWidth;
+      if (!natural || !avail) return;
+      var mock = host.closest('.mock-wide');
+      if (avail >= natural) {           // wide enough: leave it entirely alone
+        if (mock) mock.classList.remove('is-fit');
+        host.classList.remove('is-scaled');
+        host.style.removeProperty('--mock-scale');
+        host.style.removeProperty('height');
+        return;
+      }
+      var scale = avail / natural;
+      if (mock) mock.classList.add('is-fit');
+      host.classList.add('is-scaled');
+      host.style.setProperty('--mock-scale', scale.toFixed(4));
+      // transform does not shrink the box, so the host would keep the full
+      // 440px and leave a gap under the artwork.
+      host.style.height = Math.round(screen.offsetHeight * scale) + 'px';
+    });
+  }
+
+  fit();
+  addEventListener('resize', fit);
+  addEventListener('orientationchange', fit);
+  if (window.ResizeObserver) {
+    var ro = new ResizeObserver(fit);
+    hosts.forEach(function (h) { ro.observe(h); });
+  }
+})();
 </script>
 
 </body>
