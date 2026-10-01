@@ -460,7 +460,11 @@ service into this repo.** The server already exposes everything over one
 WebSocket, and that socket is what the bundled web UI itself uses. Write a
 client.
 
-Start from **`examples/bridge.mjs`** in the checkout. It is a complete,
+Start from one of two files in the checkout. **`examples/chat-bridge.mjs`** is
+a working chat bridge — channels, commands, the digest policy below — with a
+`console` channel that needs no credentials, so it can be run and proved before
+any bot exists; adding Telegram/Teams/Discord means writing `poll()` and
+`send()`, nothing else. **`examples/bridge.mjs`** is the smaller one: a complete,
 dependency-free client — lists panes, follows one, prints what it is showing,
 sends a prompt or a key — and it runs as-is:
 
