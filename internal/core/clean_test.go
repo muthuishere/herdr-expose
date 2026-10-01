@@ -238,3 +238,82 @@ func TestSettleHoldsWorkingAndReleasesOnSettle(t *testing.T) {
 		t.Fatalf("delivered %d frames after settling, want 1", n)
 	}
 }
+
+// Switching flavour on a LIVE subscription must deliver again, even though the
+// pane has not changed.
+//
+// Dedup remembers the hash of what this subscriber last received. After a
+// switch the next frame is a DIFFERENT SHAPE, so that memory is about text the
+// subscriber will never see again — and leaving it in place strands the client
+// on a blank view until the pane happens to change, which on an idle agent can
+// be forever.
+func TestSwitchingFlavourDeliversAgain(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	h := NewHub(NewStore(log), log)
+	sink := &countingSink{}
+	sess := h.NewSession(ctx, sink)
+	defer sess.Close()
+
+	const target = "s/w1:p1"
+	p := h.transcript
+
+	// Three flavours of one unchanged screen, as the poller would build them.
+	raw := "hello\n──────────\nworld"
+	frames := [3]TranscriptFrame{
+		{Target: target, Text: raw},
+		{Target: target, Text: "hello\nworld"},
+		{Target: target, Text: "hello\nworld"},
+	}
+	ids := [3]string{raw, "hello\nworld", "hello\nworld"}
+
+	p.subscribe(target, sess, 0, false) // raw
+	p.deliver(target, frames, ids, "idle")
+	if n := sink.count("transcript"); n != 1 {
+		t.Fatalf("raw delivered %d, want 1", n)
+	}
+
+	// Same screen again: deduped, as it should be.
+	p.deliver(target, frames, ids, "idle")
+	if n := sink.count("transcript"); n != 1 {
+		t.Fatalf("unchanged screen delivered %d, want it suppressed", n)
+	}
+
+	// Switch to prose. The pane has NOT changed, but the shape has.
+	p.subscribe(target, sess, 2, false)
+	p.deliver(target, frames, ids, "idle")
+	if n := sink.count("transcript"); n != 2 {
+		t.Fatalf("after switching flavour delivered %d, want 2 — the client is stranded", n)
+	}
+}
+
+// The same guarantee for the settle flag, which is a delivery policy rather
+// than a text one and has its own branch.
+func TestSwitchingSettleDeliversAgain(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	h := NewHub(NewStore(log), log)
+	sink := &countingSink{}
+	sess := h.NewSession(ctx, sink)
+	defer sess.Close()
+
+	const target = "s/w1:p1"
+	p := h.transcript
+	f := TranscriptFrame{Target: target, Text: "settled output"}
+	frames := [3]TranscriptFrame{f, f, f}
+	ids := [3]string{"x", "x", "x"}
+
+	p.subscribe(target, sess, 2, false)
+	p.deliver(target, frames, ids, "idle")
+	if n := sink.count("transcript"); n != 1 {
+		t.Fatalf("delivered %d, want 1", n)
+	}
+
+	p.subscribe(target, sess, 2, true) // same text level, settle turned on
+	p.deliver(target, frames, ids, "idle")
+	if n := sink.count("transcript"); n != 2 {
+		t.Fatalf("after turning settle on delivered %d, want 2", n)
+	}
+}
