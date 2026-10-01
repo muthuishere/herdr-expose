@@ -61,11 +61,14 @@ function consoleChannel() {
  * logged, and never put in a URL this program prints.
  */
 function telegramChannel() {
-  const token = process.env.TELEGRAM_BOT_TOKEN
-  if (!token) throw new Error('set TELEGRAM_BOT_TOKEN (via `sec exec` or the shell)')
+  // Project-scoped name first, so this does not fight over a generic variable
+  // with every other Telegram tool on the machine.
+  const token = process.env.HERDR_EXPOSE_TELEGRAM_TOKEN ?? process.env.TELEGRAM_BOT_TOKEN
+  if (!token) throw new Error('set HERDR_EXPOSE_TELEGRAM_TOKEN (or TELEGRAM_BOT_TOKEN)')
   const api = (m, q = '') => `https://api.telegram.org/bot${token}/${m}${q}`
   let offset = 0
   let chat = args.chat ? String(args.chat) : null
+  let greeted = true
 
   return {
     name: 'telegram',
@@ -80,14 +83,18 @@ function telegramChannel() {
         offset = u.update_id + 1
         const msg = u.message ?? u.channel_post
         if (!msg?.text) continue
-        chat ??= String(msg.chat.id) // first person to speak owns the thread
+        // First person to speak owns the thread. The startup banner was sent
+        // before any chat was known, so it went nowhere -- greet here instead,
+        // which is also the first moment there is somebody to greet.
+        if (!chat) { chat = String(msg.chat.id); greeted = false }
         out.push({ text: msg.text.trim(), thread: String(msg.chat.id), from: msg.from?.username })
       }
       return out
     },
     async send(text, thread) {
       const to = thread ?? chat
-      if (!to) return
+      if (!to) { console.error('[out] dropped (no chat bound yet)'); return }
+      console.error(`[out] ${to}: ${text.slice(0, 60).replace(/\n/g, ' ')}`)
       await fetch(api('sendMessage'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -141,12 +148,21 @@ let muted = false
 let dirty = false        // something changed since the last digest
 
 const label = (p) => (p.agent?.state && p.agent.state !== 'unknown' ? p.agent.state : 'shell')
-const short = (id) => id.split('/').pop()
+
+/*
+ * Pane ids are session-qualified ("openjevx/w1:p1") and the pane half is only
+ * unique WITHIN a session -- every session starts at w1. Dropping the session
+ * to save width put two different panes on screen as "w1:p1", which is worse
+ * than long: it is wrong. So the session comes back as soon as there is more
+ * than one of them, and is dropped only when it cannot be ambiguous.
+ */
+let multiSession = false
+const short = (id) => (multiSession ? id : id.split('/').pop())
 
 function listing() {
   if (!panes.length) return 'No panes.'
   return panes
-    .map((p, i) => `${String(i + 1).padStart(2)}. ${label(p).padEnd(7)} ${short(p.id)}  ${(p.title ?? '').slice(0, 38)}`)
+    .map((p, i) => `${String(i + 1).padStart(2)}. ${label(p).padEnd(7)} ${short(p.id)}  ${(p.title ?? '').slice(0, 34)}`)
     .join('\n')
 }
 
@@ -160,6 +176,7 @@ ws.onmessage = (ev) => {
 
   if (m.type === 'tree') {
     panes = panesOf(m.data)
+    multiSession = new Set(panes.map((p) => p.id.split('/')[0])).size > 1
     for (const p of panes) {
       const now = label(p)
       const was = lastState.get(p.id)
@@ -240,7 +257,16 @@ async function handle(text, thread) {
         call('agent.prompt', { pane_id: following, text })
         return reply(`sent to ${short(following)}`)
       }
-      return reply('unknown. /help')
+      /*
+       * Anything else, including the "hi" everybody opens with. Answering a
+       * greeting with "unknown. /help" is a dead end -- the first message to a
+       * bot is the moment to show what it can do, so this answers with the
+       * actual panes rather than a menu about panes.
+       */
+      return reply(
+        `herdr bridge — ${panes.length} pane(s)\n\n${listing()}\n\n` +
+        `/follow N to pick one, then just type to prompt it.\n` +
+        `/key y to answer a blocked agent · /tail 60 to watch · /help`)
   }
 }
 
@@ -248,6 +274,9 @@ async function handle(text, thread) {
 
 setInterval(async () => {
   for (const msg of await channel.poll()) {
+    // stderr, always: a bridge you cannot see receiving is a bridge you cannot
+    // debug. The token is never part of this line.
+    console.error(`[in] ${msg.thread}${msg.from ? ' @' + msg.from : ''}: ${msg.text}`)
     try { await handle(msg.text, msg.thread) } catch (e) { channel.send(`error: ${e.message}`) }
   }
 }, args.channel === 'telegram' ? 100 : 400)
