@@ -13,7 +13,7 @@
  * It owns no UI state — everything observable lands in the store.
  */
 
-import { BIN_GAP, BIN_SNAPSHOT, decodeBinary, encodeInput } from '../protocol/binary'
+import { BIN_GAP, BIN_SNAPSHOT, decodeBinary } from '../protocol/binary'
 import type {
   AgentData,
   ClientFrame,
@@ -30,7 +30,6 @@ import type {
   ViewportMode,
   WelcomeData,
 } from '../protocol/types'
-import { MIN_COLS, MIN_ROWS } from '../protocol/types'
 import {
   apply,
   getState,
@@ -382,113 +381,23 @@ export function sendViewport(targets: Record<PaneId, ViewportMode>) {
   sendControl({ seq: 0, type: 'viewport', data })
 }
 
-/**
- * RESIZE IS A MUTATION. Do not send it just because a pane is on screen.
+/* --- the input path is gone ----------------------------------------
  *
- * Herdr gives a pane ONE size, shared by everyone attached to it, so fitting a
- * pane to this browser window resizes it on the owner's laptop too — their
- * agent gets a SIGWINCH, throws its screen away and redraws under their hands.
- * B2's "send geometry before the first frame" is withdrawn: the server now
- * attaches with no geometry at all and reports the pane's own size back in a
- * `geometry` frame, which is what we render to.
+ * sendResize, sendMatchGeometry, sendRepaint, sendInput, sendScrollInput and
+ * sendInputText were the terminal's. With no terminal view there is no client
+ * that measures a grid, asks for a repaint, imposes a geometry or streams raw
+ * keystrokes, so all six are deleted rather than kept warm for a caller that
+ * no longer exists.
  *
- * Call this ONLY from an explicit, confirmed user action.
- */
-export function sendResize(target: PaneId, cols: number, rows: number) {
-  countEvent('resizeSent', target)
-  sendControl({
-    seq: 0,
-    type: 'resize',
-    data: {
-      target,
-      cols: Math.max(MIN_COLS, Math.floor(cols)),
-      rows: Math.max(MIN_ROWS, Math.floor(rows)),
-    },
-  })
-}
-
-/**
- * Give a pane its geometry back: the server re-attaches with no --cols/--rows,
- * so herdr uses the pane's own size again. This is the default state; `match`
- * exists so a client can UNDO an explicit fit without guessing a number.
- */
-export function sendMatchGeometry(target: PaneId) {
-  countEvent('matchSent', target)
-  sendControl({ seq: 0, type: 'resize', data: { target, cols: 0, rows: 0, match: true } })
-}
-
-/**
- * Ask for a guaranteed full repaint of a live target.
+ * Interaction did not go with them: the transcript sends `agent.send_keys` and
+ * `agent.prompt` over the CONTROL plane, which name what they do instead of
+ * pushing bytes at a PTY.
  *
- * Only the CLIENT can measure that its own grid has come out of alignment
- * (see terminal/renderHealth.ts), so only the client can ask for the repair.
- * Rate limiting lives in the watchdog: a repaint loop is indistinguishable
- * from flicker, and the server does not throttle this for us.
+ * The server still speaks all of it (SPEC A1's binary data plane, `resize`,
+ * `repaint`), so an older client keeps working and a native one can still use
+ * it. This is the web client declining a capability, not the protocol losing
+ * one.
  */
-export function sendRepaint(target: PaneId) {
-  sendControl({ seq: 0, type: 'repaint', data: { target } })
-}
-
-/* --- input path ---------------------------------------------------- */
-
-/**
- * B9 backpressure: over ~256KB buffered we drop WHEEL/scroll input but NEVER a
- * keystroke. Degrade scrolling, never typing.
- */
-const BUFFER_LIMIT_BYTES = 256 * 1024
-
-export function isCongested(): boolean {
-  const amt = (ws as unknown as { bufferedAmount?: number } | null)?.bufferedAmount
-  return typeof amt === 'number' && amt > BUFFER_LIMIT_BYTES
-}
-
-/**
- * B3/AMENDMENT 2 input coalescing: queueMicrotask drains BEFORE the task yields,
- * so a keystroke adds literally zero delay, while a wheel gesture's many events
- * merge into one frame. Never a timer on this path.
- */
-const pending = new Map<PaneId, Uint8Array[]>()
-let flushScheduled = false
-
-function scheduleFlush() {
-  if (flushScheduled) return
-  flushScheduled = true
-  queueMicrotask(() => {
-    flushScheduled = false
-    for (const [target, chunks] of pending) {
-      if (chunks.length === 0) continue
-      const total = chunks.reduce((n, c) => n + c.length, 0)
-      const merged = new Uint8Array(total)
-      let o = 0
-      for (const c of chunks) {
-        merged.set(c, o)
-        o += c.length
-      }
-      ws?.send(encodeInput(target, merged))
-    }
-    pending.clear()
-  })
-}
-
-/** Keystrokes: binary, no JSON encode on this path (AMENDMENT A1). Never dropped. */
-export function sendInput(target: PaneId, bytes: Uint8Array) {
-  if (!ws || ws.readyState !== 1 || bytes.length === 0) return
-  const q = pending.get(target)
-  if (q) q.push(bytes)
-  else pending.set(target, [bytes])
-  scheduleFlush()
-}
-
-/** Wheel / scroll reports. Dropped under congestion (B9). */
-export function sendScrollInput(target: PaneId, bytes: Uint8Array) {
-  if (isCongested()) return
-  sendInput(target, bytes)
-}
-
-const textEncoder = new TextEncoder()
-export function sendInputText(target: PaneId, text: string) {
-  sendInput(target, textEncoder.encode(text))
-}
 
 /* --- reconnect hooks ----------------------------------------------- */
 

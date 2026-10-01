@@ -40,7 +40,6 @@ const ascii = new TextEncoder()
 
 /** Header sizes. Server->client carries seq; client->server does not. */
 const S2C_TLEN_OFFSET = 9 // 1 (type) + 8 (seq)
-const C2S_TLEN_OFFSET = 1 // 1 (type)
 
 /**
  * Decode a server->client binary message. Returns null for an unknown type or a
@@ -75,17 +74,12 @@ export function decodeBinary(buf: ArrayBuffer): BinMessage | null {
   return null
 }
 
-/** Encode a client->server input message. One allocation, no JSON. */
-export function encodeInput(target: string, bytes: Uint8Array): ArrayBuffer {
-  const t = ascii.encode(target)
-  const out = new Uint8Array(C2S_TLEN_OFFSET + 2 + t.length + bytes.length)
-  const dv = new DataView(out.buffer)
-  dv.setUint8(0, BIN_INPUT)
-  dv.setUint16(C2S_TLEN_OFFSET, t.length, false)
-  out.set(t, C2S_TLEN_OFFSET + 2)
-  out.set(bytes, C2S_TLEN_OFFSET + 2 + t.length)
-  return out.buffer
-}
+/* encodeInput() lived here: the client half of the binary INPUT frame.
+ * Removed with the terminal view -- nothing in this app streams raw keystrokes
+ * any more; the transcript sends `agent.send_keys` on the control plane. The
+ * FRAME TYPE is still part of the protocol and the server still decodes it
+ * (SPEC A1), so this is a codec we no longer need, not a wire format we broke.
+ */
 
 /** Encode a server->client message. Used by the mock server only. */
 export function encodeServerBinary(
