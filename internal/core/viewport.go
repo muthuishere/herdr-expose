@@ -34,6 +34,14 @@ const (
 	// reason for every client to derive it again. It is opt-in, and the frame
 	// reports what it removed, so nobody is silently handed a different shape.
 	ModeTranscriptClean Mode = "transcript_clean"
+	// ModeTranscriptProse is ModeTranscriptClean with code, diffs and aligned
+	// output folded into "[12 lines of code]" markers.
+	//
+	// This one is LOSSY and says so. It is for a reader in a chat app, where a
+	// diff reflows into nonsense and twenty lines of it bury the sentence that
+	// explained why. The marker is what keeps it honest: the reader is told
+	// something was there and can open the pane to see it.
+	ModeTranscriptProse Mode = "transcript_prose"
 	// ModeNone is offscreen: state changes only, no output at all.
 	ModeNone Mode = "none"
 )
@@ -45,7 +53,19 @@ const (
 // is exactly how a pane would end up polled but never delivered, or delivered
 // while declaring a geometry it must never declare.
 func (m Mode) IsTranscript() bool {
-	return m == ModeTranscript || m == ModeTranscriptClean
+	return m == ModeTranscript || m == ModeTranscriptClean || m == ModeTranscriptProse
+}
+
+// transcriptLevel orders the flavours: 0 raw, 1 chrome removed, 2 code folded.
+func (m Mode) transcriptLevel() int {
+	switch m {
+	case ModeTranscriptClean:
+		return 1
+	case ModeTranscriptProse:
+		return 2
+	default:
+		return 0
+	}
 }
 
 // ParseMode maps a client-declared render mode onto a server mode.
@@ -60,6 +80,8 @@ func ParseMode(s string) Mode {
 		return ModeTranscript
 	case "transcript_clean":
 		return ModeTranscriptClean
+	case "transcript_prose":
+		return ModeTranscriptProse
 	default:
 		return ModeNone
 	}

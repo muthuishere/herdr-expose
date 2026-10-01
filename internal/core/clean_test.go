@@ -157,3 +157,47 @@ func TestCleanSuppressesATickingCounter(t *testing.T) {
 		t.Fatalf("cleaned screens differ and should not:\n %q\n %q", a, b)
 	}
 }
+
+// Code is CONTENT, not furniture, so folding it must leave a visible marker.
+// A reader has to be able to tell something was there.
+func TestCleanDroppingCodeLeavesAMarker(t *testing.T) {
+	c := newTestCleaner(t)
+	in := strings.Join([]string{
+		"I changed the build script:",
+		"   7 -set -euo pipefail",
+		"   8 -cd \"$(dirname \"$0\")\"",
+		"   9 +PORT=8765",
+		"That should fix the port clash.",
+	}, "\n")
+
+	got := c.CleanDroppingCode(in)
+	want := "I changed the build script:\n[3 lines of code]\nThat should fix the port clash."
+	if got.Text != want {
+		t.Fatalf("got:\n%q\nwant:\n%q", got.Text, want)
+	}
+	if got.Code != 3 {
+		t.Errorf("Code = %d, want 3", got.Code)
+	}
+}
+
+// A single code-shaped line is part of the sentence around it, not a block.
+func TestCleanDroppingCodeKeepsLoneLines(t *testing.T) {
+	c := newTestCleaner(t)
+	in := "Run /usr/local/bin/thing to start it.\nThen tell me what it printed."
+	if got := c.CleanDroppingCode(in).Text; got != in {
+		t.Fatalf("got %q, want it untouched", got)
+	}
+}
+
+// Plain Clean never folds code: the two levels must stay distinct.
+func TestCleanKeepsCodeByDefault(t *testing.T) {
+	c := newTestCleaner(t)
+	in := "   7 -set -euo pipefail\n   8 -cd /tmp/x/y"
+	got := c.Clean(in)
+	if got.Text != in {
+		t.Fatalf("got %q, want it untouched", got.Text)
+	}
+	if got.Code != 0 {
+		t.Errorf("Code = %d, want 0", got.Code)
+	}
+}

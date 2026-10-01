@@ -1,6 +1,7 @@
 package core
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 )
@@ -67,6 +68,44 @@ var DefaultChrome = []string{
 	`(?i)^\s*[\d.]+\s*k?\s*tokens\s*$`,
 }
 
+// Code-ish line shapes. A terminal gives one stream with prose and code in it,
+// and a chat app can render only one of them well.
+var (
+	// A line-number gutter, with or without a diff marker. Note the two minus
+	// signs: a terminal diff uses U+2212 MINUS SIGN, not ASCII hyphen, so
+	// matching only '-' misses every removed line.
+	reGutter = regexp.MustCompile(`^\s*\d+\s+[-+\x{2212}\x{00b1}]?\s?`)
+	reDiff   = regexp.MustCompile(`^\s*[-+\x{2212}]\s?\S`)
+	reBare   = regexp.MustCompile(`^\s*\d+$`)
+	reShell  = regexp.MustCompile(`^\s*[$#]\s\S`)
+	rePath   = regexp.MustCompile(`\S*/\S+/\S+`)
+	rePunct  = regexp.MustCompile(`[{}\[\]()<>;=|$` + "`" + `~^*/\\]`)
+)
+
+// CodeRunMin is how many consecutive code-shaped lines become a block.
+//
+// Two is where it stops being a coincidence. One numbered sentence in a
+// paragraph, or one line that mentions a path, belongs to the prose around it.
+const CodeRunMin = 2
+
+func isCodeLike(line string) bool {
+	t := strings.TrimSpace(line)
+	if t == "" {
+		return false
+	}
+	switch {
+	case reGutter.MatchString(line), reDiff.MatchString(line),
+		reBare.MatchString(line), reShell.MatchString(line), rePath.MatchString(line):
+		return true
+	}
+	if len(t) >= 8 {
+		if float64(len(rePunct.FindAllString(t, -1)))/float64(len(t)) > 0.08 {
+			return true
+		}
+	}
+	return false
+}
+
 // Cleaner strips chrome and collapses blank runs. The zero value is not usable;
 // build one with NewCleaner.
 type Cleaner struct {
@@ -100,6 +139,10 @@ type CleanResult struct {
 	Chrome int
 	// Blank is how many blank lines were collapsed away.
 	Blank int
+	// Code is how many lines of code, diff or aligned output were folded into
+	// markers. Unlike chrome this is real CONTENT, which is why it is replaced
+	// by a visible marker rather than silently dropped.
+	Code int
 }
 
 // Clean removes chrome lines, trims trailing whitespace, collapses runs of
@@ -108,17 +151,71 @@ type CleanResult struct {
 // It never reorders, never rewrites a line's text, and never joins lines. A
 // line that survives is byte-identical to what the pane showed, minus trailing
 // whitespace the grid padded it with.
+// Clean with DropCode folds code into markers as well as stripping chrome.
+//
+// This is LOSSY ON PURPOSE and only for a reader. A diff reflowed into a chat
+// message is unreadable -- a path breaks mid-token, a line-number gutter walks
+// out of alignment -- and twenty lines of it buries the sentence that said why
+// it happened. So a run becomes "[12 lines of code]": the reader is told
+// something was there, and can open the pane to see it.
+//
+// Nothing here guesses at MEANING. A run qualifies on shape alone -- gutters,
+// diff markers, shell prompts, paths, punctuation density -- and never on what
+// the code is about.
+func (c *Cleaner) CleanDroppingCode(text string) CleanResult {
+	return c.clean(text, true)
+}
+
 func (c *Cleaner) Clean(text string) CleanResult {
+	return c.clean(text, false)
+}
+
+func (c *Cleaner) clean(text string, dropCode bool) CleanResult {
 	var out []string
 	res := CleanResult{}
 	blankRun := 0
+	codeRun := 0
 
+	// Fold the pending code run into one marker, or release it as prose if it
+	// never reached the length that makes it a block.
+	flushCode := func(held []string) []string {
+		if codeRun == 0 {
+			return held
+		}
+		if codeRun >= CodeRunMin {
+			res.Code += codeRun
+			noun := "lines"
+			if codeRun == 1 {
+				noun = "line"
+			}
+			out = append(out, fmt.Sprintf("[%d %s of code]", codeRun, noun))
+		} else {
+			out = append(out, held...)
+		}
+		codeRun = 0
+		return held[:0]
+	}
+
+	var held []string
 	for _, raw := range strings.Split(text, "\n") {
 		line := strings.TrimRight(raw, " \t")
 
 		if c.isChrome(line) {
 			res.Chrome++
 			continue
+		}
+
+		if dropCode {
+			if isCodeLike(line) {
+				if blankRun > 0 && codeRun > 0 {
+					// A blank inside a diff is part of the diff.
+					blankRun = 0
+				}
+				codeRun++
+				held = append(held, line)
+				continue
+			}
+			held = flushCode(held)
 		}
 		if line == "" {
 			blankRun++
@@ -136,6 +233,10 @@ func (c *Cleaner) Clean(text string) CleanResult {
 		}
 		out = append(out, line)
 	}
+	if dropCode {
+		held = flushCode(held)
+	}
+	_ = held
 	// Trailing blanks are the void at the bottom of a grid, not content.
 	res.Blank += blankRun
 	res.Text = strings.Join(out, "\n")

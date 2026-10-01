@@ -132,13 +132,13 @@ func TestTranscriptSendsOnlyOnChange(t *testing.T) {
 
 	const target = "s/w1:p1"
 	p := h.transcript
-	p.subscribe(target, sess, false)
+	p.subscribe(target, sess, 0)
 
 	deliver := func(text string) {
 		// Drive the delivery half of poll() directly: the upstream read is what
 		// a unit test cannot have, the change detection is what it must prove.
 		f := TranscriptFrame{Target: target, Text: text}
-		p.deliver(target, f, f, text, text)
+		p.deliver(target, [3]TranscriptFrame{f, f, f}, [3]string{text, text, text})
 	}
 
 	deliver("hello")
@@ -158,7 +158,7 @@ func TestTranscriptSendsOnlyOnChange(t *testing.T) {
 	sink2 := &countingSink{}
 	sess2 := h.NewSession(ctx, sink2)
 	defer sess2.Close()
-	p.subscribe(target, sess2, false)
+	p.subscribe(target, sess2, 0)
 	deliver("hello world")
 	if got := sink2.count("transcript"); got != 1 {
 		t.Fatalf("new subscriber got %d frames, want 1", got)
