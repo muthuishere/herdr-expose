@@ -67,56 +67,23 @@ const REPLY_MS = Number(args.reply ?? 120000)
 const MIN_NEW_LINES = Number(args.minlines ?? 10)
 
 /*
- * TUI chrome: everything a terminal draws that is furniture, not content.
+ * CLEANING IS THE SERVER'S JOB NOW.
  *
- * This matters twice over. It is unreadable on a phone -- a 119-character
- * divider wraps into six lines of nothing -- and, worse, it CHANGES. A token
- * counter ticking from 550K to 551K, a spinner, a clock: each one makes the
- * screen "new" and would push a notification that carries no information.
+ * This file used to carry its own chrome patterns and its own blank-collapsing.
+ * So did the web client. Both grew the same subtle bugs, and the worst of them
+ * was an ORDERING bug you cannot see by reading either copy: strip the furniture
+ * AFTER comparing screens and a token counter ticking 550K to 551K still votes
+ * for "something changed".
  *
- * So chrome is stripped BEFORE anything is compared, which is the only order
- * that works: strip after comparing and the counter still votes.
+ * The transform is pure, so there is one right answer. We subscribe with
+ * `transcript_prose` and the text arrives cleaned, with a `cleaned` report
+ * saying what was removed.
+ *
+ * What stays here is the half that genuinely belongs to a client: what have I
+ * already shown THIS reader. That needs per-connection memory, which is exactly
+ * what the server refuses to keep.
  */
-const CHROME = [
-  /^[\s\u2500-\u257f_=\-\u2014\u2013]{8,}$/,          // rules and box drawing
-  // The input line. U+276F / U+203A are the TUI's own prompt carets, and what
-  // follows is what somebody is TYPING, not what the agent said. ASCII '>' is
-  // deliberately not here: it is a quote marker in real output.
-  /^\s*[\u276f\u203a]/,
-  /ctx\s+[\d.]+[KM]?\s+\d+%/i,                          // context meter
-  /\b(auto mode|bypass permissions|accept edits)\b.*\(/i, // mode banners
-  /shift\+tab to cycle/i,
-  /^\s*Image in clipboard/i,
-  /^\s*\u2191\s*\d+\s*(tokens|lines)/i,
-]
 
-/** Strip chrome and collapse blank runs. Content only. */
-function clean(text) {
-  const out = []
-  for (const raw of text.split('\n')) {
-    const line = raw.replace(/[ \t]+$/, '')
-    if (CHROME.some((re) => re.test(line))) continue
-    if (line === '') {
-      if (out.length && out[out.length - 1] === '') continue
-      out.push('')
-      continue
-    }
-    out.push(line)
-  }
-  while (out.length && out[0] === '') out.shift()
-  while (out.length && out[out.length - 1] === '') out.pop()
-  return out.join('\n')
-}
-
-/**
- * How many lines at the end of `next` were not already in `prev`.
- *
- * A terminal SCROLLS, so the new screen is usually the old one shifted up with
- * fresh lines at the bottom. Finding the longest overlap between the tail of
- * the old and the head of the new gives the genuinely new remainder; with no
- * overlap at all the screen was replaced wholesale, which is as new as it
- * gets.
- */
 const OVERLAP_SAME = Number(args.overlap ?? 0.8)
 const OVERLAP_MIN = 3
 
@@ -394,14 +361,15 @@ ws.onmessage = (ev) => {
       if (now === 'blocked' && !muted) {
         channel.send(`NEEDS YOU — ${short(p.id)}\n${(p.title ?? '').slice(0, 60)}`,
           null, { choices: [{ label: 'open', data: `p:${p.id}` }] })
-        send({ type: 'subscribe', data: { targets: { [p.id]: 'transcript' } } })
+        send({ type: 'subscribe', data: { targets: { [p.id]: 'transcript_prose' } } })
       }
     }
   }
 
   if (m.type === 'transcript') {
     const t = m.data.target
-    const screen = clean(m.data.text)
+    // Already cleaned upstream; m.data.cleaned says what was taken out.
+    const screen = m.data.text.trimEnd()
     // Just followed: show the screen ONCE, unprompted. "Follow it and then
     // wait for it to say something" is a dead end when the pane is idle --
     // which is most of them, most of the time.
@@ -500,7 +468,7 @@ async function handle(text, thread) {
     if (!panes.some((p) => p.id === id)) return reply('that pane is gone. /ls')
     following = id
     showOnce = id
-    send({ type: 'subscribe', data: { targets: { [id]: 'transcript' } } })
+    send({ type: 'subscribe', data: { targets: { [id]: 'transcript_prose' } } })
     return reply(`following ${short(id)} — fetching its screen…`)
   }
 
@@ -517,7 +485,7 @@ async function handle(text, thread) {
       const p = Number.isFinite(n) && n >= 1 ? panes[n - 1] : panes.find((x) => x.id.endsWith(arg))
       if (!p) return reply(`no such pane. /ls first.`)
       following = p.id
-      send({ type: 'subscribe', data: { targets: { [p.id]: 'transcript' } } })
+      send({ type: 'subscribe', data: { targets: { [p.id]: 'transcript_prose' } } })
       return reply(`following ${short(p.id)} (${label(p)}). /say to prompt it, /key to answer it.`)
     }
     case '/say':
