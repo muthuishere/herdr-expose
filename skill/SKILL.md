@@ -456,76 +456,155 @@ rather than guessing.
 
 When the owner asks for Telegram, WhatsApp, Teams, Discord, a dashboard or
 "let my bot drive this", **do not add an HTTP API and do not write a new
-service into this repo.** The server already exposes everything over one
-WebSocket, and that socket is what the bundled web UI itself uses. Write a
-client.
+service into this repo.** Everything is already on one WebSocket — the same
+one the bundled web UI uses. Write a client.
 
-Start from one of two files in the checkout. **`examples/chat-bridge.mjs`** is
-a working chat bridge — channels, commands, the digest policy below — with a
-`console` channel that needs no credentials, so it can be run and proved before
-any bot exists; adding Telegram/Teams/Discord means writing `poll()` and
-`send()`, nothing else. **`examples/bridge.mjs`** is the smaller one: a complete,
-dependency-free client — lists panes, follows one, prints what it is showing,
-sends a prompt or a key — and it runs as-is:
+Two worked examples ship in the checkout and both run as-is:
+
+- **`examples/chat-bridge.mjs`** — a complete chat bridge: menus, buttons,
+  commands, dedup. Start here for anything chat-shaped.
+- **`examples/bridge.mjs`** — the minimal client: list, follow, print, send.
+  Start here for a dashboard or a script.
 
 ```bash
-node examples/bridge.mjs                                  # local, no auth
-node examples/bridge.mjs --follow <session>/<pane> --watch
-node examples/bridge.mjs --url http://HOST:PORT --code ABC123   # a share
+node examples/chat-bridge.mjs --channel console          # no credentials needed
+node examples/chat-bridge.mjs --channel telegram         # HERDR_EXPOSE_TELEGRAM_TOKEN
+node examples/bridge.mjs --url http://HOST:PORT --code ABC123
 ```
 
-**The endpoint** is `/v1/stream` on whatever address is serving: the local
-daemon (`http://127.0.0.1:21118` by default — confirm with
-`herdr-expose status`) or a share's URL.
+### Put the work in the PLATFORM, keep the client thin
 
-**Auth depends on where it is listening, and this is the part to get right.**
-On loopback there is NO token: reaching `127.0.0.1` already means you are on
-the machine, so the listener is the grant. A bot on the same box connects with
-nothing. A SHARE is on a LAN or public address, so it is pairing-gated — mint a
-code with `share pair <id>`, `POST /v1/pair {"code","name"}` once to exchange it
-for a device token, then send `Authorization: Bearer <token>`. The token expires
-with the share.
+This is the rule to apply when extending any of it. A chat adapter that is
+200 lines is one somebody will write for Discord tomorrow; a chat adapter that
+is 600 lines is one they will get wrong in a new way. Anything that is the same
+answer for every client belongs in the server, where it is written once and
+tested once.
 
-**Scope is enforced in the store, not the UI.** A token for a share scoped to
-one session sees only that session's panes — measured: 30 panes on the local
-socket, 9 through a share. You cannot ask your way out of a scope, so handing
-someone a share link and letting them automate it does not leak the owner's
-other sessions.
+The division that worked, after getting it wrong twice:
 
-The loop is: read `tree` for sessions and panes with each one's `agent.state`;
-`subscribe` to follow a pane; read `transcript` frames; send `agent.prompt` or
-`agent.send_keys` to answer. `docs/api.md` is the full contract.
+| the server decides | the client decides |
+|---|---|
+| what the text IS — chrome stripped, code folded | how to draw it — buttons, markdown, threads |
+| whether a screen is worth sending at all | what THIS reader has already been shown |
+| when an agent has actually finished | which pane this conversation is on |
 
-### Four things that will cost an hour if nobody says them
+Both halves are real. Cleaning was duplicated in two clients before it moved
+server-side, and both copies grew the same bugs. Then deduplication was deleted
+from the client as "surely subsumed by the cleaning" and an answer arrived three
+times — the frames were genuinely different screens that merely OPENED the same.
+Per-connection memory cannot move into the server: it would grow a buffer per
+viewer, which is what `seq is not a resume cursor` exists to prevent.
 
-- **`subscribe` takes an OBJECT, not an array.** `{"targets": {"s/w1:p1":
-  "transcript"}}`. An array parses to an empty map and you receive nothing,
-  with no error.
-- **`seq` is not a resume cursor. There is no replay.** On reconnect you
-  re-subscribe; never ask for "everything since N". Under backpressure the
-  server DROPS and sends a `gap` frame rather than growing a buffer, so a
-  replay API would contradict the design, not extend it.
-- **Binary frames are raw terminal bytes.** A text client ignores them.
-- **`transcript` is the pane's SCREEN, not a conversation log.** There is no
-  turn structure in it to parse out, and inventing one is worse than showing
-  the text.
+### The four transcript flavours
+
+Subscribe with the one that matches what you are building. Each is a strict
+reduction of the one before, and all but the first report what they removed in
+a `cleaned` field, so a client can always say what it is showing.
+
+| mode | what you get |
+|---|---|
+| `transcript` | the screen, as it is. The web UI uses this. |
+| `transcript_clean` | furniture gone: rules, the input line, status and timing banners |
+| `transcript_prose` | also folds code and diffs into `[12 lines of code]` markers |
+| `transcript_settled` | prose, held until the agent stops AND the screen stops moving |
+
+Measured on one idle pane: 13300 chars raw, 12625 clean, 5404 prose. On a
+working pane the first three deliver and `transcript_settled` stays silent.
+
+**`transcript_settled` is the one a chat bridge wants.** A working agent
+redraws constantly and none of it is an answer; this gives one message per
+question instead of a dozen half-written ones.
+
+### The whole interface you have to implement
+
+This is the complete contract. Everything else -- cleaning, folding, waiting for
+the agent, deduplication, menus, commands -- is already done, in the plugin or
+in `examples/chat-bridge.mjs`. To support a new chat app you write these two
+functions and nothing else.
+
+```js
+export function myChannel() {
+  return {
+    name: 'myapp',
+
+    // Return messages since the last call. Block if your API supports long
+    // polling; return [] if there is nothing. Called in a sequential loop, so
+    // it is never re-entered while you are still inside it.
+    async poll() {
+      return [{ text: 'what the user typed', thread: 'conversation id',
+                from: 'username (optional)' }]
+    },
+
+    // Deliver one message. `opts.choices` is [{label, data}] when the bridge
+    // is offering options: render them as buttons if your app has them, and
+    // feed a tap back through poll() with text = that choice's `data`, which
+    // keeps one command path instead of two. If it has no buttons, print them
+    // -- the text commands accept the same payloads.
+    async send(text, thread, opts) { /* ... */ },
+  }
+}
+```
+
+Register it in `CHANNELS` and run with `--channel myapp`. That is the entire
+job: a tap and a typed command arrive the same way, so no command logic is
+duplicated per app.
+
+A channel is two functions. Telegram, Teams, Discord, Slack and a webhook all
+fit, and none of them knows anything about Herdr:
+
+```js
+{ name, async poll() -> [{text, thread, from}], async send(text, thread, opts) }
+```
+
+`opts.choices` is an optional list of `{label, data}`. A channel that can draw
+buttons draws them and feeds a tap back through `poll()` as if it were typed —
+which keeps ONE command path rather than two. A channel that cannot renders
+them as a list. The `console` channel exists so a bridge can be run and proved
+with no bot and no credentials.
+
+### Six things that will each cost you an hour
+
+- **`agent.prompt` and `agent.send_keys` take `target`, NOT `pane_id`.**
+  `api.md` uses `pane_id` for `agent.read` and `pane.send_text`, so the wrong
+  one reads perfectly, is ACCEPTED, and delivers nothing. The only symptom is
+  an answer that never arrives. Herdr's own CLI takes `<TARGET>`.
+- **Log every command result, not just errors.** A command that is accepted
+  and does nothing looks identical to one that worked. This is how the above
+  survived three rounds of testing.
+- **`subscribe` takes an OBJECT, not an array:** `{"targets": {"s/w1:p1":
+  "transcript_settled"}}`. An array parses to an empty map and you receive
+  nothing, silently.
+- **Never poll a long-poll inside `setInterval`.** The body outlasts the
+  interval, requests overlap, they all carry the same offset, and the provider
+  hands the same update to each — so one command runs three times. Await each
+  poll before starting the next.
+- **Hold a lock so only one bridge runs per channel.** Two bridges on one token
+  double every command and look exactly like a code bug. Reclaim a stale lock
+  by checking whether the pid is alive.
+- **`seq` is not a resume cursor and there is no replay.** On reconnect you
+  re-subscribe; never ask for "everything since N".
 
 ### Designing the chat side
 
-Say this to an owner who asks for a chat bridge, because the obvious design is
-the wrong one: **do not mirror a terminal into a chat channel.** A pane emits
-constantly, a 120x40 screen pasted every few seconds is unreadable, and the
-channel will rate-limit you into a backlog.
+Say this to an owner who asks for a bridge, because the obvious design is the
+wrong one: **do not mirror a terminal into a chat channel.** Push the state
+change they are actually waiting for — an agent going `blocked`, with its
+question and the keys it accepts. Digest the rest. Show a full screen only when
+asked.
 
-What is worth sending is the state change the owner actually waits for — an
-agent going `blocked`, with its question and the keys it accepts. Push that
-immediately; digest everything else on a timer; mirror only when asked.
+**And a group chat is a list of people who can type into a terminal.** Bind a
+bridge to a share so the scope is enforced in the store — a share-scoped token
+sees only that session's panes, measured at 9 against 30 on the local socket —
+keep it revocable (`devices --revoke`), and tell the owner who can reach the
+channel before it is wired up. "It is my group" is not an access control.
 
-**And a group chat is a list of people who can type into a terminal.** A bridge
-turns a chat message into keystrokes on the owner's machine. Bind it to a
-share so the scope is enforced, keep it revocable (`devices --revoke`), and
-tell the owner who can reach the channel before it is wired up. "It is my
-group" is not an access control.
+### Auth, which depends only on where it listens
+
+On loopback there is NO token: reaching `127.0.0.1` already means you are on
+the machine, so the listener is the grant. A SHARE is on a LAN or public
+address and is pairing-gated — mint a code with `share pair <id>`, `POST
+/v1/pair {"code","name"}` once to exchange it for a device token, then send
+`Authorization: Bearer <token>`. The token expires with the share.
 
 ## Verbs this skill does NOT cover
 
