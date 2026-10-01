@@ -112,6 +112,93 @@ button {
   letter-spacing: -0.02em;
 }
 
+/* The wordmark as a home button. It must still LOOK like the wordmark, so it
+   sheds every default a <button> brings and earns its affordance on hover and
+   focus instead of by looking like a control all the time. */
+.brand-home {
+  appearance: none;
+  background: none;
+  border: 0;
+  padding: 2px 4px;
+  margin: -2px -4px;
+  color: inherit;
+  cursor: pointer;
+  border-radius: 6px;
+}
+.brand-home:hover {
+  background: var(--bg-1);
+}
+.brand-home:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/*
+ * THE AT-A-GLANCE LINE.
+ *
+ * "needs you" is first and is the only one that ever uses the alert colour;
+ * everything else is deliberately quiet, because a dashboard where five things
+ * shout is a dashboard where nothing does. At zero it stays on screen and goes
+ * grey -- its absence is the signal people came for, and a count that vanishes
+ * cannot reassure anyone.
+ */
+.stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: stretch;
+  padding: 12px calc(var(--safe-right) + 14px) 2px calc(var(--safe-left) + 14px);
+}
+
+.stat {
+  appearance: none;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--bg-1);
+  color: var(--fg-dim);
+  font-family: var(--sans);
+  font-size: 12.5px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+.stat b {
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+.stat:disabled {
+  cursor: default;
+  opacity: 0.62;
+}
+.stat:not(:disabled):hover {
+  border-color: var(--fg-faint);
+}
+.stat:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* The one that is allowed to shout, and only when it is non-zero. */
+.stat-blocked.is-on {
+  border-color: var(--blocked);
+  background: color-mix(in srgb, var(--blocked) 14%, transparent);
+}
+.stat-blocked.is-on b,
+.stat-blocked.is-on span {
+  color: var(--blocked);
+}
+
+/* Not a control: the shape of the machine, not a filter. */
+.stat-quiet {
+  border-style: dashed;
+  cursor: default;
+}
+
 .scroll {
   flex: 1 1 auto;
   /* `auto` makes the scrollbar appear and vanish as content height changes,
@@ -726,25 +813,99 @@ button {
 }
 
 /*
- * The agent's own text. Visibly ITS text: our chrome is sans-serif and dim,
- * this is mono and full contrast, so nothing we wrote can be mistaken for
- * something the agent said.
+ * THE READING VIEW.
+ *
+ * This used to be one <pre> in 13px monospace — the pane's screen, moved to a
+ * browser. It was faithful and it was miserable to read on a phone: small,
+ * dense, every paragraph the full width of the window, nothing to rest on.
+ *
+ * A terminal is the right shape when you are IN a terminal. In a browser the
+ * reader wants a document, so prose is set like one: proportional, larger,
+ * loose leading, and a measure that stops long lines before they get hard to
+ * track back from.
+ *
+ * What stays monospace is what MEANS something in monospace — code, diffs,
+ * aligned columns (see .tr-code). The classifier decides which is which by
+ * shape, so this is not "prose is prettier", it is each kind of content
+ * getting the layout it needs.
  */
-.tr-text {
-  font-family: var(--mono);
-  font-size: 13px;
-  line-height: 1.5;
-  margin: 0;
+.tr-flow {
+  font-family: var(--sans);
+  font-size: 15.5px;
+  line-height: 1.62;
   color: var(--fg);
+  /* ~68 characters. Past that the eye loses the line it is returning to. */
+  max-width: 68ch;
+  margin: 0 auto;
+}
+
+.tr-para {
+  margin: 0 0 0.9em;
+  /* pre-wrap keeps the TUI's own leading indent, which is real structure. */
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  word-break: break-word;
-  max-width: 100%;
+}
+
+/* A real list, with a hanging indent, instead of a second line that starts
+   underneath the dash. */
+.tr-list {
+  margin: 0 0 0.9em;
+  padding-left: 1.35em;
+  list-style: disc;
+}
+.tr-list li {
+  margin: 0 0 0.35em;
+}
+.tr-list li::marker {
+  color: var(--fg-faint);
+}
+
+/* Inline code from the rare surviving backticks. */
+.tr-flow code {
+  font-family: var(--mono);
+  font-size: 0.88em;
+  padding: 0.1em 0.34em;
+  border-radius: 4px;
+  background: var(--bg-1, rgba(127, 127, 127, 0.14));
+  overflow-wrap: anywhere;
+}
+
+.tr-flow strong {
+  font-weight: 650;
+  color: var(--fg);
+}
+
+/*
+ * CODE, DIFFS, ANYTHING WITH COLUMNS. The one thing it must not do is wrap:
+ * wrapping breaks a path mid-token and walks a line-number gutter out of
+ * alignment, which is what made a diff unreadable on a phone.
+ *
+ * So it keeps its columns and scrolls ITSELF. The reader pans this block
+ * rather than the whole page, which is why .tr-body can stay overflow-x:
+ * hidden — one scroller per thing that needs one, never a page that slides
+ * sideways under your thumb.
+ */
+.tr-code {
+  margin: 0 0 1em;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--bg-1, rgba(127, 127, 127, 0.08));
+  border: 1px solid var(--line);
+  white-space: pre;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  /* The block owns the gesture; the page must not take it over. */
+  overscroll-behavior-x: contain;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.5;
   tab-size: 2;
 }
 
-.tr-line {
-  display: inline;
+/* Keyboard users need to reach the scroller too. */
+.tr-code:focus-visible {
+  outline: 2px solid var(--accent, #4a9eff);
+  outline-offset: 1px;
 }
 
 /*
@@ -755,13 +916,16 @@ button {
 .tr-rule {
   display: block;
   height: 1px;
-  margin: 8px 0;
+  border: 0;
+  margin: 1.1em 0;
   background: var(--line);
 }
 
+/* A collapsed run of blanks. Smaller than it was: paragraphs now carry their
+   own spacing, so a full blank line on top of that is a hole. */
 .tr-blank {
   display: block;
-  height: 8px;
+  height: 0.5em;
 }
 
 .tr-empty,

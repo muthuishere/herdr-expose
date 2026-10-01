@@ -91,6 +91,17 @@ type TranscriptFrame struct {
 	State string `json:"state,omitempty"`
 	// At is when the read happened.
 	At time.Time `json:"at"`
+	// Cleaned is present only on a transcript_clean frame, and says what was
+	// removed. A client must be able to tell that it is not looking at the
+	// raw screen without having to compare it to one.
+	Cleaned *CleanReport `json:"cleaned,omitempty"`
+}
+
+// CleanReport accounts for what server-side cleaning took out.
+type CleanReport struct {
+	Chrome int `json:"chrome"`
+	Blank  int `json:"blank"`
+	Code   int `json:"code,omitempty"`
 }
 
 // transcriptSub is one connection's subscription to one target.
@@ -100,6 +111,15 @@ type transcriptSub struct {
 	// 26 panes × a full screen every 0.65s into 206KB/s.
 	hash uint64
 	sent bool
+	// level is this subscriber's chosen flavour: 0 raw, 1 chrome removed, 2
+	// code folded. Dedup is PER LEVEL because the flavours differ exactly when
+	// the cleaning matters: a context meter ticking changes the raw screen and
+	// not the clean one, and waking a clean subscriber for it is the noise the
+	// mode exists to remove.
+	level int
+	// settle holds this subscriber's output while the agent is working, so a
+	// question gets ONE answer instead of a dozen half-written ones.
+	settle bool
 }
 
 // transcriptPoller deduplicates transcript reads across connections, exactly as
@@ -110,25 +130,46 @@ type transcriptPoller struct {
 	store *Store
 	log   *slog.Logger
 
-	mu   sync.Mutex
-	subs map[string]map[*Session]*transcriptSub
-	wake chan struct{}
+	mu      sync.Mutex
+	subs    map[string]map[*Session]*transcriptSub
+	cleaner *Cleaner
+	// stable[target] is how many consecutive polls the prose text has been
+	// unchanged. A settled subscriber waits for this, not just for the agent's
+	// status: "the agent stopped" and "the screen stopped moving" are different
+	// instants, and an agent that is done is often still painting.
+	stable map[string]int
+	// lastStable[target] is the prose text the stability counter is counting.
+	lastStable map[string]string
+	wake       chan struct{}
 }
 
 func newTranscriptPoller(store *Store, log *slog.Logger) *transcriptPoller {
-	return &transcriptPoller{store: store, log: log,
-		subs: map[string]map[*Session]*transcriptSub{}, wake: make(chan struct{}, 1)}
+	c, bad := NewCleaner(DefaultChrome)
+	if len(bad) > 0 {
+		log.Warn("transcript: skipping uncompilable chrome patterns", "patterns", bad)
+	}
+	return &transcriptPoller{store: store, log: log, cleaner: c,
+		subs:   map[string]map[*Session]*transcriptSub{},
+		stable: map[string]int{},
+		wake:   make(chan struct{}, 1)}
 }
 
-func (p *transcriptPoller) subscribe(target string, s *Session) {
+func (p *transcriptPoller) subscribe(target string, s *Session, level int, settle bool) {
 	p.mu.Lock()
 	m := p.subs[target]
 	if m == nil {
 		m = map[*Session]*transcriptSub{}
 		p.subs[target] = m
 	}
-	if _, ok := m[s]; !ok {
-		m[s] = &transcriptSub{}
+	if sub, ok := m[s]; !ok {
+		m[s] = &transcriptSub{level: level, settle: settle}
+	} else if sub.level != level || sub.settle != settle {
+		sub.settle = settle
+		// Changed flavour on an existing subscription: the next frame is a
+		// different shape, so the dedup state is meaningless and must not
+		// suppress it.
+		sub.level = level
+		sub.sent = false
 	}
 	p.mu.Unlock()
 	select {
@@ -284,16 +325,35 @@ func (p *transcriptPoller) poll(ctx context.Context, target string) {
 	// ANSI is stripped SERVER-side. The client renders text, never an emulator.
 	text := strings.TrimRight(StripANSI(res.Read.Text), "\n \t")
 
+	now := time.Now()
 	frame := TranscriptFrame{
 		Target: target, Source: source, Text: text, Lines: lines,
 		Truncated: res.Read.Truncated, Agent: hasAgent, State: state,
-		At: time.Now(),
+		At: now,
+	}
+
+	// Each flavour computed ONCE for every subscriber that wants it: the
+	// transforms are pure, so doing them per connection would be the same
+	// answer computed N times.
+	frames := [3]TranscriptFrame{frame, frame, frame}
+	ids := [3]string{source + "\x00" + state + "\x00" + text}
+	if p.cleaner != nil {
+		for i, fn := range []func(string) CleanResult{p.cleaner.Clean, p.cleaner.CleanDroppingCode} {
+			r := fn(text)
+			f := frame
+			f.Text = r.Text
+			f.Cleaned = &CleanReport{Chrome: r.Chrome, Blank: r.Blank, Code: r.Code}
+			frames[i+1] = f
+			ids[i+1] = source + "\x00" + state + "\x00" + r.Text
+		}
+	} else {
+		ids[1], ids[2] = ids[0], ids[0]
 	}
 	// The identity is the text PLUS what it is: the same characters read from
 	// `detection` instead of `recent_unwrapped`, or read while the agent's
 	// state changed, are a different thing to show and must not be suppressed
 	// as "unchanged".
-	p.deliver(target, frame, source+"\x00"+state+"\x00"+text)
+	p.deliver(target, frames, ids, state)
 }
 
 // deliver applies per-subscriber change detection and fans the frame out.
@@ -302,25 +362,78 @@ func (p *transcriptPoller) poll(ctx context.Context, target string) {
 // would mean a connection that subscribed a moment ago sees nothing until the
 // agent happens to move — an empty pane on a phone, indistinguishable from a
 // broken one. Suppression is the optimisation; the first frame is the product.
-func (p *transcriptPoller) deliver(target string, frame TranscriptFrame, identity string) {
-	h := fnv.New64a()
-	_, _ = h.Write([]byte(identity))
-	sum := h.Sum64()
+// StableDwell is how many consecutive unchanged polls make a screen "settled".
+//
+// One poll (~1s) is enough and two is not better: the failure this prevents is
+// a screen MID-PAINT, which resolves in a frame or two, not a screen that
+// changes slowly. Measured on a real agent reporting `done`: its transcript
+// went 29 -> 85 -> 86 lines over three polls while it finished rendering, and
+// every one of those was a legitimately different screen, so each was sent.
+// Eight near-identical messages arrived for one answer.
+const StableDwell = 1
 
+// working mirrors Herdr's own agent status. A settled agent is anything that
+// is not mid-turn: idle, done, or stopped to ask a question.
+func isWorkingStatus(status string) bool { return status == "working" || status == "running" }
+
+func (p *transcriptPoller) deliver(target string, frames [3]TranscriptFrame, ids [3]string, state string) {
+	var sums [3]uint64
+	for i, id := range ids {
+		h := fnv.New64a()
+		_, _ = h.Write([]byte(id))
+		sums[i] = h.Sum64()
+	}
+
+	type out struct {
+		s     *Session
+		level int
+	}
 	p.mu.Lock()
-	out := make([]*Session, 0, len(p.subs[target]))
+	send := make([]out, 0, len(p.subs[target]))
+	working := isWorkingStatus(state)
+
+	// Track how long the prose text has been still. Done under the SAME lock as
+	// the subscriber walk below -- taking it twice here deadlocks, and the
+	// compiler is perfectly happy with that.
+	if p.stable == nil {
+		p.stable = map[string]int{}
+	}
+	settledText := ids[2]
+	if p.lastStable[target] == settledText {
+		p.stable[target]++
+	} else {
+		p.stable[target] = 0
+		if p.lastStable == nil {
+			p.lastStable = map[string]string{}
+		}
+		p.lastStable[target] = settledText
+	}
+	steady := p.stable[target] >= StableDwell
 	for s, sub := range p.subs[target] {
-		if sub.sent && sub.hash == sum {
+		// Mid-turn output is not an answer, and neither is a screen still being
+		// painted. Hold both, and do NOT record the hash: the screen that
+		// eventually settles must still look new.
+		if sub.settle && (working || !steady) {
 			continue
 		}
-		sub.hash = sum
+		want := sums[sub.level]
+		if sub.sent && sub.hash == want {
+			continue
+		}
+		sub.hash = want
 		sub.sent = true
-		out = append(out, s)
+		send = append(send, out{s, sub.level})
 	}
 	p.mu.Unlock()
 
-	for _, s := range out {
-		s.sink.SendJSON("transcript", frame)
+	for _, o := range send {
+		f := frames[o.level]
+		// A screen that was ALL furniture cleans to nothing. Sending an empty
+		// frame costs a notification and says less than silence.
+		if o.level > 0 && f.Text == "" {
+			continue
+		}
+		o.s.sink.SendJSON("transcript", f)
 	}
 }
 

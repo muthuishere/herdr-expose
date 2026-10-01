@@ -25,9 +25,67 @@ const (
 	// history you attached in order to read. A transcript subscriber never
 	// touches the pane's geometry, so reading is non-destructive.
 	ModeTranscript Mode = "transcript"
+	// ModeTranscriptClean is ModeTranscript with the terminal's own furniture
+	// removed server-side: rules, the input line, status and timing banners.
+	//
+	// It exists because that cleaning had been written twice already — once in
+	// the web client, once in a chat bridge — and both copies grew the same
+	// subtle bugs. The transform is PURE, so there is one right answer and no
+	// reason for every client to derive it again. It is opt-in, and the frame
+	// reports what it removed, so nobody is silently handed a different shape.
+	ModeTranscriptClean Mode = "transcript_clean"
+	// ModeTranscriptProse is ModeTranscriptClean with code, diffs and aligned
+	// output folded into "[12 lines of code]" markers.
+	//
+	// This one is LOSSY and says so. It is for a reader in a chat app, where a
+	// diff reflows into nonsense and twenty lines of it bury the sentence that
+	// explained why. The marker is what keeps it honest: the reader is told
+	// something was there and can open the pane to see it.
+	ModeTranscriptProse Mode = "transcript_prose"
+	// ModeTranscriptSettled is ModeTranscriptProse that only speaks when the
+	// agent has STOPPED.
+	//
+	// A working agent redraws constantly, and forwarding that to a chat app
+	// means a dozen half-finished messages for one question. Nobody reads a
+	// partial answer; they want the answer. So while the agent is working this
+	// mode stays silent, and when it settles -- idle, done, or blocked on a
+	// question -- it delivers the screen once.
+	//
+	// This is a DELIVERY policy, not a text one: it is prose text, held until
+	// it is worth sending. It lives here rather than in each client because
+	// every client otherwise reinvents a timer and gets it wrong.
+	ModeTranscriptSettled Mode = "transcript_settled"
 	// ModeNone is offscreen: state changes only, no output at all.
 	ModeNone Mode = "none"
 )
+
+// IsTranscript is true for every transcript flavour.
+//
+// Every "is this a transcript" test goes through this rather than comparing to
+// ModeTranscript, so adding a flavour cannot leave one call site behind — which
+// is exactly how a pane would end up polled but never delivered, or delivered
+// while declaring a geometry it must never declare.
+func (m Mode) IsTranscript() bool {
+	return m == ModeTranscript || m == ModeTranscriptClean ||
+		m == ModeTranscriptProse || m == ModeTranscriptSettled
+}
+
+// waitsForSettle is true for the flavour that holds output while the agent
+// works. It is deliberately separate from transcriptLevel: one is about what
+// the text looks like, the other about when it is worth sending.
+func (m Mode) waitsForSettle() bool { return m == ModeTranscriptSettled }
+
+// transcriptLevel orders the flavours: 0 raw, 1 chrome removed, 2 code folded.
+func (m Mode) transcriptLevel() int {
+	switch m {
+	case ModeTranscriptClean:
+		return 1
+	case ModeTranscriptProse, ModeTranscriptSettled:
+		return 2
+	default:
+		return 0
+	}
+}
 
 // ParseMode maps a client-declared render mode onto a server mode.
 // Clients declare what they RENDER; the server decides what it SENDS.
@@ -39,6 +97,12 @@ func ParseMode(s string) Mode {
 		return ModeSummary
 	case "transcript":
 		return ModeTranscript
+	case "transcript_clean":
+		return ModeTranscriptClean
+	case "transcript_prose":
+		return ModeTranscriptProse
+	case "transcript_settled":
+		return ModeTranscriptSettled
 	default:
 		return ModeNone
 	}

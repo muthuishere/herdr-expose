@@ -26,7 +26,8 @@ import { useStore } from '../store/store'
 import { onReconnected, sendCommand, sendSubscribe, sendUnsubscribe } from '../net/connection'
 import { declareViewport, releaseViewport, resendViewport } from '../net/viewport'
 import { shapeTranscript } from './transcriptText'
-import { hasRealAgent } from './paneViewMode'
+import { hasRealAgent } from './agentPresence'
+import { renderInline } from './inlineText'
 
 /**
  * The answer keys from SPEC J2, sent as NAMED KEYS through `agent.send_keys`.
@@ -88,12 +89,13 @@ export function TranscriptView({ target }: { target: PaneId }) {
     <div className="tr">
       <TranscriptBody
         target={target}
-        lines={shaped.lines}
+        items={shaped.items}
         empty={!frame}
         blocked={blocked}
         source={frame?.source}
         truncated={!!frame?.truncated}
         collapsed={shaped.collapsed}
+        codeBlocks={shaped.codeBlocks}
         rejoined={shaped.rejoined}
       />
       {blocked ? <AnswerKeys target={target} /> : null}
@@ -109,22 +111,24 @@ export function TranscriptView({ target }: { target: PaneId }) {
  */
 function TranscriptBody({
   target,
-  lines,
+  items,
   empty,
   blocked,
   source,
   truncated,
   collapsed,
   rejoined,
+  codeBlocks,
 }: {
   target: PaneId
-  lines: ReturnType<typeof shapeTranscript>['lines']
+  items: ReturnType<typeof shapeTranscript>['items']
   empty: boolean
   blocked: boolean
   source?: string
   truncated: boolean
   collapsed: number
   rejoined: number
+  codeBlocks: number
 }) {
   const ref = useRef<HTMLDivElement>(null)
   const pinnedRef = useRef(true)
@@ -133,7 +137,7 @@ function TranscriptBody({
     const el = ref.current
     if (!el || !pinnedRef.current) return
     el.scrollTop = el.scrollHeight
-  }, [lines])
+  }, [items])
 
   return (
     <>
@@ -155,25 +159,34 @@ function TranscriptBody({
         ) : null}
         {empty ? (
           <p className="tr-empty">Reading this pane&apos;s screen…</p>
-        ) : lines.length === 0 ? (
+        ) : items.length === 0 ? (
           <p className="tr-empty">This pane&apos;s screen is blank.</p>
         ) : (
-          <pre className="tr-text">
-            {lines.map((l, i) =>
-              l.kind === 'rule' ? (
-                <span className="tr-rule" key={i} aria-hidden="true" />
-              ) : l.kind === 'blank' ? (
-                <span className="tr-blank" key={i}>
-                  {'\n'}
-                </span>
+          <div className="tr-flow">
+            {items.map((it, i) =>
+              it.kind === 'rule' ? (
+                <hr className="tr-rule" key={i} aria-hidden="true" />
+              ) : it.kind === 'blank' ? (
+                <div className="tr-blank" key={i} aria-hidden="true" />
+              ) : it.kind === 'code' ? (
+                /* Its own scroller. The lines keep their columns and the
+                   reader pans THIS block, instead of the whole screen. */
+                <pre className="tr-code" key={i} tabIndex={0}>
+                  {it.lines.join('\n')}
+                </pre>
+              ) : it.kind === 'list' ? (
+                <ul className="tr-list" key={i}>
+                  {it.items.map((li, j) => (
+                    <li key={j}>{renderInline(li)}</li>
+                  ))}
+                </ul>
               ) : (
-                <span className="tr-line" key={i}>
-                  {l.text}
-                  {'\n'}
-                </span>
+                <p className="tr-para" key={i}>
+                  {renderInline(it.text)}
+                </p>
               ),
             )}
-          </pre>
+          </div>
         )}
       </div>
       <Provenance
@@ -182,6 +195,7 @@ function TranscriptBody({
         truncated={truncated}
         collapsed={collapsed}
         rejoined={rejoined}
+        codeBlocks={codeBlocks}
       />
     </>
   )
@@ -200,12 +214,14 @@ function Provenance({
   truncated,
   collapsed,
   rejoined,
+  codeBlocks,
 }: {
   target: PaneId
   source?: string
   truncated: boolean
   collapsed: number
   rejoined: number
+  codeBlocks: number
 }) {
   const what = source ? (SOURCE_LABEL[source] ?? source) : 'this pane'
   // Every transform is named. The list is built rather than hard-coded so a
@@ -215,6 +231,13 @@ function Provenance({
   if (collapsed > 0) applied.push(`${collapsed} blank line${collapsed === 1 ? '' : 's'} collapsed`)
   if (rejoined > 0) {
     applied.push(`${rejoined} line${rejoined === 1 ? '' : 's'} rejoined where the pane wrapped them`)
+  }
+  if (codeBlocks > 0) {
+    applied.push(
+      `${codeBlocks} code block${codeBlocks === 1 ? '' : 's'} left unwrapped so ${
+        codeBlocks === 1 ? 'it keeps its' : 'they keep their'
+      } columns`,
+    )
   }
   const transforms =
     applied.length === 1

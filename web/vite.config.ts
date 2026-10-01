@@ -49,19 +49,9 @@ export default defineConfig({
   build: {
     target: 'es2020',
     sourcemap: false,
-    rollupOptions: {
-      output: {
-        manualChunks: {
-          // xterm is only needed once a pane is opened; keep it off the shell path.
-          xterm: [
-            '@xterm/xterm',
-            '@xterm/addon-canvas',
-            '@xterm/addon-webgl',
-            '@xterm/addon-unicode11',
-          ],
-        },
-      },
-    },
+    // No manualChunks any more. The one chunk worth splitting was xterm, which
+    // left with the terminal view; splitting anything else here would be
+    // guessing at a boundary the bundler already finds.
   },
   server: {
     port: 5173,

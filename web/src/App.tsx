@@ -13,6 +13,7 @@ import { useStore, setFocused } from './store/store'
 import { useIsMobile } from './hooks/useViewport'
 import { PaneList } from './components/PaneList'
 import { PaneView } from './components/PaneView'
+import { Stats } from './components/Stats'
 import { ConnectionBadge } from './components/AgentBadge'
 import { DesktopGrid } from './components/DesktopGrid'
 import { PairScreen } from './components/PairScreen'
@@ -95,6 +96,7 @@ export function App() {
                 <Disconnected link={link} error={lastError} unreachable={unreachable} />
               ) : null}
               {env.note ? <EnvNote note={env.note} /> : null}
+              <Stats />
               <PaneList onOpen={openPane} selected={focused} />
             </main>
           </>
@@ -107,7 +109,19 @@ export function App() {
     <div className="app app-desktop">
       <aside className="sidebar">
         <header className="appbar">
-          <span className="brand">herdr</span>
+          {/* The wordmark IS the way home. Opening a pane replaces the grid,
+              and until now nothing took you back to it on a wide screen --
+              the browser's back button worked, which is not somewhere a user
+              should have to look for a app's own navigation. */}
+          <button
+            type="button"
+            className="brand brand-home"
+            onClick={closePane}
+            aria-label="Back to all panes"
+            title="All panes"
+          >
+            herdr
+          </button>
           <ConnectionBadge link={link} rttMs={rttMs} attempt={attempt} />
         </header>
         <div className="scroll">
@@ -122,7 +136,10 @@ export function App() {
         {open ? (
           <PaneView target={open} onBack={closePane} />
         ) : (
-          <DesktopGrid onOpen={openPane} />
+          <>
+            <Stats />
+            <DesktopGrid onOpen={openPane} />
+          </>
         )}
       </main>
     </div>
