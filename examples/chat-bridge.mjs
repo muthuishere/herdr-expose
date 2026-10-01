@@ -56,6 +56,34 @@ const QUIET_MS = Number(args.quiet ?? 30000)
  * window closes the 30s floor governs again.
  */
 const REPLY_MS = Number(args.reply ?? 120000)
+/*
+ * How many NEW lines a screen must have gained before it is worth sending.
+ *
+ * "It changed" is far too twitchy for a terminal: a spinner frame, a token
+ * counter ticking, a clock in a status bar -- all of those change the screen
+ * every second while saying nothing. Counting the lines that are actually new
+ * is the difference between "something happened" and "a character moved".
+ */
+const MIN_NEW_LINES = Number(args.minlines ?? 10)
+
+/**
+ * How many lines at the end of `next` were not already in `prev`.
+ *
+ * A terminal SCROLLS, so the new screen is usually the old one shifted up with
+ * fresh lines at the bottom. Finding the longest overlap between the tail of
+ * the old and the head of the new gives the genuinely new remainder; with no
+ * overlap at all the screen was replaced wholesale, which is as new as it
+ * gets.
+ */
+function newLines(prev, next) {
+  const n = next.split('\n')
+  if (!prev) return n
+  const o = prev.split('\n')
+  for (let k = Math.min(o.length, n.length); k > 0; k--) {
+    if (o.slice(o.length - k).join('\n') === n.slice(0, k).join('\n')) return n.slice(k)
+  }
+  return n
+}
 
 /* ------------------------------------------------------------------ channels */
 
@@ -240,6 +268,9 @@ function maySend(target, text, force = false) {
   if (!force) {
     // Unchanged is never worth a notification, in any mode.
     if (prev && prev.text === text) return false
+    // Nor is a screen that only twitched. This applies even while waiting on a
+    // reply: a spinner is not an answer.
+    if (prev && newLines(prev.text, text).filter((l) => l.trim()).length < MIN_NEW_LINES) return false
     // The floor applies only when we are NOT waiting on a reply we asked for.
     if (!eager && prev && now - prev.at < QUIET_MS) return false
   }
@@ -322,9 +353,24 @@ ws.onmessage = (ev) => {
     const wanted = Date.now() < tailUntil && t === following
     const isBlocked = lastState.get(t) === 'blocked'
     const answering = Date.now() < (awaitingReply.get(t) ?? 0)
-    if (!muted && (wanted || isBlocked || answering) && maySend(t, m.data.text)) {
-      const tail = m.data.text.trimEnd().split('\n').slice(-18).join('\n')
-      channel.send(`${short(t)}\n\n${tail}`, null, { choices: paneActions(t) })
+    if (!muted && (wanted || isBlocked || answering)) {
+      const prev = lastSent.get(t)?.text
+      if (maySend(t, m.data.text)) {
+        /*
+         * Send only what is NEW. Re-sending a screen that is mostly lines the
+         * reader already has is how a chat becomes unreadable -- they have to
+         * find the new part themselves, every time.
+         *
+         * A blocked agent is the exception that proves it: its question may
+         * have arrived in an earlier frame, so the tail goes with it. Being
+         * told an agent needs you without being told what it asked is useless.
+         */
+        const delta = newLines(prev, m.data.text.trimEnd()).filter((l) => l.trim())
+        const body = isBlocked
+          ? m.data.text.trimEnd().split('\n').filter((l) => l.trim()).slice(-14).join('\n')
+          : delta.slice(-40).join('\n')
+        if (body) channel.send(`${short(t)}\n\n${body}`, null, { choices: paneActions(t) })
+      }
     }
   }
 }
