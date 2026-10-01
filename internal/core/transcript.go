@@ -117,6 +117,9 @@ type transcriptSub struct {
 	// not the clean one, and waking a clean subscriber for it is the noise the
 	// mode exists to remove.
 	level int
+	// settle holds this subscriber's output while the agent is working, so a
+	// question gets ONE answer instead of a dozen half-written ones.
+	settle bool
 }
 
 // transcriptPoller deduplicates transcript reads across connections, exactly as
@@ -142,7 +145,7 @@ func newTranscriptPoller(store *Store, log *slog.Logger) *transcriptPoller {
 		subs: map[string]map[*Session]*transcriptSub{}, wake: make(chan struct{}, 1)}
 }
 
-func (p *transcriptPoller) subscribe(target string, s *Session, level int) {
+func (p *transcriptPoller) subscribe(target string, s *Session, level int, settle bool) {
 	p.mu.Lock()
 	m := p.subs[target]
 	if m == nil {
@@ -150,8 +153,9 @@ func (p *transcriptPoller) subscribe(target string, s *Session, level int) {
 		p.subs[target] = m
 	}
 	if sub, ok := m[s]; !ok {
-		m[s] = &transcriptSub{level: level}
-	} else if sub.level != level {
+		m[s] = &transcriptSub{level: level, settle: settle}
+	} else if sub.level != level || sub.settle != settle {
+		sub.settle = settle
 		// Changed flavour on an existing subscription: the next frame is a
 		// different shape, so the dedup state is meaningless and must not
 		// suppress it.
@@ -340,7 +344,7 @@ func (p *transcriptPoller) poll(ctx context.Context, target string) {
 	// `detection` instead of `recent_unwrapped`, or read while the agent's
 	// state changed, are a different thing to show and must not be suppressed
 	// as "unchanged".
-	p.deliver(target, frames, ids)
+	p.deliver(target, frames, ids, state)
 }
 
 // deliver applies per-subscriber change detection and fans the frame out.
@@ -349,7 +353,11 @@ func (p *transcriptPoller) poll(ctx context.Context, target string) {
 // would mean a connection that subscribed a moment ago sees nothing until the
 // agent happens to move — an empty pane on a phone, indistinguishable from a
 // broken one. Suppression is the optimisation; the first frame is the product.
-func (p *transcriptPoller) deliver(target string, frames [3]TranscriptFrame, ids [3]string) {
+// working mirrors Herdr's own agent status. A settled agent is anything that
+// is not mid-turn: idle, done, or stopped to ask a question.
+func isWorkingStatus(status string) bool { return status == "working" || status == "running" }
+
+func (p *transcriptPoller) deliver(target string, frames [3]TranscriptFrame, ids [3]string, state string) {
 	var sums [3]uint64
 	for i, id := range ids {
 		h := fnv.New64a()
@@ -363,7 +371,13 @@ func (p *transcriptPoller) deliver(target string, frames [3]TranscriptFrame, ids
 	}
 	p.mu.Lock()
 	send := make([]out, 0, len(p.subs[target]))
+	working := isWorkingStatus(state)
 	for s, sub := range p.subs[target] {
+		// Mid-turn output is not an answer. Hold it, and do NOT record the
+		// hash: the screen that eventually settles must still look new.
+		if sub.settle && working {
+			continue
+		}
 		want := sums[sub.level]
 		if sub.sent && sub.hash == want {
 			continue

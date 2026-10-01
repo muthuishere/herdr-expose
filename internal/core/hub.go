@@ -392,13 +392,13 @@ func (s *Session) SetViewport(decl map[string]string) {
 				s.lastLive = target
 				s.mu.Unlock()
 			}
-		case ModeTranscript, ModeTranscriptClean, ModeTranscriptProse:
+		case ModeTranscript, ModeTranscriptClean, ModeTranscriptProse, ModeTranscriptSettled:
 			// No startStream, and therefore no `herdr terminal session
 			// observe --cols --rows` subprocess: the pane's own geometry is
 			// never touched. That is the whole mode.
 			s.stopStream(target)
 			s.hub.summary.unsubscribe(target, s)
-			s.hub.transcript.subscribe(target, s, mode.transcriptLevel())
+			s.hub.transcript.subscribe(target, s, mode.transcriptLevel(), mode.waitsForSettle())
 		case ModeSummary:
 			s.stopStream(target)
 			s.hub.transcript.unsubscribe(target, s)

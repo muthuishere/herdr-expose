@@ -1,6 +1,9 @@
 package core
 
 import (
+	"context"
+	"io"
+	"log/slog"
 	"strings"
 	"testing"
 )
@@ -199,5 +202,39 @@ func TestCleanKeepsCodeByDefault(t *testing.T) {
 	}
 	if got.Code != 0 {
 		t.Errorf("Code = %d, want 0", got.Code)
+	}
+}
+
+// Settle: a working agent is held, and the screen that settles still counts as
+// new. Holding must NOT record the hash, or the answer would be deduped away
+// against the half-written screen that was never sent.
+func TestSettleHoldsWorkingAndReleasesOnSettle(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	h := NewHub(NewStore(log), log)
+	sink := &countingSink{}
+	sess := h.NewSession(ctx, sink)
+	defer sess.Close()
+
+	const target = "s/w1:p1"
+	p := h.transcript
+	p.subscribe(target, sess, 2, true)
+
+	mk := func(text string) ([3]TranscriptFrame, [3]string) {
+		f := TranscriptFrame{Target: target, Text: text}
+		return [3]TranscriptFrame{f, f, f}, [3]string{text, text, text}
+	}
+
+	fr, id := mk("half written")
+	p.deliver(target, fr, id, "working")
+	if n := sink.count("transcript"); n != 0 {
+		t.Fatalf("delivered %d frames while working, want 0", n)
+	}
+
+	fr, id = mk("the finished answer")
+	p.deliver(target, fr, id, "idle")
+	if n := sink.count("transcript"); n != 1 {
+		t.Fatalf("delivered %d frames after settling, want 1", n)
 	}
 }

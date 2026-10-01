@@ -34,89 +34,22 @@ const args = Object.fromEntries(
 const BASE = (args.url ?? 'http://127.0.0.1:21118').replace(/\/$/, '')
 const DIGEST_MS = Number(args.digest ?? 30000)
 /*
- * The floor between two screen sends for the SAME pane.
+ * ALL OF THE HARD PART IS IN THE PLUGIN.
  *
- * A followed pane produces a transcript frame whenever its screen changes,
- * which for a working agent is constantly. Forwarding each one turns the chat
- * into the mirror this bridge exists not to be, and Telegram will rate-limit
- * you into a backlog that arrives after it stopped being true.
+ * This file used to carry chrome patterns, a blank collapser, a fuzzy overlap
+ * diff, a minimum-new-lines floor, a per-pane quiet timer and a reply window.
+ * Every one of those is something the next adapter -- Teams, Discord, Slack --
+ * would have written again and got wrong in its own way.
+ *
+ * They are one subscription now:
+ *
+ *   transcript_settled = prose text, delivered ONCE, when the agent stops.
+ *
+ * A working agent redraws constantly and none of it is an answer. The server
+ * holds output while the agent is mid-turn and releases the screen when it
+ * settles -- idle, done, or blocked on a question. So an adapter is back to
+ * what it should always have been: show what arrives, send what is typed.
  */
-const QUIET_MS = Number(args.quiet ?? 30000)
-/*
- * How long after you SEND something the bridge stays eager.
- *
- * Asking a question and getting nothing back is the failure that makes the
- * whole thing feel broken, and the quiet gate caused it: a prompt went out,
- * the agent answered, and the answer was suppressed because a screen had been
- * sent moments earlier when the pane was opened.
- *
- * Sending implies wanting the reply, so a prompt or a keypress opens a window
- * in which the next CHANGED screen comes straight through. Change detection
- * still applies -- this never resends an unchanged screen -- and once the
- * window closes the 30s floor governs again.
- */
-const REPLY_MS = Number(args.reply ?? 120000)
-/*
- * How many NEW lines a screen must have gained before it is worth sending.
- *
- * "It changed" is far too twitchy for a terminal: a spinner frame, a token
- * counter ticking, a clock in a status bar -- all of those change the screen
- * every second while saying nothing. Counting the lines that are actually new
- * is the difference between "something happened" and "a character moved".
- */
-const MIN_NEW_LINES = Number(args.minlines ?? 10)
-
-/*
- * CLEANING IS THE SERVER'S JOB NOW.
- *
- * This file used to carry its own chrome patterns and its own blank-collapsing.
- * So did the web client. Both grew the same subtle bugs, and the worst of them
- * was an ORDERING bug you cannot see by reading either copy: strip the furniture
- * AFTER comparing screens and a token counter ticking 550K to 551K still votes
- * for "something changed".
- *
- * The transform is pure, so there is one right answer. We subscribe with
- * `transcript_prose` and the text arrives cleaned, with a `cleaned` report
- * saying what was removed.
- *
- * What stays here is the half that genuinely belongs to a client: what have I
- * already shown THIS reader. That needs per-connection memory, which is exactly
- * what the server refuses to keep.
- */
-
-const OVERLAP_SAME = Number(args.overlap ?? 0.8)
-const OVERLAP_MIN = 3
-
-function newLines(prev, next) {
-  const n = next.split('\n')
-  if (!prev) return n
-  const o = prev.split('\n')
-
-  /*
-   * Find the largest block at the end of the old screen that is ALSO the start
-   * of the new one, and call everything after it new.
-   *
-   * The match is deliberately fuzzy. An exact comparison looked right and was
-   * useless in practice: a terminal redraws its lines, and one repainted
-   * character -- a changed elapsed time, a moved cursor, a re-rendered badge --
-   * made the overlap fail, so the whole screen counted as new and got sent
-   * again. Eighty percent of the lines matching means it is the same block of
-   * output with some of it repainted.
-   *
-   * Largest k first, so the answer is the LONGEST overlap rather than the first
-   * coincidental one. A floor of three lines stops a pair of blanks matching
-   * everything.
-   */
-  for (let k = Math.min(o.length, n.length); k >= OVERLAP_MIN; k--) {
-    const a = o.slice(o.length - k)
-    const b = n.slice(0, k)
-    let same = 0
-    for (let i = 0; i < k; i++) if (a[i] === b[i]) same++
-    if (same / k >= OVERLAP_SAME) return n.slice(k)
-  }
-  // No overlap: the screen was replaced wholesale, which is as new as it gets.
-  return n
-}
 
 /* ------------------------------------------------------------------ channels */
 
@@ -270,46 +203,6 @@ const call = (method, params) => send({ type: 'command', data: { id: `c-${seq + 
 const lastState = new Map()
 let panes = []
 let following = null     // pane id this chat is driving
-let tailUntil = 0        // epoch ms; while in the future, transcripts are forwarded
-let showOnce = null      // pane whose next transcript frame is shown unasked
-/** target -> { at, text } of the last screen actually sent for it. */
-const lastSent = new Map()
-/** target -> epoch ms until which we are expecting an answer we asked for. */
-const awaitingReply = new Map()
-
-/** Called whenever WE put something into a pane. */
-function expectReply(target) {
-  awaitingReply.set(target, Date.now() + REPLY_MS)
-}
-
-/**
- * May we send this screen now?
- *
- * Two gates, and BOTH must pass: the text has to have changed, and QUIET_MS
- * has to have elapsed since the last one. Unchanged output is the common case
- * -- an idle pane re-reports the same screen -- and sending it again says
- * nothing while costing a notification on somebody's phone.
- *
- * `force` is for a screen the user just asked for by tapping a pane. An
- * explicit request is not spam, but it still RECORDS, so the next automatic
- * send is measured from it.
- */
-function maySend(target, text, force = false) {
-  const prev = lastSent.get(target)
-  const now = Date.now()
-  const eager = now < (awaitingReply.get(target) ?? 0)
-  if (!force) {
-    // Unchanged is never worth a notification, in any mode.
-    if (prev && prev.text === text) return false
-    // Nor is a screen that only twitched. This applies even while waiting on a
-    // reply: a spinner is not an answer.
-    if (prev && newLines(prev.text, text).filter((l) => l.trim()).length < MIN_NEW_LINES) return false
-    // The floor applies only when we are NOT waiting on a reply we asked for.
-    if (!eager && prev && now - prev.at < QUIET_MS) return false
-  }
-  lastSent.set(target, { at: now, text })
-  return true
-}
 let muted = false
 let dirty = false        // something changed since the last digest
 
@@ -338,7 +231,7 @@ function listing() {
 
 ws.onopen = () => channel.send(
   `herdr bridge up on ${BASE}${tok ? '' : ' (local)'}\n` +
-  `/ls  /follow N  /say ...  /key y  /tail 60  /mute  /help`)
+  `/ls  /follow N  /say ...  /key y  /mute  /help`)
 
 ws.onmessage = (ev) => {
   if (typeof ev.data !== 'string') return
@@ -361,52 +254,24 @@ ws.onmessage = (ev) => {
       if (now === 'blocked' && !muted) {
         channel.send(`NEEDS YOU — ${short(p.id)}\n${(p.title ?? '').slice(0, 60)}`,
           null, { choices: [{ label: 'open', data: `p:${p.id}` }] })
-        send({ type: 'subscribe', data: { targets: { [p.id]: 'transcript_prose' } } })
+        send({ type: 'subscribe', data: { targets: { [p.id]: 'transcript_settled' } } })
       }
     }
   }
 
   if (m.type === 'transcript') {
+    if (muted) return
     const t = m.data.target
-    // Already cleaned upstream; m.data.cleaned says what was taken out.
-    const screen = m.data.text.trimEnd()
-    // Just followed: show the screen ONCE, unprompted. "Follow it and then
-    // wait for it to say something" is a dead end when the pane is idle --
-    // which is most of them, most of the time.
-    if (showOnce === t) {
-      showOnce = null
-      if (!maySend(t, screen, true)) return
-      const tail = screen.split('\n').slice(-20).join('\n')
-      channel.send(`${short(t)} — last ${Math.min(20, tail.split('\n').length)} lines\n\n${tail}`,
-        null, { choices: paneActions(t) })
-      return
-    }
-    // Only forward a screen when it was ASKED for: a blocked agent's question,
-    // or an explicit /tail. Otherwise this becomes the mirror we refused to be.
-    // Forward a screen when it was asked for: a live /tail, an agent that is
-    // blocked, or an answer to something we just sent.
-    const wanted = Date.now() < tailUntil && t === following
-    const isBlocked = lastState.get(t) === 'blocked'
-    const answering = Date.now() < (awaitingReply.get(t) ?? 0)
-    if (!muted && (wanted || isBlocked || answering)) {
-      const prev = lastSent.get(t)?.text
-      if (maySend(t, screen)) {
-        /*
-         * Send only what is NEW. Re-sending a screen that is mostly lines the
-         * reader already has is how a chat becomes unreadable -- they have to
-         * find the new part themselves, every time.
-         *
-         * A blocked agent is the exception that proves it: its question may
-         * have arrived in an earlier frame, so the tail goes with it. Being
-         * told an agent needs you without being told what it asked is useless.
-         */
-        const delta = newLines(prev, screen).filter((l) => l.trim())
-        const body = isBlocked
-          ? screen.split('\n').filter((l) => l.trim()).slice(-14).join('\n')
-          : delta.slice(-40).join('\n')
-        if (body) channel.send(`${short(t)}\n\n${body}`, null, { choices: paneActions(t) })
-      }
-    }
+    /*
+     * Nothing reaches here that was not worth sending. The server held this
+     * while the agent was mid-turn, released it when the agent stopped,
+     * stripped the terminal's furniture and folded its code into markers.
+     * There is nothing left for a chat adapter to decide.
+     */
+    const text = m.data.text.trimEnd()
+    if (!text) return
+    channel.send(`${short(t)}\n\n${text.split('\n').slice(-40).join('\n')}`,
+      null, { choices: paneActions(t) })
   }
 }
 
@@ -422,7 +287,6 @@ function paneActions(id) {
     { label: 'n', data: `k:n` },
     { label: 'enter', data: `k:enter` },
     { label: 'esc', data: `k:esc` },
-    { label: 'watch 60s', data: `t:60` },
     { label: 'back', data: `s:${sessionOf(id)}` },
   ]
 }
@@ -461,20 +325,18 @@ async function handle(text, thread) {
 
   // Button payloads. A tapped button and a typed command run the same code.
   if (text.startsWith('s:')) return showPanes(text.slice(2), reply)
-  if (text.startsWith('t:')) return handle(`/tail ${text.slice(2)}`, thread)
   if (text.startsWith('k:')) return handle(`/key ${text.slice(2)}`, thread)
   if (text.startsWith('p:')) {
     const id = text.slice(2)
     if (!panes.some((p) => p.id === id)) return reply('that pane is gone. /ls')
     following = id
-    showOnce = id
-    send({ type: 'subscribe', data: { targets: { [id]: 'transcript_prose' } } })
+    send({ type: 'subscribe', data: { targets: { [id]: 'transcript_settled' } } })
     return reply(`following ${short(id)} — fetching its screen…`)
   }
 
   switch (cmd) {
     case '/help':
-      return reply('/ls  /follow N|id  /say TEXT  /key K  /tail SEC  /mute  /unmute  /who')
+      return reply('/ls  /follow N|id  /say TEXT  /key K  /mute  /unmute  /who')
     case '/ls':
     case '/start':
       return showSessions(reply)
@@ -485,26 +347,18 @@ async function handle(text, thread) {
       const p = Number.isFinite(n) && n >= 1 ? panes[n - 1] : panes.find((x) => x.id.endsWith(arg))
       if (!p) return reply(`no such pane. /ls first.`)
       following = p.id
-      send({ type: 'subscribe', data: { targets: { [p.id]: 'transcript_prose' } } })
+      send({ type: 'subscribe', data: { targets: { [p.id]: 'transcript_settled' } } })
       return reply(`following ${short(p.id)} (${label(p)}). /say to prompt it, /key to answer it.`)
     }
     case '/say':
       if (!following) return reply('/follow one first.')
       if (!arg) return reply('/say what?')
       call('agent.prompt', { pane_id: following, text: arg })
-      expectReply(following)
       return reply(`sent to ${short(following)} — watching for the reply`)
     case '/key':
       if (!following) return reply('/follow one first.')
       call('agent.send_keys', { pane_id: following, keys: [arg || 'enter'] })
-      expectReply(following)
       return reply(`${arg || 'enter'} -> ${short(following)}`)
-    case '/tail': {
-      if (!following) return reply('/follow one first.')
-      const secs = Math.min(Number(arg) || 30, 300)
-      tailUntil = Date.now() + secs * 1000
-      return reply(`mirroring ${short(following)} for ${secs}s`)
-    }
     case '/mute': muted = true; return reply('muted')
     case '/unmute': muted = false; return reply('unmuted')
     default:
@@ -512,8 +366,7 @@ async function handle(text, thread) {
       // thing people actually want to type, so it is not behind a command.
       if (!cmd.startsWith('/') && following) {
         call('agent.prompt', { pane_id: following, text })
-        expectReply(following)
-        return reply(`sent to ${short(following)} — watching for the reply`)
+          return reply(`sent to ${short(following)} — watching for the reply`)
       }
       /*
        * Anything else, including the "hi" everybody opens with. Answering a
