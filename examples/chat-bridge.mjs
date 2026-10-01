@@ -272,14 +272,38 @@ async function handle(text, thread) {
 
 /* ----------------------------------------------------------------- the loops */
 
-setInterval(async () => {
-  for (const msg of await channel.poll()) {
-    // stderr, always: a bridge you cannot see receiving is a bridge you cannot
-    // debug. The token is never part of this line.
-    console.error(`[in] ${msg.thread}${msg.from ? ' @' + msg.from : ''}: ${msg.text}`)
-    try { await handle(msg.text, msg.thread) } catch (e) { channel.send(`error: ${e.message}`) }
+/*
+ * A SEQUENTIAL loop, not setInterval. This matters and it bit:
+ *
+ * Telegram's getUpdates is a LONG poll -- the request parks for up to 25s
+ * waiting for something to arrive. setInterval does not wait for an async body,
+ * so a 100ms timer fired ~250 overlapping requests while the first was still
+ * parked. Every one of them carried the SAME offset, because offset only
+ * advances when a response is handled, so Telegram handed the same update to
+ * each of them. One "/follow 1" became three, and one typed prompt was
+ * delivered to a live agent three times.
+ *
+ * Awaiting the poll before scheduling the next one makes overlap impossible by
+ * construction rather than by a guard flag somebody can forget.
+ */
+async function pump() {
+  for (;;) {
+    try {
+      for (const msg of await channel.poll()) {
+        // stderr, always: a bridge you cannot see receiving is a bridge you
+        // cannot debug. The token is never part of this line.
+        console.error(`[in] ${msg.thread}${msg.from ? ' @' + msg.from : ''}: ${msg.text}`)
+        try { await handle(msg.text, msg.thread) } catch (e) { channel.send(`error: ${e.message}`) }
+      }
+    } catch (e) {
+      console.error('[poll] ' + (e.message ?? e))
+    }
+    // A long-polling channel returns only when it has something or it timed
+    // out, so it needs no delay; a local one would spin without this.
+    if (args.channel !== 'telegram') await new Promise((r) => setTimeout(r, 400))
   }
-}, args.channel === 'telegram' ? 100 : 400)
+}
+pump()
 
 // The digest. Quiet by construction: it sends nothing unless a state actually
 // changed, so a machine full of idle panes produces no traffic at all.
