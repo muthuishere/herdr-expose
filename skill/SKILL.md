@@ -1,6 +1,6 @@
 ---
 name: herdr-share
-description: Turn a Herdr terminal session — a running coding agent, a shell, one pane — into a private web URL somebody can open on a phone, scoped to that session alone, time-boxed, pairing-gated, and gone when it expires. Use when the owner says "share this", "share this session/pane/agent/terminal", "expose this agent", "give someone access to this", "let X see what this agent is doing", "put this on a URL", "I want to watch this from my phone", "give me a link for this", "put this agent on <hostname>", "quick share this", "share it without a domain", or "share it on the wifi". Also covers the ALL-SESSIONS share for "share everything", "share all my sessions", "expose the whole herdr", "share all my agents", "give them every session", "share my whole machine's herdr" — one URL that serves every running session, still time-boxed, pairing-gated and revocable. And for the whole lifecycle afterwards, "list my shares", "how long has that share got", "extend that share", "revoke the share", "stop sharing", "stop all shares", "kill every exposure", "panic", or "is anything of mine exposed right now". Do NOT use it for exposing a port or a web service in general (it shares Herdr panes only), for publishing or deploying code, for npm or PyPI publishing, for exposure in the photographic, financial or risk sense, or for granting access to a repo, a document or a cloud account. Wraps the herdr-expose CLI — one scoped detached server on a LAN address, a throwaway *.trycloudflare.com tunnel, or a Cloudflare named tunnel on a domain you own.
+description: "Share a Herdr session as a private, time-boxed, pairing-gated web URL; list/extend/revoke shares. Trigger: share this session, give me a link for this, revoke the share, panic."
 ---
 
 # herdr-share
@@ -452,6 +452,77 @@ other checks (`cloudflared`, `cloudflare token`, `dns`, `port`,
 not start. Every failing check carries a hint naming the fix — quote the hint
 rather than guessing.
 
+## Building an integration (a chat bot, a bridge, anything that is not the web UI)
+
+When the owner asks for Telegram, WhatsApp, Teams, Discord, a dashboard or
+"let my bot drive this", **do not add an HTTP API and do not write a new
+service into this repo.** The server already exposes everything over one
+WebSocket, and that socket is what the bundled web UI itself uses. Write a
+client.
+
+Start from **`examples/bridge.mjs`** in the checkout. It is a complete,
+dependency-free client — lists panes, follows one, prints what it is showing,
+sends a prompt or a key — and it runs as-is:
+
+```bash
+node examples/bridge.mjs                                  # local, no auth
+node examples/bridge.mjs --follow <session>/<pane> --watch
+node examples/bridge.mjs --url http://HOST:PORT --code ABC123   # a share
+```
+
+**The endpoint** is `/v1/stream` on whatever address is serving: the local
+daemon (`http://127.0.0.1:21118` by default — confirm with
+`herdr-expose status`) or a share's URL.
+
+**Auth depends on where it is listening, and this is the part to get right.**
+On loopback there is NO token: reaching `127.0.0.1` already means you are on
+the machine, so the listener is the grant. A bot on the same box connects with
+nothing. A SHARE is on a LAN or public address, so it is pairing-gated — mint a
+code with `share pair <id>`, `POST /v1/pair {"code","name"}` once to exchange it
+for a device token, then send `Authorization: Bearer <token>`. The token expires
+with the share.
+
+**Scope is enforced in the store, not the UI.** A token for a share scoped to
+one session sees only that session's panes — measured: 30 panes on the local
+socket, 9 through a share. You cannot ask your way out of a scope, so handing
+someone a share link and letting them automate it does not leak the owner's
+other sessions.
+
+The loop is: read `tree` for sessions and panes with each one's `agent.state`;
+`subscribe` to follow a pane; read `transcript` frames; send `agent.prompt` or
+`agent.send_keys` to answer. `docs/api.md` is the full contract.
+
+### Four things that will cost an hour if nobody says them
+
+- **`subscribe` takes an OBJECT, not an array.** `{"targets": {"s/w1:p1":
+  "transcript"}}`. An array parses to an empty map and you receive nothing,
+  with no error.
+- **`seq` is not a resume cursor. There is no replay.** On reconnect you
+  re-subscribe; never ask for "everything since N". Under backpressure the
+  server DROPS and sends a `gap` frame rather than growing a buffer, so a
+  replay API would contradict the design, not extend it.
+- **Binary frames are raw terminal bytes.** A text client ignores them.
+- **`transcript` is the pane's SCREEN, not a conversation log.** There is no
+  turn structure in it to parse out, and inventing one is worse than showing
+  the text.
+
+### Designing the chat side
+
+Say this to an owner who asks for a chat bridge, because the obvious design is
+the wrong one: **do not mirror a terminal into a chat channel.** A pane emits
+constantly, a 120x40 screen pasted every few seconds is unreadable, and the
+channel will rate-limit you into a backlog.
+
+What is worth sending is the state change the owner actually waits for — an
+agent going `blocked`, with its question and the keys it accepts. Push that
+immediately; digest everything else on a timer; mirror only when asked.
+
+**And a group chat is a list of people who can type into a terminal.** A bridge
+turns a chat message into keystrokes on the owner's machine. Bind it to a
+share so the scope is enforced, keep it revocable (`devices --revoke`), and
+tell the owner who can reach the channel before it is wired up. "It is my
+group" is not an access control.
+
 ## Verbs this skill does NOT cover
 
 `serve`, `daemon`, `stop`, `open`, `pair`, `devices`, `install-service`,
@@ -493,7 +564,7 @@ output over this file and say so.
   changing under a paired device, no PWA install on a LAN IP, `panic` reporting
   `cloudflared STILL RUNNING`.
 - `docs/api.md` — the wire contract, if you are building a client rather than
-  driving the CLI.
+  driving the CLI. `examples/bridge.mjs` is that contract as working code.
 - `docs/adr/0035` — why `--all` is the ABSENCE of a scope rather than a wider
   one, and why it is the only create that asks for a confirmation.
 - `docs/adr/0026`–`0029` — why a share is a separate scoped process, why quick
