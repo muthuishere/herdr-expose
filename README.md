@@ -79,6 +79,37 @@ make, and the thing this was rebuilt around.
 
 ---
 
+## Agents messaging agents, on any machine
+
+The second bundled skill, `herdr-message`, lets an agent find and talk to any
+other agent: Claude, Codex, Devin, OpenCode or any kind Herdr detects, in any
+Herdr session, on this machine or another one. Say it in plain words:
+
+> **ask the devin agent on devbox to run the tests and tell me what failed**
+
+The skill drives `herdr-expose msg`, a thin client of the daemon:
+
+```bash
+herdr-expose msg agents --all                        # every agent here and on peers
+herdr-expose msg send devbox:default/rdevin "…" --wait 300
+herdr-expose msg reply <id> "…"                      # what a receiving agent runs
+herdr-expose msg peer add devbox https://devbox.example.com <token>
+```
+
+Every send gets a request id. The receiver's daemon keeps a request file and,
+once answered, a response file, which is the proof of a round trip; it keeps
+the newest 100. A message to a busy agent waits until it is idle, a message to
+an agent stuck on a permission dialog is reported `blocked` and the dialog is
+never answered for it, and a hop limit stops two agents replying forever.
+
+A peer is just a URL and that machine's messaging token
+(`herdr-expose msg token`). How the URL is reachable is your choice: a LAN
+address, a `--domain` tunnel, or anything that forwards HTTP. The messaging
+token is separate from share links, so a link for watching a pane can never
+send messages.
+
+---
+
 ## Why the skill is the whole point
 
 Every other way to do this is something **you** operate. You install the app,

@@ -12,8 +12,9 @@ import (
 // `herdr-expose skill install|uninstall|status` — the agent skill half of the
 // one install.
 //
-// The skill in skill/ is how the owner actually drives this binary: they say
-// "share this session" to Claude Code and the skill runs the CLI. It is
+// The skills (bundledSkills) are how the owner actually drives this binary:
+// they say "share this session" or "ask the devin agent ..." to their agent
+// and a skill runs the CLI. It is
 // therefore part of the product, not a sample, and it has to arrive with the
 // same single command that puts the binary in place.
 //
@@ -34,17 +35,32 @@ import (
 //     directory somebody wrote by hand is their work; replacing it with a
 //     symlink would delete it with no way back.
 
-const skillLinkName = "herdr-share"
+// bundledSkill is one skill directory in the checkout and the name it is
+// linked under. The name must match the `name:` in its SKILL.md.
+type bundledSkill struct {
+	Dir  string // relative to the checkout root
+	Name string
+}
+
+// bundledSkills are every skill this binary ships. herdr-share puts a session
+// on a URL; herdr-message lists and messages agents here and on peers.
+var bundledSkills = []bundledSkill{
+	{Dir: "skill", Name: "herdr-share"},
+	{Dir: "skill-message", Name: "herdr-message"},
+}
 
 // skillTarget is one place a skill directory is expected to live.
 type skillTarget struct {
 	Dir      string // the skills directory, e.g. ~/.claude/skills
 	Required bool   // created if missing; optional dirs are skipped when absent
-	Label    string // for output, e.g. "~/.claude/skills/herdr-share"
+	Label    string // for output, e.g. "~/.claude/skills"
 }
 
-// Link is the full path of the link this tool manages inside Dir.
-func (t skillTarget) Link() string { return filepath.Join(t.Dir, skillLinkName) }
+// Link is the full path of the link for skill name inside Dir.
+func (t skillTarget) Link(name string) string { return filepath.Join(t.Dir, name) }
+
+// LabelFor is the human-readable form of Link.
+func (t skillTarget) LabelFor(name string) string { return filepath.Join(t.Label, name) }
 
 // skillTargets lists where the skill is linked on this machine.
 //
@@ -60,20 +76,21 @@ func skillTargets() ([]skillTarget, error) {
 	out := []skillTarget{{
 		Dir:      filepath.Join(home, ".claude", "skills"),
 		Required: true,
-		Label:    filepath.Join("~", ".claude", "skills", skillLinkName),
+		Label:    filepath.Join("~", ".claude", "skills"),
 	}}
 	agents := filepath.Join(home, ".agents", "skills")
 	if st, err := os.Stat(agents); err == nil && st.IsDir() {
 		out = append(out, skillTarget{
 			Dir:      agents,
 			Required: false,
-			Label:    filepath.Join("~", ".agents", "skills", skillLinkName),
+			Label:    filepath.Join("~", ".agents", "skills"),
 		})
 	}
 	return out, nil
 }
 
-// skillSourceDir resolves the skill/ directory belonging to THIS binary.
+// skillRoot resolves the checkout belonging to THIS binary; each bundled
+// skill lives in a directory under it.
 //
 // It walks up from the resolved executable looking for a directory that holds
 // both herdr-plugin.toml and skill/SKILL.md — the pair that identifies a
@@ -84,20 +101,20 @@ func skillTargets() ([]skillTarget, error) {
 //
 // The working directory is the fallback, for `go run` and test binaries, whose
 // executables live in a temp dir with no checkout above them.
-func skillSourceDir() (string, error) {
+func skillRoot() (string, error) {
 	var tried []string
 	if exe, err := os.Executable(); err == nil {
 		if resolved, err := filepath.EvalSymlinks(exe); err == nil {
 			exe = resolved
 		}
 		if root, ok := findCheckoutRoot(filepath.Dir(exe)); ok {
-			return filepath.Join(root, "skill"), nil
+			return root, nil
 		}
 		tried = append(tried, filepath.Dir(exe))
 	}
 	if wd, err := os.Getwd(); err == nil {
 		if root, ok := findCheckoutRoot(wd); ok {
-			return filepath.Join(root, "skill"), nil
+			return root, nil
 		}
 		tried = append(tried, wd)
 	}
@@ -229,96 +246,104 @@ func cmdSkill(args []string) error {
 // machine that already has the skill is the common one.
 func cmdSkillInstall() error {
 	setSkillOptOut(false)
-	src, err := skillSourceDir()
+	root, err := skillRoot()
 	if err != nil {
 		return err
-	}
-	if _, err := os.Stat(filepath.Join(src, "SKILL.md")); err != nil {
-		return fmt.Errorf("%s has no SKILL.md; this checkout is incomplete", src)
 	}
 	targets, err := skillTargets()
 	if err != nil {
 		return err
 	}
-
-	fmt.Printf("skill source: %s\n", src)
 	var refused []string
-	for _, t := range targets {
-		link := t.Link()
-		state, points := inspectSkillLink(link, src)
-		switch state {
-		case linkCorrect:
-			fmt.Printf("  %s  already linked here — nothing to do\n", t.Label)
-			continue
-		case linkReal:
-			fmt.Printf("  %s  REFUSED: a real directory is already there\n", t.Label)
-			fmt.Printf("      That is somebody's own skill, not a link this tool made, so it is not\n")
-			fmt.Printf("      touched. Move or delete %s yourself, then re-run.\n", link)
-			refused = append(refused, t.Label)
-			continue
-		case linkStale:
-			// A stale link is the normal state after the checkout moves — a
-			// plugin reinstall, a renamed workspace. Repointing it is the
-			// whole reason a wrong link is not an error.
-			if points != "" {
-				fmt.Printf("  %s  repointing (was %s)\n", t.Label, points)
-			} else {
-				fmt.Printf("  %s  repointing (was a broken symlink)\n", t.Label)
+	for _, sk := range bundledSkills {
+		src := filepath.Join(root, sk.Dir)
+		if _, err := os.Stat(filepath.Join(src, "SKILL.md")); err != nil {
+			return fmt.Errorf("%s has no SKILL.md; this checkout is incomplete", src)
+		}
+		fmt.Printf("skill %s: %s\n", sk.Name, src)
+		for _, t := range targets {
+			link, label := t.Link(sk.Name), t.LabelFor(sk.Name)
+			state, points := inspectSkillLink(link, src)
+			switch state {
+			case linkCorrect:
+				fmt.Printf("  %s  already linked here — nothing to do\n", label)
+				continue
+			case linkReal:
+				fmt.Printf("  %s  REFUSED: a real directory is already there\n", label)
+				fmt.Printf("      That is somebody's own skill, not a link this tool made, so it is not\n")
+				fmt.Printf("      touched. Move or delete %s yourself, then re-run.\n", link)
+				refused = append(refused, label)
+				continue
+			case linkStale:
+				// A stale link is the normal state after the checkout moves — a
+				// plugin reinstall, a renamed workspace. Repointing it is the
+				// whole reason a wrong link is not an error.
+				if points != "" {
+					fmt.Printf("  %s  repointing (was %s)\n", label, points)
+				} else {
+					fmt.Printf("  %s  repointing (was a broken symlink)\n", label)
+				}
+				if err := os.Remove(link); err != nil {
+					return fmt.Errorf("removing the stale link %s: %w", link, err)
+				}
 			}
-			if err := os.Remove(link); err != nil {
-				return fmt.Errorf("removing the stale link %s: %w", link, err)
+			if err := os.MkdirAll(t.Dir, 0o755); err != nil {
+				return fmt.Errorf("creating %s: %w", t.Dir, err)
 			}
+			if err := linkDir(src, link); err != nil {
+				return fmt.Errorf("linking %s: %w", link, err)
+			}
+			fmt.Printf("  %s -> %s\n", label, src)
 		}
-		if err := os.MkdirAll(t.Dir, 0o755); err != nil {
-			return fmt.Errorf("creating %s: %w", t.Dir, err)
-		}
-		if err := linkDir(src, link); err != nil {
-			return fmt.Errorf("linking %s: %w", link, err)
-		}
-		fmt.Printf("  %s -> %s\n", t.Label, src)
 	}
 	if len(refused) > 0 {
 		return fmt.Errorf("could not link %s: a real directory is in the way", strings.Join(refused, ", "))
 	}
-	fmt.Println("\nThe skill is `herdr-share`. Start a new agent session to pick it up, then say")
-	fmt.Println("\"share this session\". Remove it with `herdr-expose skill uninstall`.")
+	fmt.Println("\nThe skills are `herdr-share` and `herdr-message`. Start a new agent session to")
+	fmt.Println("pick them up, then say \"share this session\" or \"list the agents\". Remove them")
+	fmt.Println("with `herdr-expose skill uninstall`.")
 	return nil
 }
 
 func cmdSkillStatus() error {
-	src, srcErr := skillSourceDir()
-	if srcErr != nil {
-		fmt.Println("skill source: UNRESOLVED —", srcErr)
-	} else {
-		fmt.Printf("skill source: %s\n", src)
+	root, rootErr := skillRoot()
+	if rootErr != nil {
+		fmt.Println("skill source: UNRESOLVED —", rootErr)
 	}
 	targets, err := skillTargets()
 	if err != nil {
 		return err
 	}
-	for _, t := range targets {
-		link := t.Link()
-		state, points := inspectSkillLink(link, src)
-		switch state {
-		case linkAbsent:
-			fmt.Printf("  %s  not linked\n", t.Label)
-		case linkCorrect:
-			if _, err := os.Stat(link); err != nil {
-				// A correct link whose source vanished: the checkout was
-				// deleted out from under it. That reads as "installed" to
-				// anything that only looks at the link.
-				fmt.Printf("  %s  linked to %s but the TARGET IS MISSING\n", t.Label, points)
-				continue
+	for _, sk := range bundledSkills {
+		src := ""
+		if rootErr == nil {
+			src = filepath.Join(root, sk.Dir)
+			fmt.Printf("skill %s: %s\n", sk.Name, src)
+		}
+		for _, t := range targets {
+			link, label := t.Link(sk.Name), t.LabelFor(sk.Name)
+			state, points := inspectSkillLink(link, src)
+			switch state {
+			case linkAbsent:
+				fmt.Printf("  %s  not linked\n", label)
+			case linkCorrect:
+				if _, err := os.Stat(link); err != nil {
+					// A correct link whose source vanished: the checkout was
+					// deleted out from under it. That reads as "installed" to
+					// anything that only looks at the link.
+					fmt.Printf("  %s  linked to %s but the TARGET IS MISSING\n", label, points)
+					continue
+				}
+				fmt.Printf("  %s -> %s  (ok)\n", label, points)
+			case linkStale:
+				resolves := "target missing"
+				if _, err := os.Stat(link); err == nil {
+					resolves = "resolves, but to another checkout"
+				}
+				fmt.Printf("  %s -> %s  STALE (%s) — `skill install` repoints it\n", label, points, resolves)
+			case linkReal:
+				fmt.Printf("  %s  a real directory, not a link from this tool\n", label)
 			}
-			fmt.Printf("  %s -> %s  (ok)\n", t.Label, points)
-		case linkStale:
-			resolves := "target missing"
-			if _, err := os.Stat(link); err == nil {
-				resolves = "resolves, but to another checkout"
-			}
-			fmt.Printf("  %s -> %s  STALE (%s) — `skill install` repoints it\n", t.Label, points, resolves)
-		case linkReal:
-			fmt.Printf("  %s  a real directory, not a link from this tool\n", t.Label)
 		}
 	}
 	return nil
@@ -328,8 +353,8 @@ func cmdSkillStatus() error {
 //
 // The check is deliberately stricter than "is it a symlink": a symlink named
 // herdr-share could point at somebody's own copy of the skill. It is removed
-// only when it resolves to a directory whose SKILL.md declares
-// `name: herdr-share`, i.e. it really is this skill. Anything else is reported
+// only when it resolves to a directory whose SKILL.md declares the same name,
+// i.e. it really is this skill. Anything else is reported
 // and left alone, and a second run is success, because the desired state — no
 // link — is already reached.
 func cmdSkillUninstall() error {
@@ -340,32 +365,34 @@ func cmdSkillUninstall() error {
 		return err
 	}
 	removed := 0
-	for _, t := range targets {
-		link := t.Link()
-		fi, err := os.Lstat(link)
-		if err != nil {
-			fmt.Printf("  %s  not linked — nothing to do\n", t.Label)
-			continue
+	for _, sk := range bundledSkills {
+		for _, t := range targets {
+			link, label := t.Link(sk.Name), t.LabelFor(sk.Name)
+			fi, err := os.Lstat(link)
+			if err != nil {
+				fmt.Printf("  %s  not linked — nothing to do\n", label)
+				continue
+			}
+			if !isDirLink(fi, link) {
+				fmt.Printf("  %s  a REAL directory — not removing it\n", label)
+				continue
+			}
+			points, _ := readDirLink(link)
+			abs := points
+			if !filepath.IsAbs(abs) {
+				abs = filepath.Join(filepath.Dir(link), abs)
+			}
+			if name := skillDirName(abs); name != "" && name != sk.Name {
+				fmt.Printf("  %s  points at the %q skill, not %q — not removing it\n",
+					label, name, sk.Name)
+				continue
+			}
+			if err := os.Remove(link); err != nil {
+				return fmt.Errorf("removing %s: %w", link, err)
+			}
+			fmt.Printf("  %s  removed (the checkout at %s is untouched)\n", label, points)
+			removed++
 		}
-		if !isDirLink(fi, link) {
-			fmt.Printf("  %s  a REAL directory — not removing it\n", t.Label)
-			continue
-		}
-		points, _ := readDirLink(link)
-		abs := points
-		if !filepath.IsAbs(abs) {
-			abs = filepath.Join(filepath.Dir(link), abs)
-		}
-		if name := skillDirName(abs); name != "" && name != skillLinkName {
-			fmt.Printf("  %s  points at the %q skill, not %q — not removing it\n",
-				t.Label, name, skillLinkName)
-			continue
-		}
-		if err := os.Remove(link); err != nil {
-			return fmt.Errorf("removing %s: %w", link, err)
-		}
-		fmt.Printf("  %s  removed (the checkout at %s is untouched)\n", t.Label, points)
-		removed++
 	}
 	if removed == 0 {
 		fmt.Println("nothing to remove.")
@@ -433,41 +460,44 @@ func repairStaleSkillLink() {
 	if skillOptedOut() {
 		return
 	}
-	src, err := skillSourceDir()
+	root, err := skillRoot()
 	if err != nil {
-		return
-	}
-	if _, err := os.Stat(filepath.Join(src, "SKILL.md")); err != nil {
 		return
 	}
 	targets, err := skillTargets()
 	if err != nil {
 		return
 	}
-	for _, t := range targets {
-		link := t.Link()
-		state, points := inspectSkillLink(link, src)
-		if state == linkAbsent {
-			_ = os.MkdirAll(t.Dir, 0o755)
-			_ = linkDir(src, link)
+	for _, sk := range bundledSkills {
+		src := filepath.Join(root, sk.Dir)
+		if _, err := os.Stat(filepath.Join(src, "SKILL.md")); err != nil {
 			continue
 		}
-		if state != linkStale {
-			continue // already correct, or a real directory: not ours to touch
-		}
-		// Only heal a DANGLING link. One that resolves is somebody's choice.
-		abs := points
-		if abs != "" && !filepath.IsAbs(abs) {
-			abs = filepath.Join(filepath.Dir(link), abs)
-		}
-		if abs != "" {
-			if _, err := os.Stat(abs); err == nil {
+		for _, t := range targets {
+			link := t.Link(sk.Name)
+			state, points := inspectSkillLink(link, src)
+			if state == linkAbsent {
+				_ = os.MkdirAll(t.Dir, 0o755)
+				_ = linkDir(src, link)
 				continue
 			}
+			if state != linkStale {
+				continue // already correct, or a real directory: not ours to touch
+			}
+			// Only heal a DANGLING link. One that resolves is somebody's choice.
+			abs := points
+			if abs != "" && !filepath.IsAbs(abs) {
+				abs = filepath.Join(filepath.Dir(link), abs)
+			}
+			if abs != "" {
+				if _, err := os.Stat(abs); err == nil {
+					continue
+				}
+			}
+			if err := os.Remove(link); err != nil {
+				continue
+			}
+			_ = linkDir(src, link)
 		}
-		if err := os.Remove(link); err != nil {
-			continue
-		}
-		_ = linkDir(src, link)
 	}
 }

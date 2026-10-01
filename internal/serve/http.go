@@ -15,6 +15,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/muthuishere/herdr-expose/internal/core"
+	"github.com/muthuishere/herdr-expose/internal/msg"
 )
 
 // Config is the small slice of configuration the serve layer needs.
@@ -50,6 +51,8 @@ type Server struct {
 
 	cfg      Config
 	hub      *core.Hub
+	msg      *msg.Service
+	msgToken string
 	auth     *Auth
 	log      Logger
 	slog     *slog.Logger
@@ -74,6 +77,9 @@ type Options struct {
 	Log      *slog.Logger
 	Static   fs.FS // may be nil; workstream D injects the embedded web/dist
 	Exposure Exposure
+	// Msg enables the messaging API; MsgToken is the only token it accepts.
+	Msg      *msg.Service
+	MsgToken string
 }
 
 // New builds a server. It never binds a non-loopback address.
@@ -97,6 +103,8 @@ func New(o Options) (*Server, error) {
 		slog:     o.Log,
 		static:   o.Static,
 		exposure: o.Exposure,
+		msg:      o.Msg,
+		msgToken: o.MsgToken,
 		conns:    newConnGate(),
 		addr:     net.JoinHostPort(bind, fmt.Sprint(o.Config.Port())),
 	}
@@ -137,6 +145,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/v1/pair", s.handlePair)
 	mux.HandleFunc("/v1/metrics", s.handleMetrics)
 	mux.HandleFunc("/v1/stream", s.handleStream)
+	mux.HandleFunc("/v1/agents", s.handleMsg)
+	mux.HandleFunc("/v1/messages", s.handleMsg)
+	mux.HandleFunc("/v1/messages/", s.handleMsg)
 	mux.Handle("/", s.staticHandler())
 	return s.securityHeaders(mux)
 }
@@ -154,7 +165,12 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		// Host pinning. A DNS-rebound name arrives here and will not match,
 		// which is precisely what stops rebinding against a local server that
 		// executes commands. /healthz is exempt so a tunnel health check works.
-		if r.URL.Path != "/healthz" && !s.hostAllowed(r) {
+		// Messaging with a bearer token is exempt too: host pinning stops a
+		// rebound browser page, and such a page cannot know the messaging
+		// token, which handleMsg checks before doing anything. This is what
+		// lets a peer reach messaging through any forwarder (LAN, a tunnel,
+		// a reverse proxy) without that hostname being configured here.
+		if r.URL.Path != "/healthz" && !(isMsgPath(r.URL.Path) && BearerFrom(r) != "") && !s.hostAllowed(r) {
 			http.Error(w, "forbidden host", http.StatusForbidden)
 			return
 		}
@@ -175,7 +191,9 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 			// we can vouch for. /v1/pair is the one exception: it is reached by
 			// a freshly-scanned phone before any origin is established, and it
 			// is already rate-limited and single-use.
-			if r.URL.Path != "/v1/pair" {
+			// Messaging is the other: its callers are CLIs and peer daemons,
+			// never browsers, and handleMsg demands the messaging token.
+			if r.URL.Path != "/v1/pair" && !(isMsgPath(r.URL.Path) && BearerFrom(r) != "") {
 				http.Error(w, "origin required", http.StatusForbidden)
 				return
 			}

@@ -73,6 +73,8 @@ func main() {
 		err = cmdDoctor(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Println("herdr-expose", version)
+	case "msg":
+		err = runMsg(os.Args[2:])
 	case "help", "--help", "-h":
 		usage()
 	default:
@@ -106,6 +108,7 @@ func usage() {
                         without a manager (it names the pid it will stop), and
                         to rewrite a healthy unit. install-service and
                         uninstall-service still work as aliases.
+  msg ...               message agents here and on peer machines (msg for help)
   skill install | uninstall | status
                         link this checkout's skill/ into ~/.claude/skills (and
                         ~/.agents/skills when it exists) as the herdr-share
@@ -357,6 +360,13 @@ func cmdServe(args []string) error {
 		go superviseExposure(ctx, mgr, state, log)
 	}
 
+	msgSvc, msgTok, err := newMsgService(state, bin)
+	if err != nil {
+		return err
+	}
+	msgSvc.Log = log
+	go msgSvc.Run(ctx, 2*time.Second)
+
 	srv, err := serve.New(serve.Options{
 		Version:  version,
 		Config:   adapter,
@@ -365,6 +375,8 @@ func cmdServe(args []string) error {
 		Log:      log,
 		Static:   webFS(), // nil unless workstream D wired an embedded bundle
 		Exposure: exposeAdapter{mgr},
+		Msg:      msgSvc,
+		MsgToken: msgTok,
 	})
 	if err != nil {
 		return err
