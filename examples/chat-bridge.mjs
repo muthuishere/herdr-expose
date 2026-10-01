@@ -257,6 +257,53 @@ let following = null     // pane id this chat is driving
 let muted = false
 let dirty = false        // something changed since the last digest
 
+/* --- what has THIS reader already seen --------------------------------------
+ *
+ * The server decides whether a screen is worth sending: it strips furniture,
+ * folds code, and holds everything until the agent stops and the screen stops
+ * moving. What it cannot know is what this particular chat has already been
+ * shown, because that is per-connection state and a server that keeps it is a
+ * server growing a buffer per viewer.
+ *
+ * So the last mile is here. Measured on a live pane: two settled frames thirty
+ * seconds apart, 5660 and 1872 characters, genuinely different screens -- the
+ * server was right to send both -- but they opened with the same lines, so in
+ * Telegram they read as the same answer arriving twice.
+ */
+
+const OVERLAP_SAME = 0.8
+const OVERLAP_MIN = 3
+
+/**
+ * The lines at the end of `next` that were not already at the end of `prev`.
+ *
+ * The match is deliberately fuzzy. An exact comparison is useless against a
+ * terminal: one repainted character -- a changed elapsed time, a moved cursor,
+ * a re-rendered badge -- breaks the overlap, so the whole screen counts as new
+ * and gets sent again. Eighty percent of the lines matching means it is the
+ * same block of output with some of it repainted.
+ *
+ * Largest overlap first, so the answer is the LONGEST match rather than the
+ * first coincidental one; a floor of three lines stops a pair of blanks
+ * matching everything.
+ */
+function newLines(prev, next) {
+  const n = next.split('\n')
+  if (!prev) return n
+  const o = prev.split('\n')
+  for (let k = Math.min(o.length, n.length); k >= OVERLAP_MIN; k--) {
+    const a = o.slice(o.length - k)
+    const b = n.slice(0, k)
+    let same = 0
+    for (let i = 0; i < k; i++) if (a[i] === b[i]) same++
+    if (same / k >= OVERLAP_SAME) return n.slice(k)
+  }
+  return n
+}
+
+/** target -> the full screen text we last showed for it. */
+const shown = new Map()
+
 const label = (p) => (p.agent?.state && p.agent.state !== 'unknown' ? p.agent.state : 'shell')
 
 /*
@@ -326,8 +373,16 @@ ws.onmessage = (ev) => {
      */
     const text = m.data.text.trimEnd()
     if (!text) return
-    channel.send(`${short(t)}\n\n${text.split('\n').slice(-40).join('\n')}`,
-      null, { choices: paneActions(t) })
+
+    // Show only what this chat has not already been shown.
+    const prev = shown.get(t)
+    const fresh = newLines(prev, text).filter((l) => l.trim())
+    shown.set(t, text)
+    if (prev && fresh.length === 0) return
+
+    const body = (prev ? fresh : text.split('\n')).slice(-40).join('\n')
+    if (!body.trim()) return
+    channel.send(`${short(t)}\n\n${body}`, null, { choices: paneActions(t) })
   }
 }
 
@@ -386,6 +441,7 @@ async function handle(text, thread) {
     const id = text.slice(2)
     if (!panes.some((p) => p.id === id)) return reply('that pane is gone. /ls')
     following = id
+    shown.delete(id)   // a deliberate open shows the screen, not a diff of it
     send({ type: 'subscribe', data: { targets: { [id]: 'transcript_settled' } } })
     return reply(`following ${short(id)} — fetching its screen…`)
   }
