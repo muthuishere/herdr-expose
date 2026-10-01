@@ -33,6 +33,15 @@ const args = Object.fromEntries(
 
 const BASE = (args.url ?? 'http://127.0.0.1:21118').replace(/\/$/, '')
 const DIGEST_MS = Number(args.digest ?? 30000)
+/*
+ * The floor between two screen sends for the SAME pane.
+ *
+ * A followed pane produces a transcript frame whenever its screen changes,
+ * which for a working agent is constantly. Forwarding each one turns the chat
+ * into the mirror this bridge exists not to be, and Telegram will rate-limit
+ * you into a backlog that arrives after it stopped being true.
+ */
+const QUIET_MS = Number(args.quiet ?? 30000)
 
 /* ------------------------------------------------------------------ channels */
 
@@ -50,7 +59,14 @@ function consoleChannel() {
   return {
     name: 'console',
     async poll() { return inbox.splice(0) },
-    async send(text) { console.log('\n' + text + '\n') },
+    async send(text, _thread, opts) {
+      // No buttons in a terminal, so choices degrade to the numbered list the
+      // text commands already understand. Same contract, poorer renderer.
+      const extra = opts?.choices?.length
+        ? '\n' + opts.choices.map((c) => `  [${c.data}] ${c.label}`).join('\n')
+        : ''
+      console.log('\n' + text + extra + '\n')
+    },
   }
 }
 
@@ -81,6 +97,23 @@ function telegramChannel() {
       const out = []
       for (const u of j.result ?? []) {
         offset = u.update_id + 1
+
+        // A tapped button. Telegram shows a spinner until it is answered, so
+        // answer first and then treat the payload exactly like typed text --
+        // which keeps ONE command path instead of two.
+        if (u.callback_query) {
+          const cb = u.callback_query
+          fetch(api('answerCallbackQuery'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ callback_query_id: cb.id }),
+          }).catch(() => {})
+          const cid = String(cb.message?.chat?.id ?? '')
+          if (!chat) chat = cid
+          out.push({ text: cb.data, thread: cid, from: cb.from?.username })
+          continue
+        }
+
         const msg = u.message ?? u.channel_post
         if (!msg?.text) continue
         // First person to speak owns the thread. The startup banner was sent
@@ -91,15 +124,34 @@ function telegramChannel() {
       }
       return out
     },
-    async send(text, thread) {
+    async send(text, thread, opts) {
       const to = thread ?? chat
       if (!to) { console.error('[out] dropped (no chat bound yet)'); return }
       console.error(`[out] ${to}: ${text.slice(0, 60).replace(/\n/g, ' ')}`)
+      const body = {
+        chat_id: to,
+        // 4096 is Telegram's hard limit; truncate rather than get a 400.
+        text: text.slice(0, 4000) || '\u2063',
+        disable_web_page_preview: true,
+      }
+      if (opts?.choices?.length) {
+        // Two per row: a phone shows a full label at that width, and one per
+        // row turns nine panes into a screenful of scrolling.
+        const rows = []
+        for (let i = 0; i < opts.choices.length; i += 2) {
+          rows.push(opts.choices.slice(i, i + 2).map((c) => ({
+            // 64 bytes is Telegram's callback_data limit, and it is a HARD
+            // error, not a truncation.
+            text: c.label.slice(0, 40),
+            callback_data: c.data.slice(0, 64),
+          })))
+        }
+        body.reply_markup = { inline_keyboard: rows }
+      }
       await fetch(api('sendMessage'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        // 4096 is Telegram's hard limit; truncate rather than get a 400.
-        body: JSON.stringify({ chat_id: to, text: text.slice(0, 4000), disable_web_page_preview: true }),
+        body: JSON.stringify(body),
       }).catch(() => {})
     },
   }
@@ -144,6 +196,32 @@ const lastState = new Map()
 let panes = []
 let following = null     // pane id this chat is driving
 let tailUntil = 0        // epoch ms; while in the future, transcripts are forwarded
+let showOnce = null      // pane whose next transcript frame is shown unasked
+/** target -> { at, text } of the last screen actually sent for it. */
+const lastSent = new Map()
+
+/**
+ * May we send this screen now?
+ *
+ * Two gates, and BOTH must pass: the text has to have changed, and QUIET_MS
+ * has to have elapsed since the last one. Unchanged output is the common case
+ * -- an idle pane re-reports the same screen -- and sending it again says
+ * nothing while costing a notification on somebody's phone.
+ *
+ * `force` is for a screen the user just asked for by tapping a pane. An
+ * explicit request is not spam, but it still RECORDS, so the next automatic
+ * send is measured from it.
+ */
+function maySend(target, text, force = false) {
+  const prev = lastSent.get(target)
+  const now = Date.now()
+  if (!force) {
+    if (prev && prev.text === text) return false
+    if (prev && now - prev.at < QUIET_MS) return false
+  }
+  lastSent.set(target, { at: now, text })
+  return true
+}
 let muted = false
 let dirty = false        // something changed since the last digest
 
@@ -159,6 +237,10 @@ const label = (p) => (p.agent?.state && p.agent.state !== 'unknown' ? p.agent.st
 let multiSession = false
 const short = (id) => (multiSession ? id : id.split('/').pop())
 
+const sessionOf = (id) => id.split('/')[0]
+const sessions = () => [...new Set(panes.map((p) => sessionOf(p.id)))]
+
+/** One line per pane, for a channel that cannot draw buttons. */
 function listing() {
   if (!panes.length) return 'No panes.'
   return panes
@@ -189,7 +271,8 @@ ws.onmessage = (ev) => {
        * the agent sits idle for exactly as long as the digest interval.
        */
       if (now === 'blocked' && !muted) {
-        channel.send(`NEEDS YOU — ${short(p.id)}\n${(p.title ?? '').slice(0, 60)}\n\n/follow by id, then /key y`)
+        channel.send(`NEEDS YOU — ${short(p.id)}\n${(p.title ?? '').slice(0, 60)}`,
+          null, { choices: [{ label: 'open', data: `p:${p.id}` }] })
         send({ type: 'subscribe', data: { targets: { [p.id]: 'transcript' } } })
       }
     }
@@ -197,13 +280,24 @@ ws.onmessage = (ev) => {
 
   if (m.type === 'transcript') {
     const t = m.data.target
+    // Just followed: show the screen ONCE, unprompted. "Follow it and then
+    // wait for it to say something" is a dead end when the pane is idle --
+    // which is most of them, most of the time.
+    if (showOnce === t) {
+      showOnce = null
+      if (!maySend(t, m.data.text, true)) return
+      const tail = m.data.text.trimEnd().split('\n').slice(-20).join('\n')
+      channel.send(`${short(t)} — last ${Math.min(20, tail.split('\n').length)} lines\n\n${tail}`,
+        null, { choices: paneActions(t) })
+      return
+    }
     // Only forward a screen when it was ASKED for: a blocked agent's question,
     // or an explicit /tail. Otherwise this becomes the mirror we refused to be.
     const wanted = Date.now() < tailUntil && t === following
     const isBlocked = lastState.get(t) === 'blocked'
-    if (!muted && (wanted || isBlocked)) {
+    if (!muted && (wanted || isBlocked) && maySend(t, m.data.text)) {
       const tail = m.data.text.trimEnd().split('\n').slice(-18).join('\n')
-      channel.send(`${short(t)}\n\n${tail}`)
+      channel.send(`${short(t)}\n\n${tail}`, null, { choices: paneActions(t) })
     }
   }
 }
@@ -213,16 +307,69 @@ ws.onclose = () => channel.send('bridge disconnected')
 
 /* ------------------------------------------------------------------ commands */
 
+/** Buttons offered once you are on a pane. */
+function paneActions(id) {
+  return [
+    { label: 'y', data: `k:y` },
+    { label: 'n', data: `k:n` },
+    { label: 'enter', data: `k:enter` },
+    { label: 'esc', data: `k:esc` },
+    { label: 'watch 60s', data: `t:60` },
+    { label: 'back', data: `s:${sessionOf(id)}` },
+  ]
+}
+
+/** The top of the menu: which session. One session skips straight to panes. */
+function showSessions(reply) {
+  const ss = sessions()
+  if (ss.length === 0) return reply('No panes in view.')
+  if (ss.length === 1) return showPanes(ss[0], reply)
+  const counts = Object.fromEntries(ss.map((n) => [n, panes.filter((p) => sessionOf(p.id) === n)]))
+  return reply(
+    `${ss.length} sessions`,
+    ss.map((n) => {
+      const ps = counts[n]
+      const blocked = ps.filter((p) => label(p) === 'blocked').length
+      return { label: `${n} (${ps.length}${blocked ? ` · ${blocked}!` : ''})`, data: `s:${n}` }
+    }))
+}
+
+/** The panes inside one session, as buttons. */
+function showPanes(name, reply) {
+  const ps = panes.filter((p) => sessionOf(p.id) === name)
+  if (!ps.length) return reply(`${name} has no panes.`)
+  return reply(
+    `${name} — ${ps.length} pane(s)` + (sessions().length === 1 ? '\n(this is all the share can see)' : ''),
+    ps.map((p) => ({
+      label: `${label(p) === 'blocked' ? '! ' : ''}${short(p.id).replace(name + '/', '')} ${label(p)}`,
+      data: `p:${p.id}`,
+    })))
+}
+
 async function handle(text, thread) {
   const [cmd, ...rest] = text.split(/\s+/)
   const arg = rest.join(' ')
-  const reply = (s) => channel.send(s, thread)
+  const reply = (s, choices) => channel.send(s, thread, choices ? { choices } : undefined)
+
+  // Button payloads. A tapped button and a typed command run the same code.
+  if (text.startsWith('s:')) return showPanes(text.slice(2), reply)
+  if (text.startsWith('t:')) return handle(`/tail ${text.slice(2)}`, thread)
+  if (text.startsWith('k:')) return handle(`/key ${text.slice(2)}`, thread)
+  if (text.startsWith('p:')) {
+    const id = text.slice(2)
+    if (!panes.some((p) => p.id === id)) return reply('that pane is gone. /ls')
+    following = id
+    showOnce = id
+    send({ type: 'subscribe', data: { targets: { [id]: 'transcript' } } })
+    return reply(`following ${short(id)} — fetching its screen…`)
+  }
 
   switch (cmd) {
     case '/help':
       return reply('/ls  /follow N|id  /say TEXT  /key K  /tail SEC  /mute  /unmute  /who')
     case '/ls':
-      return reply(listing())
+    case '/start':
+      return showSessions(reply)
     case '/who':
       return reply(following ? `following ${following}` : 'following nothing — /ls then /follow N')
     case '/follow': {
@@ -263,10 +410,7 @@ async function handle(text, thread) {
        * bot is the moment to show what it can do, so this answers with the
        * actual panes rather than a menu about panes.
        */
-      return reply(
-        `herdr bridge — ${panes.length} pane(s)\n\n${listing()}\n\n` +
-        `/follow N to pick one, then just type to prompt it.\n` +
-        `/key y to answer a blocked agent · /tail 60 to watch · /help`)
+      return showSessions(reply)
   }
 }
 
