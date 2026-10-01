@@ -133,7 +133,14 @@ type transcriptPoller struct {
 	mu      sync.Mutex
 	subs    map[string]map[*Session]*transcriptSub
 	cleaner *Cleaner
-	wake    chan struct{}
+	// stable[target] is how many consecutive polls the prose text has been
+	// unchanged. A settled subscriber waits for this, not just for the agent's
+	// status: "the agent stopped" and "the screen stopped moving" are different
+	// instants, and an agent that is done is often still painting.
+	stable map[string]int
+	// lastStable[target] is the prose text the stability counter is counting.
+	lastStable map[string]string
+	wake       chan struct{}
 }
 
 func newTranscriptPoller(store *Store, log *slog.Logger) *transcriptPoller {
@@ -142,7 +149,9 @@ func newTranscriptPoller(store *Store, log *slog.Logger) *transcriptPoller {
 		log.Warn("transcript: skipping uncompilable chrome patterns", "patterns", bad)
 	}
 	return &transcriptPoller{store: store, log: log, cleaner: c,
-		subs: map[string]map[*Session]*transcriptSub{}, wake: make(chan struct{}, 1)}
+		subs:   map[string]map[*Session]*transcriptSub{},
+		stable: map[string]int{},
+		wake:   make(chan struct{}, 1)}
 }
 
 func (p *transcriptPoller) subscribe(target string, s *Session, level int, settle bool) {
@@ -353,6 +362,16 @@ func (p *transcriptPoller) poll(ctx context.Context, target string) {
 // would mean a connection that subscribed a moment ago sees nothing until the
 // agent happens to move — an empty pane on a phone, indistinguishable from a
 // broken one. Suppression is the optimisation; the first frame is the product.
+// StableDwell is how many consecutive unchanged polls make a screen "settled".
+//
+// One poll (~1s) is enough and two is not better: the failure this prevents is
+// a screen MID-PAINT, which resolves in a frame or two, not a screen that
+// changes slowly. Measured on a real agent reporting `done`: its transcript
+// went 29 -> 85 -> 86 lines over three polls while it finished rendering, and
+// every one of those was a legitimately different screen, so each was sent.
+// Eight near-identical messages arrived for one answer.
+const StableDwell = 1
+
 // working mirrors Herdr's own agent status. A settled agent is anything that
 // is not mid-turn: idle, done, or stopped to ask a question.
 func isWorkingStatus(status string) bool { return status == "working" || status == "running" }
@@ -372,10 +391,29 @@ func (p *transcriptPoller) deliver(target string, frames [3]TranscriptFrame, ids
 	p.mu.Lock()
 	send := make([]out, 0, len(p.subs[target]))
 	working := isWorkingStatus(state)
+
+	// Track how long the prose text has been still. Done under the SAME lock as
+	// the subscriber walk below -- taking it twice here deadlocks, and the
+	// compiler is perfectly happy with that.
+	if p.stable == nil {
+		p.stable = map[string]int{}
+	}
+	settledText := ids[2]
+	if p.lastStable[target] == settledText {
+		p.stable[target]++
+	} else {
+		p.stable[target] = 0
+		if p.lastStable == nil {
+			p.lastStable = map[string]string{}
+		}
+		p.lastStable[target] = settledText
+	}
+	steady := p.stable[target] >= StableDwell
 	for s, sub := range p.subs[target] {
-		// Mid-turn output is not an answer. Hold it, and do NOT record the
-		// hash: the screen that eventually settles must still look new.
-		if sub.settle && working {
+		// Mid-turn output is not an answer, and neither is a screen still being
+		// painted. Hold both, and do NOT record the hash: the screen that
+		// eventually settles must still look new.
+		if sub.settle && (working || !steady) {
 			continue
 		}
 		want := sums[sub.level]

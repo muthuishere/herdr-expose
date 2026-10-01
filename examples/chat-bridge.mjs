@@ -415,7 +415,15 @@ pump()
 
 // The digest. Quiet by construction: it sends nothing unless a state actually
 // changed, so a machine full of idle panes produces no traffic at all.
-setInterval(() => {
+/*
+ * --digest 0 means OFF.
+ *
+ * It used to mean setInterval(fn, 0), which is a tick every event loop turn --
+ * so asking for silence produced the most traffic the thing could emit. The
+ * guard is here rather than in the caller because a zero interval is a
+ * perfectly ordinary thing to type and must not be a footgun.
+ */
+if (DIGEST_MS > 0) setInterval(() => {
   if (!dirty || muted) return
   dirty = false
   const by = {}

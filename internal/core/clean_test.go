@@ -232,10 +232,58 @@ func TestSettleHoldsWorkingAndReleasesOnSettle(t *testing.T) {
 		t.Fatalf("delivered %d frames while working, want 0", n)
 	}
 
+	// The agent stops, but the screen has just changed -- it may still be
+	// painting. One poll of stillness is required before it counts as settled.
 	fr, id = mk("the finished answer")
 	p.deliver(target, fr, id, "idle")
+	if n := sink.count("transcript"); n != 0 {
+		t.Fatalf("delivered %d on the first settled poll, want 0 — the screen had just changed", n)
+	}
+
+	// Unchanged on the next poll: now it is genuinely still, and it goes once.
+	p.deliver(target, fr, id, "idle")
 	if n := sink.count("transcript"); n != 1 {
-		t.Fatalf("delivered %d frames after settling, want 1", n)
+		t.Fatalf("delivered %d once the screen was still, want 1", n)
+	}
+
+	// And it is not sent again.
+	p.deliver(target, fr, id, "idle")
+	if n := sink.count("transcript"); n != 1 {
+		t.Fatalf("delivered %d after settling, want it deduped to 1", n)
+	}
+}
+
+// The symptom this prevents, as measured on a live agent: an agent reporting
+// `done` whose transcript still grew 29 -> 85 -> 86 lines over three polls.
+// Each screen was legitimately different, so each was sent, and eight
+// near-identical messages arrived for one answer.
+func TestSettleHoldsAScreenThatIsStillPainting(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	h := NewHub(NewStore(log), log)
+	sink := &countingSink{}
+	sess := h.NewSession(ctx, sink)
+	defer sess.Close()
+
+	const target = "s/w1:p1"
+	p := h.transcript
+	p.subscribe(target, sess, 2, true)
+
+	// Three different screens in a row, agent already done the whole time.
+	for _, text := range []string{"29 lines", "85 lines", "86 lines"} {
+		f := TranscriptFrame{Target: target, Text: text}
+		p.deliver(target, [3]TranscriptFrame{f, f, f}, [3]string{text, text, text}, "done")
+	}
+	if n := sink.count("transcript"); n != 0 {
+		t.Fatalf("delivered %d while the screen was still growing, want 0", n)
+	}
+
+	// It stops growing.
+	f := TranscriptFrame{Target: target, Text: "86 lines"}
+	p.deliver(target, [3]TranscriptFrame{f, f, f}, [3]string{"86 lines", "86 lines", "86 lines"}, "done")
+	if n := sink.count("transcript"); n != 1 {
+		t.Fatalf("delivered %d once it stopped, want exactly 1", n)
 	}
 }
 
