@@ -587,6 +587,98 @@ moving, then sends it once. A client that tries to do this itself writes a timer
 and gets it wrong — the measured failure is eight near-identical messages for
 one answer, because an agent reporting `done` is often still painting.
 
+### Built in: the `[chat]` table
+
+`examples/chat-bridge.mjs` is a standalone program you run yourself. The daemon
+can also own an adapter and keep it alive, which is what `[chat]` configures.
+
+```toml
+[chat]
+enabled = false            # ships off
+
+[[chat.adapters]]
+id = "telegram"
+enabled = false            # ships off too
+command = "node telegram.js"
+  [chat.adapters.env]
+  HERDR_EXPOSE_TELEGRAM_TOKEN = "$HERDR_EXPOSE_TELEGRAM_TOKEN"
+  HERDR_CHAT_ID               = "123456789"
+```
+
+**Both switches must be on.** A bot token sitting in an environment variable is
+not consent to start answering messages with it, so finding one is deliberately
+not enough. There is no `chat enable` subcommand either: a command this daemon
+will execute, and a bot that will answer strangers, are not things a subcommand
+should turn on for you.
+
+**`$NAME` and `${NAME}` expand from the environment**, so the config file holds
+a *reference* and never a value. `"$HERDR_EXPOSE_TELEGRAM_TOKEN"` is a name —
+it can be committed, read aloud, or pasted into a bug report. A missing
+variable expands to empty **and is reported**: expanding to the literal
+`$TOKEN` would send that string to the API as a credential and produce a
+baffling 401, while expanding to empty in silence gives you an adapter that
+does nothing for no visible reason.
+
+#### Any runtime, because it is a command
+
+```toml
+command = "node telegram.js"      # or
+command = "bun telegram.ts"       # or
+command = "go run adapter.go"     # or
+command = "python3 discord.py"    # or
+command = "./my-adapter"
+```
+
+It runs with its working directory set to the adapters directory, and it is
+**not run through a shell** — no pipes, no redirection, no command
+substitution. A chat adapter has no reason to need a shell, and handing one a
+shell turns every config file into a place to hide a command.
+
+#### Where adapters live
+
+`~/.config/herdr-expose/adapters/chat/` — beside `config.toml`, because an
+adapter is something you *write*, not something the daemon generates. The
+bundled `telegram.js` and `template.js` are written there on daemon start and
+**never overwritten**: that copy exists to be edited, and an upgrade that
+replaced an edited adapter would destroy the work quietly — it would keep
+running, just not the way you left it. Delete one to get a fresh copy.
+
+#### Supervision, which gives up
+
+An adapter talks to somebody else's server over somebody else's network, so it
+*will* exit, and restarting it is right. Restarting it forever is not: a bad
+token fails identically every time, and a supervisor that keeps trying turns
+one mistake into a process every few seconds — filling the log with one line
+and burning the rate limit that would have let the fixed adapter connect. So
+**five restarts with doubling backoff, then down**, said once. A run that
+lasted two minutes forgives the count.
+
+#### Seeing what is wrong
+
+```bash
+herdr-expose chat status      # every adapter, its state, and why
+herdr-expose chat list        # the bundled adapters and the directory
+herdr-expose chat seed        # write the bundled adapters out (never overwrites)
+```
+
+```
+$ herdr-expose chat status
+[chat] disabled — nothing will run
+! telegram       misconfigured  node telegram.js
+    HERDR_EXPOSE_TELEGRAM_TOKEN is not set
+    HERDR_CHAT_ID                123456789
+    HERDR_EXPOSE_TELEGRAM_TOKEN  $HERDR_EXPOSE_TELEGRAM_TOKEN  (not set)
+```
+
+It prints the *reference* and whether it resolves, never the value — this
+output gets screenshotted. **`status` exits non-zero when an adapter needs a
+person**, so it works in a script; "deliberately off" exits zero, because that
+is a different answer from "enabled but broken".
+
+The same states appear in the web UI under the gear, which is read-only: a page
+somebody paired from a phone must not be able to enable a bot or rewrite a
+command line the daemon will execute.
+
 ### Writing a channel is two functions
 
 ```js
