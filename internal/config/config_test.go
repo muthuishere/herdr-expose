@@ -405,3 +405,58 @@ func TestLANModeConfig(t *testing.T) {
 		t.Fatalf("reload clobbered the resolved bind: %s", st.Bind())
 	}
 }
+
+// Nothing in [chat] starts on its own. BOTH switches must be on.
+//
+// This is the property the whole table is shaped around: a bot token present
+// in the environment is not consent to answer messages with it, and turning
+// the feature on must not light up every channel somebody once configured.
+// The test enumerates the four combinations rather than the happy one,
+// because the failure that matters is the accidental yes.
+func TestChatNeedsBothSwitches(t *testing.T) {
+	adapter := func(on bool) ChatAdapter {
+		return ChatAdapter{ID: "example", Script: "example.js", Enabled: on}
+	}
+	for _, tc := range []struct {
+		name         string
+		table, chan_ bool
+		wantActive   int
+	}{
+		{"both off", false, false, 0},
+		{"table on, channel off", true, false, 0},
+		{"table off, channel on", false, true, 0},
+		{"both on", true, true, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := Chat{Enabled: tc.table, Adapters: []ChatAdapter{adapter(tc.chan_)}}
+			if got := len(c.ActiveChatAdapters()); got != tc.wantActive {
+				t.Fatalf("active adapters = %d, want %d", got, tc.wantActive)
+			}
+		})
+	}
+}
+
+// The shipped default is off, and an absent [chat] table is off too -- a
+// zero-valued Chat must not be a running one.
+func TestChatDefaultsToDisabled(t *testing.T) {
+	if Defaults().Chat.Enabled {
+		t.Error("the shipped [chat] table is enabled; it must ship off")
+	}
+	var absent Chat // what an old config file with no [chat] decodes to
+	if absent.Enabled || absent.ActiveChatAdapters() != nil {
+		t.Error("an absent [chat] table is active; it must be inert")
+	}
+}
+
+// An adapter with no id cannot run: it is unaddressable by the CLI, so
+// enabling it would be a channel nobody can name, inspect or turn off.
+func TestChatAdapterWithoutIDNeverRuns(t *testing.T) {
+	c := Chat{Enabled: true, Adapters: []ChatAdapter{
+		{ID: "  ", Script: "x.js", Enabled: true},
+		{ID: "named", Script: "x.js", Enabled: true},
+	}}
+	got := c.ActiveChatAdapters()
+	if len(got) != 1 || got[0].ID != "named" {
+		t.Fatalf("active = %+v, want only the named adapter", got)
+	}
+}

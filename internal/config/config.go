@@ -284,6 +284,73 @@ type Adapter struct {
 	Env    map[string]string `toml:"env" json:"env"`
 }
 
+// Chat is the [chat] table: reaching agents from a chat app.
+//
+// It ships DISABLED, and so does every adapter in it. A bot token sitting in
+// an environment variable is not consent to start answering messages with it,
+// and a config file that is one `true` away from putting an agent on a public
+// chat network should make you type that `true`.
+//
+//	[chat]
+//	enabled = true
+//
+//	[[chat.adapters]]
+//	id = "telegram"
+//	enabled = true
+//	  [chat.adapters.env]
+//	  token_env = "HERDR_EXPOSE_TELEGRAM_TOKEN"
+//	  chat_id   = "123456789"
+//
+// Both switches must be on: the table's and the adapter's. One is the feature,
+// the other is the channel, and turning the feature on must not silently light
+// up every channel somebody once configured.
+type Chat struct {
+	// Enabled is the master switch. False, shipped, and false when absent.
+	Enabled bool `toml:"enabled" json:"enabled"`
+	// Adapters are the channels. Each carries its own Enabled.
+	Adapters []ChatAdapter `toml:"adapters" json:"adapters"`
+}
+
+// ChatAdapter is one channel: a JS file implementing poll() and send().
+//
+// The script is JavaScript rather than Go on purpose. A channel is two
+// functions and a REST call, every chat app spells those differently, and
+// nobody should need this repository checked out — let alone a Go toolchain —
+// to reach their own agents from Discord. The ones we ship are the same kind
+// of file as the one you write.
+type ChatAdapter struct {
+	ID string `toml:"id" json:"id"`
+	// Script is a path to a .js file, or the bare name of a bundled adapter
+	// ("telegram"). A path always wins, so a local copy of a bundled adapter
+	// shadows it rather than fighting it.
+	Script string `toml:"script" json:"script"`
+	// Enabled is this channel's own switch, independent of [chat].enabled.
+	Enabled bool `toml:"enabled" json:"enabled"`
+	// Env is handed to the adapter as ctx.config. It is for NAMES and ids --
+	// `token_env`, `chat_id` -- never for a secret's value: the adapter reads
+	// the value itself with ctx.env(name), which registers it with the
+	// redactor so it cannot reach a log. A token written here would be a
+	// plaintext credential in a config file, which is why nothing reads one.
+	Env map[string]string `toml:"env" json:"env"`
+}
+
+// ActiveChatAdapters returns the adapters that both switches allow to run.
+//
+// It is the ONLY way the rest of the binary should ask "what is running", so
+// that "enabled" cannot come to mean two different things in two places.
+func (c Chat) ActiveChatAdapters() []ChatAdapter {
+	if !c.Enabled {
+		return nil
+	}
+	var out []ChatAdapter
+	for _, a := range c.Adapters {
+		if a.Enabled && strings.TrimSpace(a.ID) != "" {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
 // Expose is the [expose] table.
 //
 // The happy path (SPEC AMENDMENT A2) is two lines:
@@ -386,6 +453,7 @@ type Config struct {
 	UI     UI     `toml:"ui" json:"ui"`
 	Expose Expose `toml:"expose" json:"expose"`
 	Share  Share  `toml:"share" json:"share"`
+	Chat   Chat   `toml:"chat" json:"chat"`
 	Log    Log    `toml:"log" json:"log"`
 
 	path string
@@ -447,6 +515,7 @@ func Defaults() *Config {
 			DefaultMode:   DefaultShareMode,
 			MaxConcurrent: DefaultShareConcurrent,
 		},
+		Chat: Chat{},
 		Log: Log{
 			Level:     DefaultLogLevel,
 			Format:    DefaultLogFormat,
