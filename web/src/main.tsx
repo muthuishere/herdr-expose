@@ -5,6 +5,10 @@ import './styles/app.css'
 import { takeTokenFromUrl } from './net/auth'
 import { connect, setTransportFactory } from './net/connection'
 import { installViewportDriver } from './hooks/useViewport'
+import { applyStoredTheme } from './components/ThemeToggle'
+
+// Before the first paint, so a pinned theme does not flash the other one.
+applyStoredTheme()
 
 // Token from ?token= on first load, persisted, stripped from the URL (SPEC §8).
 takeTokenFromUrl()

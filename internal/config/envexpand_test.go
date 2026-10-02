@@ -87,3 +87,27 @@ func TestResolveEnvTreatsOnlyEnvValuesAsSecret(t *testing.T) {
 		t.Errorf("MissingReport() = %v, want one line", r.MissingReport())
 	}
 }
+
+// "TOKEN references unset TOKEN" explains nothing, and that is the NORMAL
+// shape: the config key becomes the child's environment variable, so key and
+// variable name are usually the same word.
+func TestMissingReportDoesNotRepeatTheName(t *testing.T) {
+	a := ChatAdapter{ID: "x", Env: map[string]string{
+		"HX_TOKEN": "$HX_TOKEN",
+		"url":      "https://$HX_HOST/api",
+	}}
+	got := a.ResolveEnv().MissingReport()
+
+	want := []string{
+		"HX_TOKEN is not set",
+		"url references unset HX_HOST",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("report = %q, want %q", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("report = %q, want %q", got, want)
+		}
+	}
+}

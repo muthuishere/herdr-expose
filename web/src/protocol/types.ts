@@ -165,6 +165,54 @@ export interface TreeData {
 /* Server -> client                                                    */
 /* ------------------------------------------------------------------ */
 
+/**
+ * One chat adapter, as the server reports it.
+ *
+ * `state` is a string rather than a union because it is on the wire: a build
+ * that learns a new state must be renderable by a client that has not, so an
+ * unknown value shows as itself instead of crashing the panel.
+ */
+export interface ChatAdapterStatus {
+  id: string
+  state: string
+  enabled: boolean
+  table_enabled: boolean
+  /** The argv as configured. Never carries a credential -- secrets reach an
+   *  adapter through its environment, because argv is readable via `ps`. */
+  command?: string
+  /** Why it cannot run, in a person's words. Never a secret's value. */
+  problems?: string[]
+  /** The adapter's configuration, as names and references ONLY. There is
+   *  deliberately no resolved value here -- not omitted, not masked: a masked
+   *  value is still a length and a shape, and a field that exists is a field
+   *  somebody later populates "just for debugging". */
+  env?: ChatEnvEntry[]
+  restarts: number
+  max_restarts: number
+  started_at?: string
+  last_exit?: string
+}
+
+/** One configuration key, safe to render. */
+export interface ChatEnvEntry {
+  key: string
+  /** The value as WRITTEN in config.toml -- "$TELEGRAM_TOKEN" or a plain id.
+   *  A reference is a name and is not secret. */
+  literal: string
+  reference?: boolean
+  /** Whether every referenced variable is currently set. */
+  resolved: boolean
+}
+
+export interface ChatSummary {
+  enabled: boolean
+  /** Every CONFIGURED adapter, including the off ones: an adapter you cannot
+   *  see is one you cannot turn on, and a list of only what is running cannot
+   *  explain why nothing is. */
+  adapters: ChatAdapterStatus[] | null
+  adapters_dir?: string
+}
+
 export interface WelcomeData {
   /** Protocol version of this stream. Expected "v1"/1. */
   protocol?: string | number
@@ -173,6 +221,9 @@ export interface WelcomeData {
   server_version?: string
   /** Server session id; changes => our resume seq is worthless. */
   session?: string
+  /** Chat adapters. ABSENT means this build has no chat at all, which is a
+   *  different thing from an empty list, and only one of them is worth a UI. */
+  chat?: ChatSummary
 }
 
 export interface GapData {

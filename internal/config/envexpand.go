@@ -112,7 +112,15 @@ func (r Resolved) MissingReport() []string {
 	sort.Strings(keys)
 	out := make([]string, 0, len(keys))
 	for _, k := range keys {
-		out = append(out, fmt.Sprintf("%s references unset %s", k, strings.Join(r.Missing[k], ", ")))
+		names := r.Missing[k]
+		// When the config key IS the variable name -- which is the normal
+		// shape, since the key becomes the child's env var -- "TOKEN
+		// references unset TOKEN" is a sentence that explains nothing.
+		if len(names) == 1 && names[0] == k {
+			out = append(out, fmt.Sprintf("%s is not set", k))
+			continue
+		}
+		out = append(out, fmt.Sprintf("%s references unset %s", k, strings.Join(names, ", ")))
 	}
 	return out
 }

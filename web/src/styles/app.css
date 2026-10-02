@@ -8,23 +8,50 @@
  */
 
 :root {
-  --bg: #0b0d10;
-  --bg-1: #11141a;
-  --bg-2: #171b22;
-  --bg-3: #1e232c;
-  --line: #262c36;
-  --fg: #e6e9ef;
-  --fg-dim: #9aa3b2;
-  --fg-faint: #6b7483;
+  /*
+   * ONE SET OF TOKENS, TWO MOODS.
+   *
+   * The palette is warm -- ink and ember, not the slate-and-blue every
+   * terminal tool ships with. That default reads as either a chat client or a
+   * control panel, and this is neither: it is somebody's work, read in a
+   * hurry, on a phone, usually in bed. Warm greys and a gold accent carry
+   * that better than cold blue, and the states stay distinguishable to the
+   * red-green colour blind because they differ in warmth and lightness, not
+   * only in hue.
+   *
+   * Dark is the default because that is what it was, and because an agent's
+   * terminal output was coloured for a dark background. Light is a real
+   * theme, not an inversion: paper, not a white rectangle.
+   *
+   * HOW THE SWITCHING WORKS, which is fussier than it looks:
+   *   :root                           dark values (the default)
+   *   @media (prefers-color-scheme: light) :root:not([data-theme='dark'])
+   *                                   follow the system, UNLESS pinned dark
+   *   :root[data-theme='light']       pinned light, whatever the system says
+   *   :root[data-theme='dark']        pinned dark (re-stated for specificity)
+   * The :not() is what makes "auto" and an explicit choice coexist: without
+   * it, pinning dark on a light system would be overridden by the media
+   * query, and the toggle would appear broken on exactly the machines whose
+   * owners reach for it.
+   */
+  --bg: #0c0c0d;
+  --bg-1: #141416;
+  --bg-2: #1b1b1e;
+  --bg-3: #242428;
+  --line: #2b2b30;
+  --fg: #ffffff;
+  --fg-dim: #a1a1a8;
+  --fg-faint: #6e6e76;
 
-  --accent: #62b0ff;
-  --blocked: #ff8b3d;
-  --done: #5ddc8a;
-  --working: #62b0ff;
-  --idle: #6b7483;
+  --accent: #ffffff;
+  --blocked: #ff8e5e;
+  --done: #7fd18f;
+  --working: #8ab6e8;
+  --idle: #6e6e76;
 
-  --term-bg: #0b0d10;
-  --term-fg: #c6ccd8;
+  --term-bg: #0c0c0d;
+  --term-fg: #d6d6da;
+
 
   --radius: 12px;
   --radius-sm: 8px;
@@ -42,6 +69,80 @@
   --keyboard-inset: 0px;
 
   --keybar-h: 52px;
+
+  /* Both, so form controls and scrollbars follow the theme rather than
+   * staying dark on a light page. */
+  color-scheme: dark light;
+}
+
+/* Light values, defined once and applied from two places. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme='dark']) {
+    --bg: #ffffff;
+    --bg-1: #f7f7f8;
+    --bg-2: #efeff1;
+    --bg-3: #e5e5e8;
+    --line: #dededf;
+    --fg: #0c0c0d;
+    --fg-dim: #5c5c64;
+    --fg-faint: #8a8a92;
+
+    --accent: #0c0c0d;
+    --blocked: #c2541f;
+    --done: #2f7d42;
+    --working: #2b5f93;
+    --idle: #8a8a92;
+
+    --term-bg: #f7f7f8;
+    --term-fg: #26262b;
+
+
+    color-scheme: light;
+  }
+}
+
+:root[data-theme='light'] {
+  --bg: #ffffff;
+  --bg-1: #f7f7f8;
+  --bg-2: #efeff1;
+  --bg-3: #e5e5e8;
+  --line: #dededf;
+  --fg: #0c0c0d;
+  --fg-dim: #5c5c64;
+  --fg-faint: #8a8a92;
+
+  --accent: #0c0c0d;
+  --blocked: #c2541f;
+  --done: #2f7d42;
+  --working: #2b5f93;
+  --idle: #8a8a92;
+
+  --term-bg: #f7f7f8;
+  --term-fg: #26262b;
+
+
+  color-scheme: light;
+}
+
+:root[data-theme='dark'] {
+  --bg: #0c0c0d;
+  --bg-1: #141416;
+  --bg-2: #1b1b1e;
+  --bg-3: #242428;
+  --line: #2b2b30;
+  --fg: #ffffff;
+  --fg-dim: #a1a1a8;
+  --fg-faint: #6e6e76;
+
+  --accent: #ffffff;
+  --blocked: #ff8e5e;
+  --done: #7fd18f;
+  --working: #8ab6e8;
+  --idle: #6e6e76;
+
+  --term-bg: #0c0c0d;
+  --term-fg: #d6d6da;
+
 
   color-scheme: dark;
 }
@@ -1534,4 +1635,309 @@ button {
   color: var(--fg-dim);
   font-size: 12px;
   line-height: 1.5;
+}
+
+/* ------------------------------------------------------------------- chat
+ * Chat adapters.
+ *
+ * Quiet by default, because the answer is normally "running" or "off" and
+ * neither deserves attention. Only `down` and `misconfigured` are coloured,
+ * using the same orange as a blocked agent -- both mean the same thing to the
+ * person reading: something is waiting on you.
+ *
+ * `off` and `down` get visibly different dots on purpose. Both are "not
+ * running", and drawing them the same is how a broken adapter hides behind a
+ * switch somebody believes they turned off.
+ */
+.chat-adapters {
+  padding: 4px calc(var(--safe-right) + 14px) 10px calc(var(--safe-left) + 14px);
+}
+.chat-adapters h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0 8px;
+  font-family: var(--sans);
+  font-size: 12.5px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+}
+.chat-pill {
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--bg-1);
+  color: var(--fg-dim);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.chat-pill-warn {
+  border-color: color-mix(in srgb, var(--blocked) 45%, var(--line));
+  color: var(--blocked);
+}
+.chat-empty {
+  margin: 0;
+  color: var(--fg-dim);
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.chat-empty code,
+.chat-cmd {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--fg-dim);
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 1px 5px;
+}
+.chat-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.chat-row {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-1);
+  font-family: var(--sans);
+  font-size: 13px;
+}
+.chat-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--idle);
+}
+.chat-running .chat-dot {
+  background: var(--done);
+}
+.chat-restarting .chat-dot {
+  background: var(--working);
+}
+/* An `off` dot is hollow: switched off reads as absent, not as failed. */
+.chat-off .chat-dot {
+  background: transparent;
+  border: 1px solid var(--fg-faint);
+}
+.chat-down .chat-dot,
+.chat-misconfigured .chat-dot {
+  background: var(--blocked);
+}
+.chat-down,
+.chat-misconfigured {
+  border-color: color-mix(in srgb, var(--blocked) 35%, var(--line));
+}
+.chat-id {
+  font-weight: 600;
+  color: var(--fg);
+}
+.chat-state {
+  color: var(--fg-dim);
+}
+.chat-down .chat-state,
+.chat-misconfigured .chat-state {
+  color: var(--blocked);
+}
+.chat-cmd {
+  grid-column: 2 / -1;
+  justify-self: start;
+}
+.chat-problems {
+  grid-column: 2 / -1;
+  list-style: none;
+  margin: 2px 0 0;
+  padding: 0;
+  color: var(--fg-dim);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+.chat-exit {
+  grid-column: 2 / -1;
+  color: var(--fg-faint);
+  font-size: 12px;
+}
+
+/* The row stacks at phone width: a command and a problem sentence have no
+ * business sharing a line at 375px. */
+@media (max-width: 420px) {
+  .chat-row {
+    grid-template-columns: auto 1fr;
+  }
+  .chat-cmd,
+  .chat-problems,
+  .chat-exit {
+    grid-column: 1 / -1;
+  }
+}
+
+/* --------------------------------------------------------------- settings */
+.theme-toggle,
+.settings-btn {
+  appearance: none;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-1);
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+.theme-toggle:hover,
+.settings-btn:hover {
+  color: var(--fg);
+  border-color: var(--fg-faint);
+}
+.theme-toggle svg,
+.settings-btn svg {
+  width: 15px;
+  height: 15px;
+}
+
+/* The dot is the only reason configuration is allowed to interrupt: it moved
+ * off the dashboard because it is normally boring, so the one time it is not,
+ * something has to say so. */
+.settings-btn.has-attention {
+  color: var(--blocked);
+  border-color: color-mix(in srgb, var(--blocked) 45%, var(--line));
+}
+.settings-dot {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--blocked);
+  border: 1.5px solid var(--bg);
+}
+
+.settings {
+  padding: 8px calc(var(--safe-right) + 14px) 28px calc(var(--safe-left) + 14px);
+  max-width: 760px;
+}
+.settings-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 6px 0 14px;
+}
+.settings-head h2 {
+  margin: 0;
+  font-family: var(--sans);
+  font-size: 17px;
+  font-weight: 650;
+  color: var(--fg);
+}
+.settings-back {
+  appearance: none;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-1);
+  color: var(--fg-dim);
+  font-family: var(--sans);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.settings-back:hover {
+  color: var(--fg);
+}
+.settings-section {
+  margin: 0 0 26px;
+}
+.settings-section h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
+  font-family: var(--sans);
+  font-size: 12.5px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+}
+.settings-note {
+  margin: 12px 0 0;
+  color: var(--fg-faint);
+  font-family: var(--sans);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+.settings-note code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--fg-dim);
+}
+
+/* The configuration table. Keys left, the literal as written right -- and
+ * never a resolved value, which is why "set" is a word and not a row of
+ * asterisks: a masked secret still shows its length. */
+.chat-env {
+  grid-column: 2 / -1;
+  margin: 6px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.chat-env-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  font-family: var(--sans);
+  font-size: 12.5px;
+}
+.chat-env-row dt {
+  min-width: 140px;
+  color: var(--fg-faint);
+}
+.chat-env-row dd {
+  margin: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.chat-env-row code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--fg-dim);
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 1px 5px;
+}
+.env-ok {
+  color: var(--done);
+  font-size: 11.5px;
+}
+.env-bad {
+  color: var(--blocked);
+  font-size: 11.5px;
+}
+
+@media (max-width: 420px) {
+  .chat-env-row dt {
+    min-width: 0;
+  }
 }

@@ -14,6 +14,8 @@ import { useIsMobile } from './hooks/useViewport'
 import { PaneList } from './components/PaneList'
 import { PaneView } from './components/PaneView'
 import { Stats } from './components/Stats'
+import { Settings, SettingsButton, settingsNeedsAttention } from './components/Settings'
+import { ThemeToggle } from './components/ThemeToggle'
 import { ConnectionBadge } from './components/AgentBadge'
 import { DesktopGrid } from './components/DesktopGrid'
 import { PairScreen } from './components/PairScreen'
@@ -80,6 +82,24 @@ export function App() {
     )
   }
 
+  const [showSettings, setShowSettings] = useState(false)
+  const chatAdapters = useStore((s) => s.welcome?.chat?.adapters)
+  const attention = settingsNeedsAttention(chatAdapters)
+
+  if (showSettings) {
+    return (
+      <div className={`app ${isMobile ? 'app-mobile' : 'app-desktop'}`}>
+        <header className="appbar">
+          <span className="brand">herdr</span>
+          <ThemeToggle />
+        </header>
+        <main className="scroll">
+          <Settings onBack={() => setShowSettings(false)} />
+        </main>
+      </div>
+    )
+  }
+
   if (isMobile) {
     return (
       <div className="app app-mobile">
@@ -90,6 +110,8 @@ export function App() {
             <header className="appbar">
               <span className="brand">herdr</span>
               <ConnectionBadge link={link} rttMs={rttMs} attempt={attempt} />
+              <ThemeToggle />
+              <SettingsButton attention={attention} onClick={() => setShowSettings(true)} />
             </header>
             <main className="scroll">
               {disconnected ? (
@@ -123,6 +145,8 @@ export function App() {
             herdr
           </button>
           <ConnectionBadge link={link} rttMs={rttMs} attempt={attempt} />
+          <ThemeToggle />
+          <SettingsButton attention={attention} onClick={() => setShowSettings(true)} />
         </header>
         <div className="scroll">
           <PaneList onOpen={openPane} selected={open} />

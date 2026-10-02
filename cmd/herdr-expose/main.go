@@ -19,6 +19,8 @@ import (
 
 	"github.com/skip2/go-qrcode"
 
+	herdrexpose "github.com/muthuishere/herdr-expose"
+	"github.com/muthuishere/herdr-expose/internal/chat"
 	"github.com/muthuishere/herdr-expose/internal/config"
 	"github.com/muthuishere/herdr-expose/internal/core"
 	"github.com/muthuishere/herdr-expose/internal/expose"
@@ -367,6 +369,20 @@ func cmdServe(args []string) error {
 	msgSvc.Log = log
 	go msgSvc.Run(ctx, 2*time.Second)
 
+	// Write the bundled adapters out where they can be read and edited. It
+	// NEVER overwrites, so an edited adapter survives every upgrade, and it
+	// does not enable anything: there is now a telegram.js on disk and
+	// [chat].enabled is still false. A failure here is logged and ignored --
+	// a read-only home directory is a reason to have no example adapters, not
+	// a reason for the daemon to refuse to start.
+	if seeded, serr := config.SeedChatAdapters(herdrexpose.BundledChatAdapters()); serr != nil {
+		log.Warn("could not write the bundled chat adapters", "err", serr)
+	} else {
+		for _, p := range seeded.Wrote {
+			log.Info("wrote bundled chat adapter", "path", p)
+		}
+	}
+
 	srv, err := serve.New(serve.Options{
 		Version:  version,
 		Config:   adapter,
@@ -377,6 +393,16 @@ func cmdServe(args []string) error {
 		Exposure: exposeAdapter{mgr},
 		Msg:      msgSvc,
 		MsgToken: msgTok,
+		// Chat STATUS only. Reporting what is configured is not running it:
+		// nothing here spawns an adapter, so opening the web UI cannot start
+		// a chat bot as a side effect. Launching is a separate, explicit act.
+		ChatStatus: func() any {
+			dir, err := config.ChatAdaptersDir()
+			if err != nil {
+				dir = ""
+			}
+			return chat.Plan(cfg.Chat, dir, nil)
+		},
 	})
 	if err != nil {
 		return err

@@ -446,6 +446,12 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		// A scoped instance says so: the client renders one session and knows
 		// the rest of the machine is not merely hidden but absent.
 		"scope": s.hub.Store().Scope().String(),
+		// Chat adapters, so the web UI can show whether anything is reachable
+		// from a chat app and -- more usefully -- say WHY not. Absent when
+		// chat is not wired, which a client must treat as "this build has no
+		// chat" rather than "no adapters": an empty list and a missing key
+		// mean different things, and only one of them is worth a UI.
+		"chat": s.chatSummary(),
 		// Targets are session-qualified on this wire. Spelled out here so a
 		// hand-written client does not have to infer it from the tree.
 		"targets": map[string]any{
@@ -852,4 +858,17 @@ func advertisedModes() []string {
 		string(core.ModeTranscriptSettled),
 		string(core.ModeSummary), string(core.ModeNone),
 	}
+}
+
+// chatSummary is the welcome frame's chat payload, or nil when chat is not
+// wired into this build.
+//
+// It is called on every handshake rather than cached: an adapter that gave up
+// two minutes ago must not still be reported as running to a phone that just
+// connected.
+func (s *Server) chatSummary() any {
+	if s.chatStatus == nil {
+		return nil
+	}
+	return s.chatStatus()
 }

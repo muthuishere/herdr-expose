@@ -53,12 +53,15 @@ type Server struct {
 	hub      *core.Hub
 	msg      *msg.Service
 	msgToken string
-	auth     *Auth
-	log      Logger
-	slog     *slog.Logger
-	static   fs.FS
-	exposure Exposure
-	upgrader websocket.Upgrader
+
+	// chatStatus is Options.ChatStatus; nil when chat is not wired.
+	chatStatus func() any
+	auth       *Auth
+	log        Logger
+	slog       *slog.Logger
+	static     fs.FS
+	exposure   Exposure
+	upgrader   websocket.Upgrader
 	// conns gates WebSocket handshakes per proven identity, with concurrency
 	// caps as the backstop. See connlimit.go.
 	conns *connGate
@@ -80,6 +83,20 @@ type Options struct {
 	// Msg enables the messaging API; MsgToken is the only token it accepts.
 	Msg      *msg.Service
 	MsgToken string
+
+	// ChatStatus reports the chat adapters for the welcome frame, or nil when
+	// chat is not wired at all.
+	//
+	// A FUNCTION rather than a value, because the answer changes while the
+	// server runs -- an adapter restarts, gives up, or has its switch flipped
+	// in the config -- and a snapshot taken at construction would have every
+	// client showing the state at boot forever.
+	//
+	// A func() any rather than a chat.Summary, so this package does not import
+	// internal/chat: serve already owns the websocket, auth and the HTTP
+	// surface, and giving it an opinion about chat adapters as well is how a
+	// transport layer starts deciding product behaviour.
+	ChatStatus func() any
 }
 
 // New builds a server. It never binds a non-loopback address.
@@ -95,18 +112,19 @@ func New(o Options) (*Server, error) {
 		bind = "127.0.0.1"
 	}
 	s := &Server{
-		Version:  o.Version,
-		cfg:      o.Config,
-		hub:      o.Hub,
-		auth:     o.Auth,
-		log:      o.Log,
-		slog:     o.Log,
-		static:   o.Static,
-		exposure: o.Exposure,
-		msg:      o.Msg,
-		msgToken: o.MsgToken,
-		conns:    newConnGate(),
-		addr:     net.JoinHostPort(bind, fmt.Sprint(o.Config.Port())),
+		Version:    o.Version,
+		cfg:        o.Config,
+		hub:        o.Hub,
+		auth:       o.Auth,
+		log:        o.Log,
+		slog:       o.Log,
+		static:     o.Static,
+		exposure:   o.Exposure,
+		msg:        o.Msg,
+		msgToken:   o.MsgToken,
+		chatStatus: o.ChatStatus,
+		conns:      newConnGate(),
+		addr:       net.JoinHostPort(bind, fmt.Sprint(o.Config.Port())),
 	}
 	s.upgrader = websocket.Upgrader{
 		ReadBufferSize:    4096,
