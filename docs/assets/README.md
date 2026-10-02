@@ -8,8 +8,13 @@ The capture always uses `herdr-expose share --quick`, never `--domain` and never
 `--lan`, so no owned hostname and no private LAN address is ever in frame — the URL
 is an anonymous `*.trycloudflare.com` that is revoked the moment the run ends. The
 share is scoped to a throwaway `hexshot-*` session, so no other session on the
-capture machine can appear in the sidebar. Dark theme throughout: it is the only
-theme the app has.
+capture machine can appear in the sidebar.
+
+Dark theme throughout, and that is now a CHOICE rather than a fact: the app has a
+light theme too, and the capture pins `colorScheme: dark` so these stay consistent
+with the page they illustrate. Playwright defaults a context to LIGHT, so without
+the pin the whole product would be shot in the opposite theme by a default that
+lives in the test runner.
 
 ## Video
 
@@ -23,9 +28,9 @@ stays honest. No music, no captions, no voiceover.
 
 | file | what it is | frame | duration | bytes |
 |---|---|---|---|---|
-| `demo.mp4` | **Use this one on the page.** h264 + faststart, so a browser starts playing it before the file has finished downloading. | 1280x720 | 27.9s | 494 KB |
-| `demo.webm` | the same cut as VP9 — the raw Playwright recording, edited, before the h264 pass | 1280x720 | 27.9s | 495 KB |
-| `demo.gif` | the fallback for anywhere mp4 will not autoplay: half size, 10fps, 96-colour palette | 560x315 | 27.9s | 702 KB |
+| `demo.mp4` | **Use this one on the page.** h264 + faststart, so a browser starts playing it before the file has finished downloading. | 1280x720 | 46.5s | 474 KB |
+| `demo.webm` | the same cut as VP9 — the raw Playwright recording, edited, before the h264 pass | 1280x720 | 46.5s | 554 KB |
+| `demo.gif` | the fallback for anywhere mp4 will not autoplay: half size, 10fps, 96-colour palette | 560x315 | 46.5s | 591 KB |
 
 ## Stills
 
@@ -35,19 +40,19 @@ about half the bytes.
 
 | file | device | what it shows | pixels | bytes |
 |---|---|---|---|---|
-| `blocked-375.png` | iPhone SE / 375px — the design target | a blocked agent: its own question, plus the y/n/1/2/3 answer key bar | 750x1334 | 77 KB |
-| `blocked-pixel7.png` | Pixel 7 (Android), 412x915 @2.625x | a blocked agent: its own question, plus the y/n/1/2/3 answer key bar | 824x1830 | 109 KB |
-| `desktop-1440-blocked.png` | Desktop, 1440x900 @2x | the desktop layout with the blocked agent open | 2880x1800 | 234 KB |
-| `desktop-1440-terminal.png` | Desktop, 1440x900 @2x | the desktop layout with the terminal view open on the shell pane | 2880x1800 | 157 KB |
-| `desktop-1440.png` | Desktop, 1440x900 @2x | the desktop layout — sidebar and an open pane together | 2880x1800 | 260 KB |
-| `pane-list-375.png` | iPhone SE / 375px — the design target | the session and pane list, with live agent state badges | 750x1334 | 49 KB |
-| `pane-list-ipad.png` | iPad portrait, 810x1080 @2x | the session and pane list, with live agent state badges | 1620x2160 | 76 KB |
-| `pane-list-iphone14.png` | iPhone 14 Pro, 393x852 @3x | the session and pane list, with live agent state badges | 1179x2556 | 96 KB |
-| `terminal-375.png` | iPhone SE / 375px — the design target | the terminal view on a plain shell pane, for contrast | 750x1334 | 50 KB |
-| `transcript-375.png` | iPhone SE / 375px — the design target | the transcript view of a real Claude agent — reflowed, readable text | 750x1334 | 89 KB |
-| `transcript-ipad.png` | iPad portrait, 810x1080 @2x | the transcript view of a real Claude agent — reflowed, readable text | 1620x2160 | 224 KB |
-| `transcript-iphone14.png` | iPhone 14 Pro, 393x852 @3x | the transcript view of a real Claude agent — reflowed, readable text | 1179x2556 | 181 KB |
-| `transcript-pixel7.png` | Pixel 7 (Android), 412x915 @2.625x | the transcript view of a real Claude agent — reflowed, readable text | 824x1830 | 127 KB |
+| `blocked-375.png` | iPhone SE / 375px — the design target | a blocked agent: its own question, plus the y/n/1/2/3 answer key bar | 750x1334 | 68 KB |
+| `blocked-pixel7.png` | Pixel 7 (Android), 412x915 @2.625x | a blocked agent: its own question, plus the y/n/1/2/3 answer key bar | 824x1830 | 111 KB |
+| `desktop-1440-blocked.png` | Desktop, 1440x900 @2x | the desktop layout with the blocked agent open | 2880x1800 | 211 KB |
+| `desktop-1440-terminal.png` | Desktop, 1440x900 @2x | the desktop layout with the terminal view open on the shell pane | 2880x1800 | 153 KB |
+| `desktop-1440.png` | Desktop, 1440x900 @2x | the desktop layout — sidebar and an open pane together | 2880x1800 | 228 KB |
+| `pane-list-375.png` | iPhone SE / 375px — the design target | the session and pane list, with live agent state badges | 750x1334 | 51 KB |
+| `pane-list-ipad.png` | iPad portrait, 810x1080 @2x | the session and pane list, with live agent state badges | 1620x2160 | 94 KB |
+| `pane-list-iphone14.png` | iPhone 14 Pro, 393x852 @3x | the session and pane list, with live agent state badges | 1179x2556 | 98 KB |
+| `terminal-375.png` | iPhone SE / 375px — the design target | the terminal view on a plain shell pane, for contrast | 750x1334 | 71 KB |
+| `transcript-375.png` | iPhone SE / 375px — the design target | the transcript view of a real Claude agent — reflowed, readable text | 750x1334 | 67 KB |
+| `transcript-ipad.png` | iPad portrait, 810x1080 @2x | the transcript view of a real Claude agent — reflowed, readable text | 1620x2160 | 216 KB |
+| `transcript-iphone14.png` | iPhone 14 Pro, 393x852 @3x | the transcript view of a real Claude agent — reflowed, readable text | 1179x2556 | 162 KB |
+| `transcript-pixel7.png` | Pixel 7 (Android), 412x915 @2.625x | the transcript view of a real Claude agent — reflowed, readable text | 824x1830 | 110 KB |
 
 ## Regenerating
 

@@ -325,7 +325,12 @@ const initScript = () => {
 async function newPairedContext(browser, opts) {
   let lastErr
   for (let attempt = 0; attempt < 4; attempt++) {
-    const ctx = await browser.newContext(opts)
+    // Pin the colour scheme. Playwright's default context reports
+    // prefers-color-scheme: LIGHT, and since the app gained a light theme it
+    // honours that -- so an unpinned capture silently started shooting the
+    // whole product in light while the landing page it illustrates is dark.
+    // The shots must not depend on a default that lives in the test runner.
+    const ctx = await browser.newContext({ colorScheme: 'dark', ...opts })
     await ctx.addInitScript(initScript)
     const t0 = Date.now()
     const page = await ctx.newPage()
@@ -842,8 +847,13 @@ function writeIndex() {
     '`--lan`, so no owned hostname and no private LAN address is ever in frame — the URL',
     'is an anonymous `*.trycloudflare.com` that is revoked the moment the run ends. The',
     'share is scoped to a throwaway `hexshot-*` session, so no other session on the',
-    'capture machine can appear in the sidebar. Dark theme throughout: it is the only',
-    'theme the app has.',
+    'capture machine can appear in the sidebar.',
+    '',
+    'Dark theme throughout, and that is now a CHOICE rather than a fact: the app has a',
+    'light theme too, and the capture pins `colorScheme: dark` so these stay consistent',
+    'with the page they illustrate. Playwright defaults a context to LIGHT, so without',
+    'the pin the whole product would be shot in the opposite theme by a default that',
+    'lives in the test runner.',
     '')
 
   if (videos.length) {
