@@ -1434,6 +1434,65 @@ is not reversible.<span class="m-tr-rule"></span>Run migration 0042 against dev?
   </div>
 </section>
 
+<!-- ----------------------------------------------------------------- chat -->
+<section>
+  <div class="wrap">
+    <p class="eyebrow">Not only a browser</p>
+    <h2>Or answer it from the chat app you are already in.</h2>
+    <p class="lede" style="margin-bottom:26px">
+      A share gives you a web page. A <b>chat bridge</b> gives you Telegram,
+      Teams, Discord or Slack — the agent's question arrives where your messages
+      already arrive, and your answer goes back into the pane.
+    </p>
+
+    <div class="cmds">
+      <div class="cmd">
+        <pre><span class="sig">$ </span>node examples/chat-bridge.mjs --channel console</pre>
+        <button class="copy" type="button" data-copy="node examples/chat-bridge.mjs --channel console">Copy</button>
+      </div>
+      <div class="cmd">
+        <pre><span class="sig">$ </span>node examples/chat-bridge.mjs --channel telegram</pre>
+        <button class="copy" type="button" data-copy="node examples/chat-bridge.mjs --channel telegram">Copy</button>
+      </div>
+      <p class="cmd-note">
+        The <code>console</code> channel needs no credentials, so you can prove
+        the whole path before a bot token exists. A new chat app is
+        <b>two functions</b> — <code>poll()</code> and <code>send()</code> — and
+        nothing else; it never learns anything about Herdr.
+      </p>
+    </div>
+
+    <h3 style="margin:42px 0 18px">Do not mirror a terminal into a chat window</h3>
+    <p>
+      This is the decision the rest follows from, and the obvious choice is the
+      wrong one. A pane redraws constantly. A 120&times;40 screen pasted every
+      few seconds is unreadable, and the channel rate-limits you into a backlog
+      that arrives after it stopped being true.
+    </p>
+    <p>
+      So the bridge is a <b>notifier with a terminal attached</b>. An agent
+      going <span style="color:var(--blocked)">blocked</span> is pushed
+      immediately, with its question — that is the event a human is actually
+      waiting for. Everything else stays quiet.
+    </p>
+    <p>
+      And the part that makes it readable is not in the bridge at all. It
+      subscribes to <code>transcript_settled</code>, and <b>the server</b>
+      strips the terminal's furniture, folds code to
+      <code>[12&nbsp;lines&nbsp;of&nbsp;code]</code>, and withholds the screen
+      until the agent has stopped <em>and</em> the screen has stopped moving.
+      One question, one answer.
+    </p>
+    <p class="cmd-note" style="margin-top:22px">
+      That last clause is not pedantry. An agent reporting <code>done</code> is
+      often still painting: measured on a live pane, its transcript grew
+      29&nbsp;&rarr;&nbsp;85&nbsp;&rarr;&nbsp;86 lines over three polls, every
+      one a legitimately different screen — <b>eight near-identical messages for
+      one answer</b> before the server learned to wait.
+    </p>
+  </div>
+</section>
+
 <!-- ------------------------------------------------------------------ docs -->
 <section>
   <div class="wrap">

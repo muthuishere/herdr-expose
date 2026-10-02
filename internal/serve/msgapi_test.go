@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/muthuishere/herdr-expose/internal/core"
 	"github.com/muthuishere/herdr-expose/internal/msg"
 )
 
@@ -113,5 +115,51 @@ func TestOtherRoutesKeepHostPinning(t *testing.T) {
 	// The messaging exemption must not leak to the rest of the API.
 	if rec := do(s, http.MethodGet, "/v1/config", testMsgToken, ""); rec.Code != http.StatusForbidden {
 		t.Fatalf("/v1/config from an unconfigured host with a bearer: %d, want 403", rec.Code)
+	}
+}
+
+// The handshake must announce every mode the parser accepts.
+//
+// This pins the bug it was written after: welcome.viewport.modes listed four
+// modes while core.ParseMode accepted seven, so transcript_clean,
+// transcript_prose and transcript_settled worked perfectly for anyone told
+// about them and were invisible to everyone else. docs/api.md calls this list
+// "the authoritative list", which is exactly what makes an omission a lie
+// rather than an oversight.
+//
+// It is written as a round-trip rather than against a hardcoded list, so
+// adding a mode to core cannot leave this file behind: a new Mode constant
+// that ParseMode accepts and the handshake withholds fails here.
+func TestAdvertisedModesCoverEveryParsedMode(t *testing.T) {
+	adv := advertisedModes()
+
+	// Every advertised string must parse back to itself. A typo would
+	// otherwise advertise a mode that silently resolves to `none` -- the
+	// blank-pane failure the docs warn clients about.
+	for _, m := range adv {
+		if got := core.ParseMode(m); string(got) != m {
+			t.Errorf("advertised %q parses to %q, not itself", m, got)
+		}
+	}
+
+	// And every mode core knows must be advertised.
+	for _, m := range []core.Mode{
+		core.ModeLive, core.ModeTranscript, core.ModeTranscriptClean,
+		core.ModeTranscriptProse, core.ModeTranscriptSettled,
+		core.ModeSummary, core.ModeNone,
+	} {
+		if !slices.Contains(adv, string(m)) {
+			t.Errorf("core accepts %q but the handshake does not advertise it", m)
+		}
+	}
+
+	// Every transcript flavour must agree with core about being one, so a
+	// flavour cannot be advertised while the no-geometry contract skips it.
+	for _, m := range adv {
+		mode := core.ParseMode(m)
+		if strings.HasPrefix(m, "transcript") != mode.IsTranscript() {
+			t.Errorf("%q: name says transcript=%v, IsTranscript()=%v",
+				m, strings.HasPrefix(m, "transcript"), mode.IsTranscript())
+		}
 	}
 }

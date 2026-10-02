@@ -387,11 +387,13 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		// Render modes a client may declare. `transcript` is spelled out here
 		// with its no-geometry contract because it is the one mode where
 		// sending `resize` is a bug rather than an omission.
+		//
+		// Every mode ParseMode accepts is listed. A flavour the parser takes
+		// but the handshake withholds is worse than one that does not exist:
+		// the docs tell a hand-written client to discover modes from here, so
+		// an omission is a feature nobody can find.
 		"viewport": map[string]any{
-			"modes": []string{
-				string(core.ModeLive), string(core.ModeTranscript),
-				string(core.ModeSummary), string(core.ModeNone),
-			},
+			"modes": advertisedModes(),
 			"transcript": map[string]any{
 				"plane":            "control",
 				"frame":            "transcript",
@@ -401,6 +403,44 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 				"sends_on_change":  true,
 				"sources":          []string{core.SourceRecent, core.SourceDetection},
 				"is_screen_buffer": true,
+				// The flavours, as a ladder: each one strictly reduces what the
+				// one before it sends. `cleaned` on the frame accounts for what
+				// a given flavour took out, so a client can tell which rung it
+				// is on without diffing against the raw screen.
+				"flavours": []map[string]any{
+					{"mode": string(core.ModeTranscript),
+						"removes": []string{},
+						"lossy":   false,
+						"held":    false},
+					{"mode": string(core.ModeTranscriptClean),
+						"removes": []string{"rules", "input_line", "status_banner", "timing_banner"},
+						"lossy":   false,
+						"held":    false},
+					{"mode": string(core.ModeTranscriptProse),
+						"removes": []string{"rules", "input_line", "status_banner", "timing_banner", "code"},
+						"lossy":   true,
+						"held":    false},
+					{"mode": string(core.ModeTranscriptSettled),
+						"removes": []string{"rules", "input_line", "status_banner", "timing_banner", "code"},
+						"lossy":   true,
+						"held":    true},
+				},
+				// transcript_settled withholds the screen while the agent is
+				// working AND while the screen is still moving: an agent that
+				// reports done is often still painting, and those are two
+				// different instants.
+				// Stated as what it HOLDS on, not what it releases on, because
+				// that is the shape of the test: anything that is not mid-turn
+				// -- idle, done, blocked on a question, a state Herdr has not
+				// invented yet -- releases. A release list would be a promise
+				// to enumerate every future state.
+				"settle": map[string]any{
+					"mode":                        string(core.ModeTranscriptSettled),
+					"holds_on_states":             []string{"working", "running"},
+					"stable_polls":                core.StableDwell,
+					"resets_dedup_on_mode_change": true,
+				},
+				"clean_report_field": "cleaned",
 			},
 		},
 		// A scoped instance says so: the client renders one session and knows
@@ -795,4 +835,21 @@ func (s *Server) dispatch(ctx context.Context, conn *wsConn, id, session, method
 	}
 	conn.SendJSON("result", map[string]any{
 		"id": id, "session": session, "ok": true, "result": json.RawMessage(res)})
+}
+
+// advertisedModes is the list in welcome.viewport.modes, which the API docs
+// name as the authoritative enumeration of render modes.
+//
+// It is a function rather than a literal inside the welcome map so a test can
+// hold it against core.ParseMode. That test exists because this list silently
+// fell behind by three transcript flavours: the parser accepted them, every
+// client that asked for one got it, and the handshake that is supposed to
+// announce them did not mention them -- a feature nobody could discover.
+func advertisedModes() []string {
+	return []string{
+		string(core.ModeLive), string(core.ModeTranscript),
+		string(core.ModeTranscriptClean), string(core.ModeTranscriptProse),
+		string(core.ModeTranscriptSettled),
+		string(core.ModeSummary), string(core.ModeNone),
+	}
 }

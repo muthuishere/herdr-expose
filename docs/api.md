@@ -44,12 +44,14 @@ and disappear while the server runs — a session going down marks its entry
 
 1. [Threat model — read this first](#1-threat-model--read-this-first)
 2. [HTTP endpoints](#2-http-endpoints)
+   · [2.1 Messaging: agent to agent](#21-messaging-agent-to-agent)
 3. [Authentication and pairing](#3-authentication-and-pairing)
 4. [The WebSocket: two planes](#4-the-websocket-two-planes)
 5. [Control plane — JSON frames](#5-control-plane--json-frames)
 6. [Data plane — binary frames](#6-data-plane--binary-frames)
 7. [Sequence numbers, gaps and reconnection](#7-sequence-numbers-gaps-and-reconnection)
 8. [Viewport modes and geometry](#8-viewport-modes-and-geometry)
+   · [8.1 The four transcript flavours](#81-the-four-transcript-flavours)
 9. [Calling Herdr methods](#9-calling-herdr-methods)
 10. [Errors](#10-errors)
 11. [Versioning and compatibility](#11-versioning-and-compatibility)
@@ -136,7 +138,16 @@ A client author's obligations:
 | `POST` | `/v1/pair` | pairing code | Exchange a pairing code for a device token |
 | `GET` | `/v1/metrics` | required | Latency histograms for the budgeted paths |
 | `GET` | `/v1/stream` | required | WebSocket upgrade |
+| `GET` | `/v1/agents` | **messaging token** | Every agent in every running session on this machine |
+| `POST` | `/v1/messages` | **messaging token** | Send a message to an agent; returns a request with an id |
+| `GET` | `/v1/messages` | **messaging token** | Requests, newest first; `?status=` filters |
+| `GET` | `/v1/messages/{id}` | **messaging token** | One request and its response, if it has been answered |
+| `POST` | `/v1/messages/{id}/reply` | **messaging token** | Answer a request |
 | `GET` | `/*` | none | The embedded web app |
+
+The five messaging paths take **their own token and no other** — see
+[section 2.1](#21-messaging-agent-to-agent). A share or device token is a link
+for *watching* a pane, and must never be able to type into one.
 
 ### `GET /healthz`
 
@@ -246,6 +257,97 @@ performance budget names — decode-to-queued, queued-to-written — as
 `{"<name>_us": {...}}` objects. It tells a caller how busy the machine is,
 which is why it is not public. Its exact shape is diagnostic and may change;
 do not build a client feature on it.
+
+### 2.1 Messaging: agent to agent
+
+Herdr can already type a prompt into another agent's pane, but an agent *asked*
+to do it rarely finds that path — and nothing tells it about the other machines.
+So the daemon owns messaging for the agents on its machine, and
+`herdr-expose msg` is a thin client of it. The agent-facing interface is the
+`herdr-message` skill; this section is the wire underneath it.
+
+**It has its own token.** `Authorization: Bearer <messaging token>`, minted once
+into `<state>/msg-token` (0600) and never the same as a share or device token.
+Those are links for *watching* a pane; being able to watch must never imply
+being able to type. With the messaging token the API also skips host pinning,
+which is what lets a peer reach it through a forwarder. If messaging is not
+enabled the paths answer `404 {"error":"messaging is not enabled"}`; a wrong or
+missing token is `401`.
+
+#### `GET /v1/agents`
+
+Every agent in every running session on this machine — which is more than any
+one agent can see for itself.
+
+```json
+{ "machine": "mbp",
+  "agents": [
+    { "address": "herdr-plugins/w1:p1", "session": "herdr-plugins", "pane_id": "w1:p1",
+      "kind": "claude", "status": "idle", "cwd": "/Users/me/src/herdr-plugins",
+      "title": "Distributed training validation" }
+  ] }
+```
+
+`address` is `session/name` when the agent has a name and `session/pane` when it
+does not, and it is what you put in `to`. A peer's agent is addressed
+`peer:session/agent`.
+
+#### `POST /v1/messages`
+
+```json
+{ "from": "herdr-plugins/w1:p1", "to": "crypto-desk/w3:p1",
+  "body": "does the suite pass on your branch?", "hops": 0 }
+```
+
+Answers `202` with the stored request, whose `id` is how you collect the reply:
+
+```json
+{ "id": "b22d0c30", "from": "...", "to": "...", "body": "...", "hops": 0,
+  "status": "queued", "attempts": 0,
+  "created": "2026-10-02T11:40:02+05:30", "updated": "2026-10-02T11:40:02+05:30" }
+```
+
+`hops` is a forwarding count, refused above **8**, which is what stops two
+agents replying to each other forever.
+
+**Delivery is not instant, and that is the design.** `status` moves through:
+
+| Status | Meaning |
+|---|---|
+| `queued` | the target is busy or not yet found — it will be retried |
+| `delivered` | typed into the target; `delivered_at` is set, and it is **never typed twice** |
+| `replied` | a response exists |
+| `blocked` | the target is sitting on a permission or question dialog |
+| `failed` | Herdr rejected it for good |
+| `expired` | nobody answered within 24h |
+
+A **busy target is queued until it is idle** rather than interrupted mid-turn. A
+target on a permission dialog is reported `blocked`, before or after delivery,
+and **the dialog is never answered on its behalf** — that decision stays the
+owner's.
+
+#### `GET /v1/messages/{id}`
+
+```json
+{ "request": { "id": "b22d0c30", "status": "replied", "...": "..." },
+  "response": { "id": "b22d0c30", "from": "crypto-desk/w3:p1",
+                "body": "green, 7 packages", "created": "2026-10-02T11:41:18+05:30" } }
+```
+
+`response` is `null` until it is answered. Unknown id is `404`.
+
+#### `POST /v1/messages/{id}/reply`
+
+```json
+{ "from": "crypto-desk/w3:p1", "body": "green, 7 packages" }
+```
+
+`200` with the stored response. `404` for an unknown id, `409` when it cannot be
+accepted (already answered, or the request is in a state that forbids it).
+
+Requests are files, written atomically. The newest **100** survive a sweep, and
+a sweep **never removes one that is still awaiting a reply** — the whole point
+of the store is that an answer can arrive later than the asking agent's turn.
 
 ---
 
@@ -561,10 +663,17 @@ This is a statement, not a request; see
 }}}
 ```
 
-Valid modes are `live`, `transcript`, `summary` and `none`. **An unrecognised
-mode string is read as `none`**, so a typo is a silently blank pane — the
-server never rejects it. The modes are also enumerated on the wire in
-`welcome.viewport.modes`, which is the authoritative list.
+Valid modes are `live`, `transcript`, `transcript_clean`, `transcript_prose`,
+`transcript_settled`, `summary` and `none`. **An unrecognised mode string is
+read as `none`**, so a typo is a silently blank pane — the server never rejects
+it. The modes are also enumerated on the wire in `welcome.viewport.modes`,
+which is the authoritative list.
+
+The four `transcript*` modes are **flavours of one mode**, described in
+[section 8.1](#81-the-four-transcript-flavours). They share the transcript
+contract exactly — control plane, no geometry, ANSI already stripped — and
+differ only in how much the server removes before sending, and in whether it
+waits for the agent to finish before sending at all.
 
 #### `repaint`
 
@@ -697,11 +806,23 @@ hand-written client never has to infer them from this page. Read them from
     "sources": ["pane", "client"]
   },
   "viewport": {
-    "modes": ["live", "transcript", "summary", "none"],
+    "modes": ["live", "transcript", "transcript_clean", "transcript_prose",
+              "transcript_settled", "summary", "none"],
     "transcript": {
       "plane": "control", "frame": "transcript", "geometry": false,
       "ansi_stripped": true, "interval_ms": 1000, "sends_on_change": true,
-      "sources": ["recent_unwrapped", "detection"], "is_screen_buffer": true
+      "sources": ["recent_unwrapped", "detection"], "is_screen_buffer": true,
+      "clean_report_field": "cleaned",
+      "flavours": [
+        { "mode": "transcript",           "removes": [], "lossy": false, "held": false },
+        { "mode": "transcript_clean",     "removes": ["rules", "input_line", "status_banner", "timing_banner"], "lossy": false, "held": false },
+        { "mode": "transcript_prose",     "removes": ["rules", "input_line", "status_banner", "timing_banner", "code"], "lossy": true, "held": false },
+        { "mode": "transcript_settled",   "removes": ["rules", "input_line", "status_banner", "timing_banner", "code"], "lossy": true, "held": true }
+      ],
+      "settle": {
+        "mode": "transcript_settled", "holds_on_states": ["working", "running"],
+        "stable_polls": 1, "resets_dedup_on_mode_change": true
+      }
     }
   },
   "scope": "",
@@ -1171,6 +1292,9 @@ and pinning a laptop's CPU, and it is not negotiable from the client side.
 | `live` | full terminal stream, same-tick coalescing, 64KB flush | one upstream stream, per connection |
 | `summary` | periodic `snapshot` frames at 1-2 Hz | shared across clients |
 | `transcript` | `transcript` **control-plane** frames at ~1Hz, on change only | shared across clients, **no geometry** |
+| `transcript_clean` | the same frame with the terminal's own furniture removed | as `transcript`; the frame reports what it took out |
+| `transcript_prose` | the same, with code and diffs folded to `[12 lines of code]` | as `transcript`; **lossy, and says so** |
+| `transcript_settled` | prose, withheld until the agent stops *and* the screen stops moving | as `transcript`; one message per answer |
 | `none` | nothing but control-plane state | free |
 
 **`transcript` is the right default for every pane, agent or not** (SPEC
@@ -1204,6 +1328,90 @@ Rules a client must honour:
    this: a `resize` for a transcript target is dropped, and raw binary input to
    one is refused with `input_failed` (use `agent.prompt` / `agent.send_keys`).
 
+### 8.1 The four transcript flavours
+
+`transcript` is one mode with four flavours. Each is a strict reduction of the
+one above it, and the ladder exists because **the cleaning had already been
+written twice** — once in the web client, once in a chat bridge — and both
+copies grew the same subtle bugs. The transform is pure, so there is one right
+answer and no reason for every client to derive it again.
+
+| Mode | Removes | Lossy | Held while working |
+|---|---|---|---|
+| `transcript` | nothing | no | no |
+| `transcript_clean` | rules, the input line, status and timing banners | no | no |
+| `transcript_prose` | the above, plus code and diffs folded to markers | **yes** | no |
+| `transcript_settled` | the above | **yes** | **yes** |
+
+Measured on one real idle Claude pane, all four subscribed at once:
+
+```
+transcript           13300 chars  200 lines   cleaned=null
+transcript_clean     12625 chars  190 lines   chrome 8, blank 2
+transcript_prose      5404 chars   95 lines   chrome 8, blank 2, code 104
+transcript_settled    5404 chars   95 lines   (identical - the pane was idle, so released)
+```
+
+Each level strictly reduces, and `cleaned` accounts for every line removed. On a
+**working** pane the first three deliver and `transcript_settled` sends nothing
+at all — that difference is the entire reason the flavour exists.
+
+`transcript_prose` is **lossy and says so.** It is for a reader in a chat app,
+where a diff reflows into nonsense and twenty lines of it bury the sentence that
+explained why. The `[12 lines of code]` marker is what keeps it honest: the
+reader is told something was there and can open the pane to see it.
+
+#### `transcript_settled`: a delivery policy, not a text one
+
+`transcript_settled` is `transcript_prose` text, **withheld until it is worth
+sending**. A working agent redraws constantly; forwarding that to a chat app
+means a dozen half-finished messages for one question, and nobody reads a
+partial answer. So it stays silent while the agent works and delivers once when
+it settles.
+
+Two conditions, not one:
+
+1. **The agent is not mid-turn.** The test is on what it *holds* for —
+   `welcome.viewport.transcript.settle.holds_on_states`, today `working` and
+   `running` — so anything else releases: idle, done, blocked on a question, and
+   any state Herdr adds later. A release list would be a promise to enumerate
+   every future state.
+2. **The screen has stopped moving**, for `settle.stable_polls` consecutive
+   polls (~1s each). *"The agent stopped" and "the screen stopped" are different
+   instants.* Measured on a live pane reporting `done`, the transcript still
+   grew 29 → 85 → 86 lines over three polls while it finished painting. Every
+   one of those was a legitimately different screen, so every one was sent, and
+   **eight near-identical messages arrived for one answer.** One poll of
+   stillness is enough; two is not better, because the failure being prevented
+   is a screen mid-paint, which resolves in a frame or two.
+
+Two consequences a client should expect:
+
+- **Holding does not record the dedup hash.** If it did, the screen that finally
+  settles would hash identical to the half-written one that was never sent, and
+  the answer would be deduplicated into silence.
+- **Changing flavour on a live subscription delivers again**, even though the
+  pane has not changed, because the next frame is a different shape and the
+  remembered hash is about text the subscriber will never see again. Without
+  this, switching strands the client on a blank view until the pane happens to
+  change — on an idle agent, forever.
+
+#### What is still the client's job
+
+The server decides **what the text is** and **whether a screen is worth sending
+at all**. It cannot decide **what this particular reader has already been
+shown**, because that is per-connection state and a server that keeps it grows a
+buffer per viewer — which is precisely what [`seq` is not a resume
+cursor](#7-sequence-numbers-gaps-and-reconnection) exists to prevent.
+
+So the last mile stays with you. Measured on a live pane: two settled frames
+thirty seconds apart, 5660 and 1872 characters — genuinely different screens,
+and the server was right to send both — but they opened with the same lines, so
+in a chat app they read as the same answer arriving twice. Diff against what you
+last showed, and **match fuzzily**: one repainted character, a changed elapsed
+time or a moved cursor breaks an exact overlap and makes the whole screen look
+new.
+
 ### The `transcript` frame
 
 ```json
@@ -1219,12 +1427,30 @@ Rules a client must honour:
 }}
 ```
 
+On a cleaned flavour the frame carries one extra object accounting for what was
+removed:
+
+```json
+{ "seq": 42, "type": "transcript", "data": {
+  "target": "herdr-plugins/w1:p1",
+  "text": "\u23fa A PTY is ...\n\n[12 lines of code]\n\nSo the kernel ...",
+  "cleaned": { "chrome": 8, "blank": 2, "code": 104 },
+  "agent": true, "state": "idle", "at": "2026-09-19T20:31:04+05:30"
+}}
+```
+
 - `text` is plain UTF-8 with every escape sequence stripped **server-side**. It
   is not a binary frame and must not be fed to a terminal emulator.
 - It is sent **only when the text actually changed**, so an idle pane costs
   nothing. A new subscriber always gets one immediately.
 - `source` is `recent_unwrapped` normally and `detection` while the agent is
   blocked — Herdr's own spellings, reported so you can say what you are showing.
+- `cleaned` is present only on a cleaned flavour, and is the server's account of
+  what it removed: `chrome` furniture lines, `blank` runs collapsed, and `code`
+  lines folded into markers. It is there so a client can tell which rung of the
+  ladder it is on **without diffing against the raw screen** — being handed a
+  different shape silently is the failure it prevents. Absent on plain
+  `transcript`, which removes nothing.
 - **This is the agent's visible SCREEN, not its message history.** Herdr exposes
   the screen; there is no conversation log to read. Render the text; do not
   invent message boundaries, roles or turns from it.

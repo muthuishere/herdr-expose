@@ -461,10 +461,19 @@ ever created.
 
 ---
 
-## The agent skill
+## The agent skills
 
-`skill/` in this repository is a **Claude Code / agent skill** called
-`herdr-share`. It is how the owner of this tool actually drives it: you say what
+Two **Claude Code / agent skills** ship in this repository, and both install
+through the same `skill install`:
+
+| Skill | Directory | What it is for |
+|---|---|---|
+| `herdr-share` | `skill/` | Exposing and sharing sessions — the rungs, pairing, revoking |
+| `herdr-message` | `skill-message/` | Listing other agents and messaging them, here or on a peer machine |
+
+### `herdr-share`
+
+It is how the owner of this tool actually drives it: you say what
 you want in English, the agent runs the CLI.
 
 It is a thin wrapper, on purpose — **the binary is the product.** The skill
@@ -506,10 +515,15 @@ The plugin install does this for you (see [Install](#install)). To do it by
 hand, or to re-link after moving the checkout:
 
 ```bash
-herdr-expose skill install      # symlink skill/ -> ~/.claude/skills/herdr-share
-herdr-expose skill status       # where it is linked, and whether that resolves
+herdr-expose skill install      # symlinks BOTH skills into ~/.claude/skills/
+herdr-expose skill status       # where each is linked, and whether that resolves
 herdr-expose skill uninstall    # remove the links; the checkout is untouched
 ```
+
+`status` is worth reading rather than skimming: it reports a link that still
+resolves but points at **another checkout** as `STALE`, which is what happens
+after you move the repo or work out of a second git worktree. `install`
+repoints it.
 
 It links into `~/.claude/skills/`, creating it if needed, and into
 `~/.agents/skills/` only when that directory already exists.
@@ -522,6 +536,88 @@ way is refused with the path to move rather than clobbered. `uninstall` only
 ever removes symlinks that resolve to this skill.
 
 After installing, start a new agent session — skills are discovered at startup.
+
+---
+
+## Driving it from a chat app
+
+A share gives you a browser. A **chat bridge** gives you Telegram, Teams,
+Discord or Slack — the same agents, answered from wherever you already get
+messages. `examples/chat-bridge.mjs` is a complete, dependency-free one.
+
+```bash
+node examples/chat-bridge.mjs --channel console              # no credentials; prove it first
+node examples/chat-bridge.mjs --channel telegram --digest 0  # HERDR_EXPOSE_TELEGRAM_TOKEN
+node examples/chat-bridge.mjs --channel telegram --url http://HOST:PORT --code ABC123
+```
+
+What arrives in the channel:
+
+```
+herdr bridge up on http://127.0.0.1:21118 (local)
+/ls  /follow N  /say ...  /key y  /mute  /help
+
+2 sessions
+  [s:herdr-plugins] herdr-plugins (10)
+  [s:crypto-desk] crypto-desk (15)
+```
+
+Tapping a session lists its panes, tapping a pane follows it, and anything else
+you type is sent to that pane as a prompt. Where the channel has buttons they
+are buttons; where it does not — the `console` channel is the honest case — they
+degrade to the `[s:…]` / `[k:y]` payloads **the text commands already accept**,
+so a tap and a typed command take the same path and no command logic is written
+twice.
+
+### Do not mirror a terminal into a chat window
+
+This is the design decision, and the obvious choice is the wrong one. A pane
+redraws constantly; a 120x40 screen pasted every few seconds is unreadable, and
+the channel will rate-limit you into a backlog that arrives after it stopped
+being true.
+
+So the bridge is a **notifier with a terminal attached**. An agent going
+`blocked` is pushed immediately with its question — that is the event a human is
+actually waiting for. Everything else is quiet unless something changed.
+
+The thing that makes this work is **not** in the bridge: it subscribes to
+[`transcript_settled`](api.md#81-the-four-transcript-flavours), and the server
+holds the screen until the agent has stopped *and* the screen has stopped
+moving, then sends it once. A client that tries to do this itself writes a timer
+and gets it wrong — the measured failure is eight near-identical messages for
+one answer, because an agent reporting `done` is often still painting.
+
+### Writing a channel is two functions
+
+```js
+export function myChannel() {
+  return {
+    name: 'myapp',
+    async poll() { return [{ text: 'what they typed', thread: 'conversation id' }] },
+    async send(text, thread, opts) { /* opts.choices = [{label, data}] */ },
+  }
+}
+```
+
+Register it in `CHANNELS`, run `--channel myapp`. Cleaning, code folding,
+waiting for the agent, deduplication, menus, commands and the single-instance
+lock are already done — in the plugin or in the example. The full contract is in
+[`skill/SKILL.md`](../skill/SKILL.md).
+
+### One bridge per channel
+
+Two bridges on one Telegram token both long-poll `getUpdates`, both receive
+every update, and **every command runs twice** — which looks exactly like a code
+bug. A lock file keyed on the channel makes it impossible rather than unlikely:
+
+```
+$ node examples/chat-bridge.mjs --channel telegram
+another telegram bridge is already running (pid 45149).
+stop it first, or: kill 45149
+```
+
+A stale lock from a crashed run is reclaimed after checking whether the pid is
+alive — a lock nobody can clear is worse than no lock.
 
 ---
 
