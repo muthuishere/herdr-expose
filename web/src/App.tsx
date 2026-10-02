@@ -39,6 +39,15 @@ export function App() {
   // Consumed once, synchronously, before the first paint: the QR deep link
   // `/?pair=<code>` must not survive into history or a screenshot.
   const [pairCode, setPairCode] = useState<string | null>(() => takePairCodeFromUrl())
+  // ABOVE the `authRequired || pairCode` early return below. Hooks after an
+  // early return are only called on the renders that get past it, so pairing
+  // rendered two fewer hooks than the render straight after it -- React then
+  // throws "rendered more hooks than during the previous render" and the app
+  // dies at the instant it finishes pairing. Invisible on loopback, where
+  // auth is skipped and the early return never fires.
+  const [showSettings, setShowSettings] = useState(false)
+  const chatAdapters = useStore((s) => s.welcome?.chat?.adapters)
+  const attention = settingsNeedsAttention(chatAdapters)
   const env = useMemo(() => envStatus(), [])
 
   const openPane = useCallback((id: PaneId) => {
@@ -81,10 +90,6 @@ export function App() {
       />
     )
   }
-
-  const [showSettings, setShowSettings] = useState(false)
-  const chatAdapters = useStore((s) => s.welcome?.chat?.adapters)
-  const attention = settingsNeedsAttention(chatAdapters)
 
   if (showSettings) {
     return (
