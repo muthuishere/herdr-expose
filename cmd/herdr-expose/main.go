@@ -77,6 +77,8 @@ func main() {
 		fmt.Println("herdr-expose", version)
 	case "msg":
 		err = runMsg(os.Args[2:])
+	case "chat":
+		err = cmdChat(os.Args[2:])
 	case "help", "--help", "-h":
 		usage()
 	default:
