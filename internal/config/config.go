@@ -297,9 +297,10 @@ type Adapter struct {
 //	[[chat.adapters]]
 //	id = "telegram"
 //	enabled = true
+//	command = "node telegram.js"
 //	  [chat.adapters.env]
-//	  token   = "$HERDR_EXPOSE_TELEGRAM_TOKEN"
-//	  chat_id = "123456789"
+//	  HERDR_EXPOSE_TELEGRAM_TOKEN = "$HERDR_EXPOSE_TELEGRAM_TOKEN"
+//	  HERDR_CHAT_ID               = "123456789"
 //
 // Both switches must be on: the table's and the adapter's. One is the feature,
 // the other is the channel, and turning the feature on must not silently light
@@ -320,14 +321,32 @@ type Chat struct {
 // of file as the one you write.
 type ChatAdapter struct {
 	ID string `toml:"id" json:"id"`
-	// Script is a path to a .js file, or the bare name of a bundled adapter
-	// ("telegram"). A path always wins, so a local copy of a bundled adapter
-	// shadows it rather than fighting it.
-	Script string `toml:"script" json:"script"`
+	// Command is the program to run, as a shell-style argv string:
+	// "node telegram.js", "python3 discord.py", "./my-adapter".
+	//
+	// It is a COMMAND rather than a script path because that costs nothing and
+	// buys every language. The alternative -- a .js path run by an embedded
+	// interpreter -- means an adapter can only do what the sandbox was taught
+	// to do, and the first thing it needed was an HTTP client that the sandbox
+	// deliberately did not have. A command has the whole machine: node's fetch,
+	// python's requests, a static binary, whatever the author already knows.
+	//
+	// It runs with cwd set to the chat adapters directory, so the argv stays
+	// short and a relative filename means what it looks like.
+	//
+	// It is NOT run through a shell: no pipes, no redirection, no globbing, no
+	// ${} of its own. A chat adapter has no reason to need a shell, and
+	// handing one a shell turns every config file into a place to hide a
+	// command substitution.
+	Command string `toml:"command" json:"command"`
 	// Enabled is this channel's own switch, independent of [chat].enabled.
 	Enabled bool `toml:"enabled" json:"enabled"`
-	// Env is handed to the adapter as ctx.config, with every $NAME and
-	// ${NAME} expanded from the process environment first (see ExpandEnv).
+	// Env is handed to the adapter as its ENVIRONMENT, with every $NAME and
+	// ${NAME} expanded from our own environment first (see ExpandEnv).
+	//
+	// The environment, never argv: argv is world-readable through `ps`, so a
+	// token on a command line is a token every process on the machine can
+	// read.
 	//
 	// So a credential is written here as a REFERENCE -- `token =
 	// "$HERDR_EXPOSE_TELEGRAM_TOKEN"` -- which is a name, not a secret: it can
@@ -349,7 +368,10 @@ func (c Chat) ActiveChatAdapters() []ChatAdapter {
 	}
 	var out []ChatAdapter
 	for _, a := range c.Adapters {
-		if a.Enabled && strings.TrimSpace(a.ID) != "" {
+		// An adapter with no id is unaddressable by the CLI, and one with no
+		// command is nothing to run. Both are configuration mistakes that
+		// must not become a silently inert "enabled" adapter.
+		if a.Enabled && strings.TrimSpace(a.ID) != "" && strings.TrimSpace(a.Command) != "" {
 			out = append(out, a)
 		}
 	}

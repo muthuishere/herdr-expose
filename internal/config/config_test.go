@@ -415,7 +415,7 @@ func TestLANModeConfig(t *testing.T) {
 // because the failure that matters is the accidental yes.
 func TestChatNeedsBothSwitches(t *testing.T) {
 	adapter := func(on bool) ChatAdapter {
-		return ChatAdapter{ID: "example", Script: "example.js", Enabled: on}
+		return ChatAdapter{ID: "example", Command: "node example.js", Enabled: on}
 	}
 	for _, tc := range []struct {
 		name         string
@@ -452,11 +452,26 @@ func TestChatDefaultsToDisabled(t *testing.T) {
 // enabling it would be a channel nobody can name, inspect or turn off.
 func TestChatAdapterWithoutIDNeverRuns(t *testing.T) {
 	c := Chat{Enabled: true, Adapters: []ChatAdapter{
-		{ID: "  ", Script: "x.js", Enabled: true},
-		{ID: "named", Script: "x.js", Enabled: true},
+		{ID: "  ", Command: "node x.js", Enabled: true},
+		{ID: "named", Command: "node x.js", Enabled: true},
 	}}
 	got := c.ActiveChatAdapters()
 	if len(got) != 1 || got[0].ID != "named" {
 		t.Fatalf("active = %+v, want only the named adapter", got)
+	}
+}
+
+// An adapter that is enabled but has no command is a configuration mistake,
+// and must not become a silently inert "enabled" adapter: the CLI would
+// report it as running while nothing ever ran.
+func TestChatAdapterWithoutCommandNeverRuns(t *testing.T) {
+	c := Chat{Enabled: true, Adapters: []ChatAdapter{
+		{ID: "no-command", Enabled: true},
+		{ID: "blank-command", Command: "   ", Enabled: true},
+		{ID: "runnable", Command: "node x.js", Enabled: true},
+	}}
+	got := c.ActiveChatAdapters()
+	if len(got) != 1 || got[0].ID != "runnable" {
+		t.Fatalf("active = %+v, want only the runnable adapter", got)
 	}
 }
