@@ -298,8 +298,8 @@ type Adapter struct {
 //	id = "telegram"
 //	enabled = true
 //	  [chat.adapters.env]
-//	  token_env = "HERDR_EXPOSE_TELEGRAM_TOKEN"
-//	  chat_id   = "123456789"
+//	  token   = "$HERDR_EXPOSE_TELEGRAM_TOKEN"
+//	  chat_id = "123456789"
 //
 // Both switches must be on: the table's and the adapter's. One is the feature,
 // the other is the channel, and turning the feature on must not silently light
@@ -326,11 +326,16 @@ type ChatAdapter struct {
 	Script string `toml:"script" json:"script"`
 	// Enabled is this channel's own switch, independent of [chat].enabled.
 	Enabled bool `toml:"enabled" json:"enabled"`
-	// Env is handed to the adapter as ctx.config. It is for NAMES and ids --
-	// `token_env`, `chat_id` -- never for a secret's value: the adapter reads
-	// the value itself with ctx.env(name), which registers it with the
-	// redactor so it cannot reach a log. A token written here would be a
-	// plaintext credential in a config file, which is why nothing reads one.
+	// Env is handed to the adapter as ctx.config, with every $NAME and
+	// ${NAME} expanded from the process environment first (see ExpandEnv).
+	//
+	// So a credential is written here as a REFERENCE -- `token =
+	// "$HERDR_EXPOSE_TELEGRAM_TOKEN"` -- which is a name, not a secret: it can
+	// be committed, read aloud, or pasted into a bug report. The value is
+	// fetched at use and registered with the redactor, so it cannot reach a
+	// log line. Writing the literal token here instead would work, and would
+	// also put a plaintext credential in a file that gets backed up, synced
+	// and screenshotted; the expansion exists so nobody has a reason to.
 	Env map[string]string `toml:"env" json:"env"`
 }
 

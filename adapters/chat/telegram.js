@@ -15,16 +15,17 @@
  *   id = "telegram"
  *   enabled = true
  *     [chat.adapters.env]
- *     token_env = "HERDR_EXPOSE_TELEGRAM_TOKEN"
- *     chat_id   = "123456789"     # optional: bind to one chat up front
+ *     token   = "$HERDR_EXPOSE_TELEGRAM_TOKEN"
+ *     chat_id = "123456789"       # optional: bind to one chat up front
  *
  * A token in the environment is not consent to start answering messages with
  * it, which is why finding one is not enough to make this run.
  *
- * The token is read with ctx.env(name) and never appears in ctx.config, so it
- * is not written in the config file, not printed in a log line, and not put
- * into a URL this adapter logs. ctx.env registers it with the host's redactor,
- * so even a mistake here cannot leak it.
+ * The config file holds "$HERDR_EXPOSE_TELEGRAM_TOKEN" -- a NAME, which is not
+ * secret and can be committed, read aloud or pasted into an issue. The host
+ * expands it from the environment before this file runs and registers the
+ * value with its redactor, so the token cannot reach a log line even if this
+ * adapter prints it. There is no form of this file that contains a credential.
  */
 
 function api(token, method) {
@@ -43,11 +44,11 @@ export function name() {
 }
 
 export async function poll() {
-  const token = ctx.env(ctx.config.token_env || 'HERDR_EXPOSE_TELEGRAM_TOKEN')
-  if (!token) {
-    ctx.log('no token: set', ctx.config.token_env || 'HERDR_EXPOSE_TELEGRAM_TOKEN')
-    return []
-  }
+  // Already expanded by the host, and already registered as a secret. An
+  // empty token means the referenced variable is not set -- the host says so
+  // by name at startup, so this does not need to guess which one it was.
+  const token = ctx.config.token
+  if (!token) return []
   if (chat === null && ctx.config.chat_id) chat = String(ctx.config.chat_id)
 
   // 25s is deliberately under the host's call budget for poll(). A long poll
@@ -97,7 +98,7 @@ export async function poll() {
 }
 
 export async function send(text, thread, opts) {
-  const token = ctx.env(ctx.config.token_env || 'HERDR_EXPOSE_TELEGRAM_TOKEN')
+  const token = ctx.config.token
   if (!token) return
   const to = thread || chat
   if (!to) { ctx.log('dropped: no chat bound yet'); return }
