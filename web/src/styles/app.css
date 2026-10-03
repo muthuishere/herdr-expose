@@ -1,3 +1,28 @@
+/* Self-hosted, not Google Fonts.
+ *
+ * This UI is served BY the binary, usually over a LAN and sometimes through a
+ * tunnel on a phone with no route to fonts.gstatic.com. A webfont fetched from
+ * a third party is a font that silently does not arrive exactly when somebody
+ * is furthest from their desk, so both faces ship inside the bundle.
+ *
+ * Variable weights, one file each, latin subset: two requests, ~140KB, cached
+ * for the life of the build.
+ */
+@font-face {
+  font-family: 'Inter var';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url('../fonts/inter-latin-wght-normal.woff2') format('woff2-variations');
+}
+@font-face {
+  font-family: 'JetBrains Mono var';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 800;
+  src: url('../fonts/jetbrains-mono-latin-wght-normal.woff2') format('woff2-variations');
+}
+
 /*
  * MOBILE-FIRST. Everything here is the 375px layout. Desktop is one
  * `@media (min-width: 900px)` block at the bottom, and nothing above it assumes
@@ -55,9 +80,9 @@
 
   --radius: 12px;
   --radius-sm: 8px;
-  --mono: 'SFMono-Regular', ui-monospace, 'JetBrains Mono', Menlo, Consolas,
+  --mono: 'JetBrains Mono var', 'SFMono-Regular', ui-monospace, Menlo, Consolas,
     'Liberation Mono', monospace;
-  --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Roboto, sans-serif;
+  --sans: 'Inter var', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
 
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
@@ -1940,4 +1965,28 @@ button {
   .chat-env-row dt {
     min-width: 0;
   }
+}
+
+/* LIGATURES OFF wherever a pane's own output is shown.
+ *
+ * JetBrains Mono ships code ligatures on by default, so `->` becomes one glyph
+ * and `!=` becomes another. In prose that is a taste question; in a TERMINAL
+ * it is a correctness one -- the text being rendered is a fixed-width grid an
+ * agent drew, and a two-character sequence that occupies one cell stops the
+ * columns lining up with the rest of the screen.
+ *
+ * Box drawing, block elements and the rest of the grid furniture are left to
+ * fall through the stack: the latin subset does not carry them, so they come
+ * from the system mono, which is also metrically fixed-width. That is correct
+ * precisely BECAUSE both are monospace -- one advance width, whichever face
+ * draws the glyph.
+ */
+.tr-code,
+.term,
+.terminal,
+pre,
+code,
+.mono {
+  font-variant-ligatures: none;
+  font-feature-settings: 'calt' 0, 'liga' 0;
 }
