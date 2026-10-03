@@ -24,6 +24,36 @@ const (
 	// anything is spawned, because "it referenced $TELEGRAM_TOKEN and that is
 	// not set" is an answer and "it keeps dying" is not.
 	StateMisconfigured = "misconfigured"
+	// StateRefused is the manager LOOKED at this adapter and would not spawn
+	// it, and says why in Problems.
+	//
+	// It exists because the manager used to skip such an adapter without
+	// registering a runner, and Plan -- finding nothing live for an adapter
+	// that is enabled and whose command is on disk -- fell through to
+	// StateRestarting. So the UI and the CLI both reported "restarting" for an
+	// adapter that had been refused at start and would never start: a spinner
+	// where a reason belonged. Separate from StateMisconfigured because that
+	// one is an inference from config, while this is a decision a running
+	// daemon already made, and separate from StateRestarting because nothing
+	// is going to happen next.
+	StateRefused = "refused"
+)
+
+// Who read the environment that a Summary's $NAME resolutions came from.
+//
+// This is on the wire because the two components disagreed in the field: the
+// daemon, started by launchd or systemd, does not inherit a login shell, so it
+// logged "HERDR_EXPOSE_TELEGRAM_TOKEN is not set" and refused the adapter
+// while `herdr-expose chat status`, run from the terminal where the variable
+// IS exported, printed "(set)" for the same variable. Neither was wrong about
+// its own environment; the report was wrong to omit whose it was.
+const (
+	// EnvSourceDaemon is the daemon's own environment -- the process that
+	// actually spawns adapters, so the only answer that decides anything.
+	EnvSourceDaemon = "daemon"
+	// EnvSourceCLI is the environment of the terminal that ran the CLI, which
+	// is a guess about the daemon's and must be labelled as one.
+	EnvSourceCLI = "cli"
 )
 
 // Status is one adapter, as the web UI and the CLI both see it. There is one
@@ -97,9 +127,31 @@ type EnvEntry struct {
 	// Reference is true when Literal contains a $NAME, so a UI can show "set"
 	// or "not set" rather than implying the literal itself is the value.
 	Reference bool `json:"reference,omitempty"`
-	// Resolved is whether every referenced name is currently set. Always true
-	// for a non-reference.
+	// Resolved is whether every referenced name is currently set -- IN THE
+	// ENVIRONMENT NAMED BY Summary.EnvSource, which is the only environment
+	// whoever produced this entry could read. Always true for a
+	// non-reference.
 	Resolved bool `json:"resolved"`
+}
+
+// ResolvedLabel renders Resolved for a person, attributed to the environment
+// it was read from.
+//
+// A bare "(set)" is what made the daemon and the CLI appear to contradict each
+// other over one variable, so there is no way to render this without saying
+// whose environment answered.
+func (e EnvEntry) ResolvedLabel(envSource string) string {
+	if !e.Reference {
+		return ""
+	}
+	where := "in this shell"
+	if envSource == EnvSourceDaemon {
+		where = "in the daemon's environment"
+	}
+	if e.Resolved {
+		return "(set " + where + ")"
+	}
+	return "(not set " + where + ")"
 }
 
 // NeedsAttention is true for the states a person has to do something about.
@@ -107,7 +159,9 @@ type EnvEntry struct {
 // It exists so every client agrees on which ones those are: a dot in the web
 // UI and a non-zero exit from the CLI must not be able to drift apart.
 func (s Status) NeedsAttention() bool {
-	return s.State == StateDown || s.State == StateMisconfigured
+	// Refused belongs here for the same reason down does: nothing further will
+	// happen on its own, so if a person is not told, nobody is coming.
+	return s.State == StateDown || s.State == StateMisconfigured || s.State == StateRefused
 }
 
 // Summary is the whole feature's state, which is mostly the answer to "is
@@ -122,6 +176,33 @@ type Summary struct {
 	// AdaptersDir is where the files live, so the UI can tell somebody where
 	// to put a new one without them reading the docs.
 	AdaptersDir string `json:"adapters_dir,omitempty"`
+
+	// EnvSource is whose environment every EnvEntry.Resolved in this summary
+	// was read from: EnvSourceDaemon or EnvSourceCLI. A client must not render
+	// "set" without it -- see the comment on the EnvSource constants for the
+	// bug that is.
+	EnvSource string `json:"env_source,omitempty"`
+}
+
+// EnvNote is the sentence a client shows beside the resolved/not-set column,
+// naming the environment that column reflects.
+//
+// daemonRunning is the caller's own answer to "is there a daemon up right
+// now", because a CLI reporting its own shell while a daemon is running and
+// possibly seeing something else is the exact case that produced two
+// components disagreeing about one variable.
+func (s Summary) EnvNote(daemonRunning bool) string {
+	switch {
+	case s.EnvSource == EnvSourceDaemon:
+		return "set/not set above is the daemon's own environment — the process that spawns the adapters."
+	case daemonRunning:
+		return "set/not set above is THIS SHELL's environment, NOT the daemon's. " +
+			"The daemon is running, and started by launchd/systemd it does not inherit your shell: " +
+			"a variable exported here can be unset there. `herdr-expose logs` shows what the daemon saw."
+	default:
+		return "set/not set above is THIS SHELL's environment. The daemon reads its own when it starts, " +
+			"and under launchd/systemd that is not your shell's."
+	}
 }
 
 // NeedsAttention is true when any adapter does.

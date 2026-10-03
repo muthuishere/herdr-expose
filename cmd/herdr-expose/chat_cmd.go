@@ -73,7 +73,14 @@ func chatStatus(args []string) error {
 	if err != nil {
 		return err
 	}
-	sum := chat.Plan(cfg.Chat, dir, nil)
+	// PlanFor, not Plan: this process is a terminal, and the environment it
+	// can read is its own. Plan's resolutions are attributed to the daemon,
+	// and labelling a shell's answer as the daemon's is precisely the lie this
+	// command used to tell -- "(set)" here while the daemon, started by
+	// launchd/systemd without a login shell, refused the adapter for the same
+	// variable being unset.
+	sum := chat.PlanFor(chat.EnvSourceCLI, cfg.Chat, dir, nil)
+	daemonUp := daemonRunning()
 
 	if hasFlag(args, "--json") {
 		b, err := json.MarshalIndent(sum, "", "  ")
@@ -104,18 +111,46 @@ func chatStatus(args []string) error {
 		for _, e := range a.Env {
 			// The literal, never the value: this prints to a terminal that
 			// gets screenshotted and pasted into issues.
-			state := ""
-			if e.Reference {
-				state = "  (not set)"
-				if e.Resolved {
-					state = "  (set)"
-				}
+			// Attributed, never bare: "(set)" with no owner is what let this
+			// command imply the daemon could see a variable it could not.
+			state := e.ResolvedLabel(sum.EnvSource)
+			if state != "" {
+				state = "  " + state
 			}
 			fmt.Printf("    %-28s %s%s\n", e.Key, e.Literal, state)
 		}
 	}
+	if anyReference(sum) {
+		fmt.Printf("\n%s\n", sum.EnvNote(daemonUp))
+	}
 	fmt.Printf("\nadapters live in %s\n", dir)
 	return exitForSummary(sum)
+}
+
+// anyReference reports whether anything in the summary was resolved from the
+// environment at all. With no $NAME anywhere there is no environment to
+// attribute, and a warning about one is noise.
+func anyReference(sum chat.Summary) bool {
+	for _, a := range sum.Adapters {
+		for _, e := range a.Env {
+			if e.Reference {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// daemonRunning is this command's best answer to "is there a daemon up that
+// might see a different environment than I do". Best effort on purpose: the
+// note it drives is a warning, and failing to read a pidfile must not stop
+// `chat status` from printing what it does know.
+func daemonRunning() bool {
+	state, err := StateDir()
+	if err != nil {
+		return false
+	}
+	return pidAlive(readPid(state))
 }
 
 // exitForSummary makes `chat status` usable in a script: non-zero when

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+
+	"github.com/muthuishere/herdr-expose/internal/platform"
 	"sync"
 	"time"
 )
@@ -189,6 +191,18 @@ func (s *Supervisor) runOnce(ctx context.Context) error {
 	cmd.Dir = s.spec.Dir
 	cmd.Env = s.spec.Env
 
+	// Own the whole TREE, not just the child.
+	//
+	// `node telegram.js` is one process today and two the moment somebody's
+	// adapter shells out to curl or spawns a worker. Killing only the direct
+	// child then leaves the grandchild holding the long poll -- on Windows
+	// especially, where terminating a process does nothing to its children, so
+	// a restarted adapter would quietly end up with two pollers answering the
+	// same chat. PrepareGroup is a process group on Unix and a job object on
+	// Windows; AdoptGroup must follow Start, and both are no-ops on the
+	// platform that does not need them.
+	platform.PrepareGroup(cmd)
+
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
@@ -205,6 +219,18 @@ func (s *Supervisor) runOnce(ctx context.Context) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start %s: %w", s.spec.Argv[0], err)
 	}
+	group, gerr := platform.AdoptGroup(cmd)
+	if gerr != nil {
+		// Not fatal: an un-adopted child still runs and is still killed
+		// directly. Say so, because the consequence is subtle -- a leftover
+		// grandchild on the next restart.
+		s.logf("chat adapter %s: could not adopt the process group: %v", s.spec.ID, gerr)
+	}
+	defer func() {
+		if group != nil {
+			group.Close()
+		}
+	}()
 
 	s.mu.Lock()
 	s.stdin = stdin
@@ -237,6 +263,14 @@ func (s *Supervisor) runOnce(ctx context.Context) error {
 			if t := sc.Text(); t != "" {
 				s.logf("chat adapter %s: %s", s.spec.ID, t)
 			}
+		}
+	}()
+
+	// Context cancellation kills the direct child; the TREE needs this.
+	go func() {
+		<-ctx.Done()
+		if cmd.Process != nil {
+			platform.KillTree(cmd.Process.Pid, group, s.logf)
 		}
 	}()
 

@@ -3,6 +3,8 @@ package chat
 import (
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -156,5 +158,106 @@ func TestEnvEntriesNeverCarryAResolvedValue(t *testing.T) {
 	}
 	if got := by["missing"]; !got.Reference || got.Resolved {
 		t.Errorf("missing = %+v, want an unresolved reference", got)
+	}
+}
+
+// Command resolution has to work the way a person writes a path, on either
+// platform. The bug this pins: testing for a leading "/" to decide "absolute"
+// is wrong on Windows, where C:\adapters\x.js would be joined onto the
+// adapters directory and then reported missing.
+func TestLookCommandHandlesBothSeparators(t *testing.T) {
+	dir := t.TempDir()
+	rel := filepath.Join(dir, "mine.js")
+	if err := os.WriteFile(rel, []byte("// x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// A relative path with a forward slash resolves against the adapters dir
+	// on every platform -- that is what a person types, Windows included.
+	if _, err := lookCommand("./mine.js", dir); err != nil {
+		t.Errorf("./mine.js did not resolve against the adapters dir: %v", err)
+	}
+	// An absolute path is taken as-is rather than joined.
+	if _, err := lookCommand(rel, dir); err != nil {
+		t.Errorf("an absolute path did not resolve: %v", err)
+	}
+	// A path that is not there is an error, not a silent pass.
+	if _, err := lookCommand("./absent.js", dir); err == nil {
+		t.Error("a missing adapter resolved; it must be reported before anything is spawned")
+	}
+	// A bare name goes to PATH. (Stubbed, so this does not depend on what
+	// happens to be installed.)
+	stubLookPath(t, "node")
+	if _, err := lookCommand("node", dir); err != nil {
+		t.Errorf("a bare name did not go to PATH: %v", err)
+	}
+	if _, err := lookCommand("definitely-not-installed", dir); err == nil {
+		t.Error("an uninstalled runtime resolved")
+	}
+}
+
+// A report that says "set" must say whose environment said so.
+//
+// The failure this pins happened in the field: the daemon, started by launchd
+// without a login shell, logged "HERDR_EXPOSE_TELEGRAM_TOKEN is not set" and
+// refused the adapter, while `herdr-expose chat status` -- run from the
+// terminal where that variable IS exported -- printed "(set)" for the same
+// variable. Both read their own environment correctly; the report was wrong to
+// omit which one it had read. So the resolution travels with its source, and
+// "set" cannot be rendered without it.
+func TestEnvResolutionIsAttributedToTheEnvironmentItWasReadFrom(t *testing.T) {
+	t.Setenv("HX_SET_IN_THIS_SHELL", "value")
+	stubLookPath(t, "node")
+	c := config.Chat{Enabled: true, Adapters: []config.ChatAdapter{{
+		ID: "telegram", Command: "node telegram.js", Enabled: true,
+		Env: map[string]string{"HX_SET_IN_THIS_SHELL": "$HX_SET_IN_THIS_SHELL"},
+	}}}
+
+	// The daemon spelling. Plan reads its OWN environment, so only the daemon
+	// -- the process that spawns adapters -- may use it.
+	if got := Plan(c, "/tmp/adapters", nil).EnvSource; got != EnvSourceDaemon {
+		t.Errorf("Plan env source = %q, want %q", got, EnvSourceDaemon)
+	}
+
+	cli := PlanFor(EnvSourceCLI, c, "/tmp/adapters", nil)
+	if cli.EnvSource != EnvSourceCLI {
+		t.Fatalf("env source = %q, want %q", cli.EnvSource, EnvSourceCLI)
+	}
+
+	// A client cannot render the resolution without the attribution: the label
+	// itself carries it, so there is no bare "(set)" to print.
+	e := cli.Adapters[0].Env[0]
+	if !e.Resolved {
+		t.Fatalf("env entry = %+v, want resolved in this process", e)
+	}
+	label := e.ResolvedLabel(cli.EnvSource)
+	if label == "(set)" || !strings.Contains(label, "shell") {
+		t.Errorf("CLI label = %q, want it attributed to this shell", label)
+	}
+	if daemonLabel := e.ResolvedLabel(EnvSourceDaemon); !strings.Contains(daemonLabel, "daemon") {
+		t.Errorf("daemon label = %q, want it attributed to the daemon", daemonLabel)
+	}
+
+	// And when a daemon is up, the CLI's answer is explicitly flagged as not
+	// being the daemon's -- the two-components-disagreeing case.
+	warn := cli.EnvNote(true)
+	if !strings.Contains(warn, "NOT the daemon's") {
+		t.Errorf("note with a daemon running = %q, want it to deny speaking for the daemon", warn)
+	}
+	if quiet := cli.EnvNote(false); strings.Contains(quiet, "daemon is running") {
+		t.Errorf("note with no daemon = %q, want no claim that one is running", quiet)
+	}
+
+	// The attribution has to survive the wire, or the web UI renders the same
+	// unowned "set" the CLI used to.
+	blob, err := json.Marshal(cli)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(blob), `"env_source":"cli"`) {
+		t.Fatalf("env source did not reach the wire: %s", blob)
+	}
+	if strings.Contains(string(blob), "value") {
+		t.Fatalf("a resolved value reached the wire: %s", blob)
 	}
 }

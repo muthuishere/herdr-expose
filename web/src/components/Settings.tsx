@@ -17,7 +17,10 @@
 import { useStore } from '../store/store'
 import type { ChatAdapterStatus } from '../protocol/types'
 
-const NEEDS_ATTENTION = new Set(['down', 'misconfigured'])
+// `refused` is distinct from both neighbours on purpose: `misconfigured` is
+// inferred from config, `restarting` means something is about to happen, and
+// `refused` means the manager looked at this adapter and declined to spawn it.
+const NEEDS_ATTENTION = new Set(['down', 'misconfigured', 'refused'])
 
 function stateLabel(a: ChatAdapterStatus): string {
   switch (a.state) {
@@ -29,6 +32,10 @@ function stateLabel(a: ChatAdapterStatus): string {
       return `gave up after ${a.restarts} restarts — not retrying`
     case 'misconfigured':
       return 'cannot run as configured'
+    case 'refused':
+      // Say that nothing is pending, because the neighbouring states both
+      // imply something is.
+      return 'refused — not started'
     case 'off':
       return !a.table_enabled ? 'off — [chat] is disabled' : 'off'
     default:
@@ -93,6 +100,7 @@ export function Settings({ onBack }: { onBack: () => void }) {
                           {e.reference ? (
                             <span className={e.resolved ? 'env-ok' : 'env-bad'}>
                               {e.resolved ? 'set' : 'not set'}
+                              {chat.env_source === 'cli' ? ' in this shell' : ''}
                             </span>
                           ) : null}
                         </dd>

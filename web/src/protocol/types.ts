@@ -206,6 +206,12 @@ export interface ChatEnvEntry {
 
 export interface ChatSummary {
   enabled: boolean
+  /** Whose environment `resolved` on each env entry was read from: "daemon"
+   *  (the process that actually spawns adapters) or "cli" (whatever terminal
+   *  ran the command). The web UI is served BY the daemon, so it is always
+   *  "daemon" here -- the field exists because the CLI can be neither, and a
+   *  resolution with no owner is the bug it was added for. */
+  env_source?: 'daemon' | 'cli' | string
   /** Every CONFIGURED adapter, including the off ones: an adapter you cannot
    *  see is one you cannot turn on, and a list of only what is running cannot
    *  explain why nothing is. */

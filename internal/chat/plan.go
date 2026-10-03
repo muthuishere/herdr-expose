@@ -2,6 +2,7 @@ package chat
 
 import (
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -9,14 +10,31 @@ import (
 )
 
 // Plan turns configuration into the Summary a client renders, WITHOUT starting
-// anything.
+// anything, attributing the environment it read to the DAEMON.
 //
 // It is pure except for reading the environment and looking for the command on
 // disk, which is the point: the web UI and the CLI both ask "what is
 // configured and could it run", and that question must be answerable without
 // spawning five chat bots as a side effect of opening a page.
+//
+// It reads os.Getenv in the CALLING process, so only the daemon may use this
+// spelling: the daemon is the process that will spawn the adapters, so its
+// environment is the one that decides. Any other process is guessing about the
+// daemon's environment and must say so by calling PlanFor with its own source
+// -- `herdr-expose chat status` does.
 func Plan(c config.Chat, adaptersDir string, running map[string]Status) Summary {
-	sum := Summary{Enabled: c.Enabled, AdaptersDir: adaptersDir}
+	return PlanFor(EnvSourceDaemon, c, adaptersDir, running)
+}
+
+// PlanFor is Plan with the environment attribution spelled out.
+//
+// envSource travels into Summary.EnvSource and from there into every rendering
+// of "set"/"not set", because the resolutions below come from THIS process's
+// environment and an unattributed "set" let the CLI imply the daemon could see
+// a variable that, running under launchd/systemd without a login shell, it
+// could not.
+func PlanFor(envSource string, c config.Chat, adaptersDir string, running map[string]Status) Summary {
+	sum := Summary{Enabled: c.Enabled, AdaptersDir: adaptersDir, EnvSource: envSource}
 
 	for _, a := range c.Adapters {
 		st := Status{
@@ -51,7 +69,17 @@ func Plan(c config.Chat, adaptersDir string, running map[string]Status) Summary 
 		if live, ok := running[st.ID]; ok {
 			live.Enabled, live.TableEnabled = a.Enabled, c.Enabled
 			live.Command, live.MaxRestarts = a.Command, MaxRestarts
-			live.Problems = append(live.Problems, st.Problems...)
+			// Deduplicated: a refused adapter already carries the reason the
+			// manager refused it, and we have just derived the same sentence
+			// from the same config and the same environment. Printing "token
+			// is not set" twice reads like two separate faults.
+			live.Problems = appendNewProblems(live.Problems, st.Problems...)
+			// A supervisor reports process facts and knows nothing about the
+			// config table, so the env rows have to come from here or a live
+			// (and a refused) adapter renders with no configuration at all --
+			// and "refused: TOKEN is not set" with an empty env list is half
+			// an answer.
+			live.Env = st.Env
 			sum.Adapters = append(sum.Adapters, live)
 			continue
 		}
@@ -73,20 +101,46 @@ func Plan(c config.Chat, adaptersDir string, running map[string]Status) Summary 
 	return sum
 }
 
+// appendNewProblems appends the problems that are not already reported, so one
+// fault seen by both the manager and Plan is one line.
+func appendNewProblems(have []string, more ...string) []string {
+	seen := make(map[string]bool, len(have))
+	for _, p := range have {
+		seen[p] = true
+	}
+	for _, p := range more {
+		if !seen[p] {
+			have = append(have, p)
+			seen[p] = true
+		}
+	}
+	return have
+}
+
 // lookCommand finds argv[0] the way the supervisor will: an explicit path is
 // resolved against the adapters directory (because that is the child's cwd),
 // and a bare name is looked up on PATH.
 func lookCommand(name, dir string) (string, error) {
-	if strings.ContainsRune(name, os.PathSeparator) {
+	// A PATH lookup, or a path resolved against the adapters directory (which
+	// is the child's working directory).
+	//
+	// Both separators count, because a config file is written by a person and
+	// "./adapters/x.js" is what a person types on Windows too. filepath.IsAbs
+	// rather than a leading "/" test: on Windows an absolute path is C:\... ,
+	// so the slash test would quietly join it onto the adapters directory and
+	// then report the result missing.
+	if strings.ContainsRune(name, '/') || strings.ContainsRune(name, '\\') {
 		p := name
-		if !strings.HasPrefix(name, "/") {
-			p = dir + string(os.PathSeparator) + name
+		if !filepath.IsAbs(name) {
+			p = filepath.Join(dir, name)
 		}
 		if _, err := os.Stat(p); err != nil {
 			return "", err
 		}
 		return p, nil
 	}
+	// A bare name goes to PATH, where LookPath applies PATHEXT on Windows --
+	// which is what makes `node` find node.exe.
 	return execLookPath(name)
 }
 
