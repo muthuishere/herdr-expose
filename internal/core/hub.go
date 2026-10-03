@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"errors"
+	"hash/fnv"
 	"log/slog"
 	"strconv"
 	"sync"
@@ -961,13 +962,37 @@ func backoffFor(attempt int) time.Duration {
 // summaryPoller deduplicates SUMMARY reads across connections. pane.read has no
 // geometry, so one poll serves every connection watching that tile. Targets are
 // session-qualified and each poll is routed to its own session's socket.
+//
+// It also deduplicates in TIME, which it did not used to do. Every tick sent
+// each subscriber a full ANSI screen whether or not a single byte had changed:
+// on an idle machine with a dozen tiles open that was ~17 snapshots a second,
+// several KB each, forever — the heaviest thing this server did, and all of it
+// identical to what the client already had.
+//
+// The obvious gate was `revision` on pane.read, which the schema carries and
+// which would say "nothing changed" without comparing anything. MEASURED on
+// 0.9.x: it is always 0. Four reads of a WORKING pane returned rev=0 while the
+// text changed under it. The field is declared, not implemented, so nothing may
+// depend on it. The text itself is a reliable identity — an idle pane returns
+// byte-identical bytes — so the hash is what we gate on.
+//
+// The hash is PER SUBSCRIBER, for the same reason the transcript's is: a shared
+// "last sent" would leave a connection that just subscribed with a blank tile
+// until the pane happened to move. Suppression is the optimisation; the first
+// frame is the product.
 type summaryPoller struct {
 	store *Store
 	log   *slog.Logger
 
 	mu   sync.Mutex
-	subs map[string]map[*Session]struct{}
+	subs map[string]map[*Session]*summarySub
 	wake chan struct{}
+}
+
+// summarySub is what one connection has already been shown of one tile.
+type summarySub struct {
+	hash uint64
+	sent bool
 }
 
 // SummaryInterval is the SUMMARY tile refresh period (1-2Hz).
@@ -975,17 +1000,19 @@ const SummaryInterval = 700 * time.Millisecond
 
 func newSummaryPoller(store *Store, log *slog.Logger) *summaryPoller {
 	return &summaryPoller{store: store, log: log,
-		subs: map[string]map[*Session]struct{}{}, wake: make(chan struct{}, 1)}
+		subs: map[string]map[*Session]*summarySub{}, wake: make(chan struct{}, 1)}
 }
 
 func (p *summaryPoller) subscribe(target string, s *Session) {
 	p.mu.Lock()
 	m := p.subs[target]
 	if m == nil {
-		m = map[*Session]struct{}{}
+		m = map[*Session]*summarySub{}
 		p.subs[target] = m
 	}
-	m[s] = struct{}{}
+	if m[s] == nil {
+		m[s] = &summarySub{}
+	}
 	p.mu.Unlock()
 	select {
 	case p.wake <- struct{}{}:
@@ -1013,6 +1040,23 @@ func (p *summaryPoller) unsubscribeAll(s *Session) {
 		}
 	}
 	p.mu.Unlock()
+}
+
+// recipients returns the subscribers of target that have not already been sent
+// this exact screen, and marks them as having it. Claiming and marking happen
+// under ONE lock so two rounds cannot both decide to send the same bytes.
+func (p *summaryPoller) recipients(target string, sum uint64) []*Session {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]*Session, 0, len(p.subs[target]))
+	for s, st := range p.subs[target] {
+		if st.sent && st.hash == sum {
+			continue
+		}
+		st.hash, st.sent = sum, true
+		out = append(out, s)
+	}
+	return out
 }
 
 func (p *summaryPoller) run(ctx context.Context) {
@@ -1043,12 +1087,11 @@ func (p *summaryPoller) run(ctx context.Context) {
 			if err != nil {
 				continue
 			}
-			p.mu.Lock()
-			sessions := make([]*Session, 0, len(p.subs[target]))
-			for s := range p.subs[target] {
-				sessions = append(sessions, s)
-			}
-			p.mu.Unlock()
+			h := fnv.New64a()
+			_, _ = h.Write([]byte(text))
+			sum := h.Sum64()
+
+			sessions := p.recipients(target, sum)
 			if len(sessions) == 0 {
 				continue
 			}
