@@ -24,6 +24,7 @@ import (
 	"github.com/muthuishere/herdr-expose/internal/config"
 	"github.com/muthuishere/herdr-expose/internal/core"
 	"github.com/muthuishere/herdr-expose/internal/expose"
+	"github.com/muthuishere/herdr-expose/internal/msg"
 	"github.com/muthuishere/herdr-expose/internal/platform"
 	"github.com/muthuishere/herdr-expose/internal/serve"
 	"github.com/muthuishere/herdr-expose/internal/upstream"
@@ -364,7 +365,17 @@ func cmdServe(args []string) error {
 		go superviseExposure(ctx, mgr, state, log)
 	}
 
-	msgSvc, msgTok, err := newMsgService(state, bin)
+	// Deliver over the SOCKET, never the CLI: a CLI client attaches to the
+	// terminal session at 120x40 and resizes whatever pane it touches.
+	msgSvc, msgTok, err := newMsgService(state, bin, func(session string) msg.Caller {
+		c := st.Client(session)
+		if c == nil {
+			// A typed nil in an interface is not nil, and the caller's
+			// `if c == nil` would not catch it.
+			return nil
+		}
+		return c
+	})
 	if err != nil {
 		return err
 	}

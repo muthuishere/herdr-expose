@@ -60,7 +60,13 @@ func machineName() string {
 }
 
 // newMsgService builds the daemon side.
-func newMsgService(state, herdrBin string) (*msg.Service, string, error) {
+//
+// client is how delivery reaches a session, and passing one is what keeps this
+// off the herdr CLI. A CLI invocation ATTACHES to the terminal session at its
+// own size, which SIGWINCHes the pane and makes the agent's TUI redraw -- the
+// "screen keeps scrolling" bug. nil falls back to the CLI, which is what a
+// caller without a store (the one-shot `msg` subcommand) still needs.
+func newMsgService(state, herdrBin string, client func(string) msg.Caller) (*msg.Service, string, error) {
 	tok, err := msgToken(state)
 	if err != nil {
 		return nil, "", err
@@ -75,7 +81,11 @@ func newMsgService(state, herdrBin string) (*msg.Service, string, error) {
 			reply = exe
 		}
 	}
-	return &msg.Service{Store: st, Herdr: msg.CLI{Bin: herdrBin}, Machine: machineName(), ReplyCmd: reply}, tok, nil
+	var backend msg.Herdr = msg.CLI{Bin: herdrBin}
+	if client != nil {
+		backend = msg.Socket{Client: client}
+	}
+	return &msg.Service{Store: st, Herdr: backend, Machine: machineName(), ReplyCmd: reply}, tok, nil
 }
 
 type peer struct {
