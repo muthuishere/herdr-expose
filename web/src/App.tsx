@@ -163,7 +163,7 @@ export function App() {
         ) : null}
         {env.note ? <EnvNote note={env.note} /> : null}
         {open ? (
-          <PaneView target={open} onBack={closePane} />
+          <PaneView target={open} onBack={closePane} showClose />
         ) : (
           <>
             <Stats />

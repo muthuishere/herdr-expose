@@ -43,10 +43,14 @@ export function PaneView({
   target,
   onBack,
   showBack,
+  showClose,
 }: {
   target: PaneId
   onBack?: () => void
   showBack?: boolean
+  /** Desktop only: the wordmark is the way home, but a pane you opened wants
+      an explicit way to shut it — closing it is also how you stop reading it. */
+  showClose?: boolean
 }) {
   const pane = useStore((s) => s.panesById[target])
   // Select SCALARS, never the runtime object: that object is replaced on every
@@ -72,6 +76,13 @@ export function PaneView({
         ) : null}
       </div>
       {pane?.agent ? <AgentBadge state={pane.agent.state} /> : null}
+      {showClose ? (
+        <div className="paneview-tools">
+          <button className="iconbtn" onClick={onBack} aria-label="Close this pane" title="Close">
+            ✕
+          </button>
+        </div>
+      ) : null}
     </header>
   )
 
@@ -93,6 +104,18 @@ export function PaneView({
       {droppedBytes ? (
         <div className="notice notice-gap">
           {formatBytes(droppedBytes)} of output was dropped under load, then repainted.
+        </div>
+      ) : null}
+      {/* Said out loud because the owner watches their own terminal while
+          someone reads it from here, and a pane that moves on its own is
+          alarming when nothing explains it. Reading is non-destructive — a
+          transcript declares no geometry and `pane.read` takes none — but the
+          pane is still live, and a live pane scrolls. The way to stop watching
+          is to stop watching, so the notice names both exits. */}
+      {!isClosed ? (
+        <div className="notice">
+          This pane is live, so Herdr may scroll it while you watch. Go back to
+          the list, or close it, to stop reading.
         </div>
       ) : null}
       {isClosed ? (
