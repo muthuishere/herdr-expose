@@ -76,6 +76,8 @@ func main() {
 		err = cmdDoctor(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Println("herdr-expose", version)
+	case "token":
+		err = cmdToken(os.Args[2:])
 	case "msg":
 		err = runMsg(os.Args[2:])
 	case "chat":
@@ -113,6 +115,11 @@ func usage() {
                         without a manager (it names the pid it will stop), and
                         to rewrite a healthy unit. install-service and
                         uninstall-service still work as aliases.
+  token rotate          mint a replacement server token and print it ONCE.
+                        The token is shown only to a terminal: a supervised
+                        unit's stderr is the journal, and a credential does not
+                        belong in a log. Rotating invalidates the old server
+                        token; paired devices keep working.
   msg ...               message agents here and on peer machines (msg for help)
   skill install | uninstall | status
                         link this checkout's skill/ into ~/.claude/skills (and
@@ -311,9 +318,24 @@ func cmdServe(args []string) error {
 	if tok, created, err := auth.EnsureServerToken(); err != nil {
 		return err
 	} else if created {
-		// Shown exactly once: only the SHA-256 is stored.
-		fmt.Fprintf(os.Stderr, "\n  herdr-expose server token (shown once):\n\n    %s\n\n", tok)
-		fmt.Fprintf(os.Stderr, "  open: %s/?token=%s\n\n", res.URL, tok)
+		// Shown exactly once, and ONLY to a human looking at a terminal.
+		//
+		// Under systemd or launchd, stderr is the journal: printing the token
+		// there writes the credential into a log file that outlives the
+		// process and is readable by anyone who can read the journal. The
+		// guide says a token is "never in a log" and this line was making a
+		// liar of it on every supervised first start.
+		//
+		// A supervised daemon has nobody to show it to anyway, so it says
+		// where to get one instead. `token rotate` mints a fresh one, which is
+		// the only honest offer once this one has gone unseen.
+		if tokenPrintable() {
+			fmt.Fprintf(os.Stderr, "\n  herdr-expose server token (shown once):\n\n    %s\n\n", tok)
+			fmt.Fprintf(os.Stderr, "  open: %s/?token=%s\n\n", res.URL, tok)
+		} else {
+			log.Info("server token minted; not printed because this is not a terminal",
+				"get_one", "herdr-expose token rotate")
+		}
 	}
 
 	ctx, stop := shutdownContext(context.Background())
@@ -711,6 +733,54 @@ func cmdPair(args []string) error {
 		fmt.Println("  (this pane stays open until the code expires)")
 		time.Sleep(time.Until(exp))
 	}
+	return nil
+}
+
+// tokenPrintable reports whether there is a human on the other end of stderr.
+// A supervised unit's stderr is the journal, and a credential must not be
+// written there; a character device is the whole test, same as stdinIsTerminal.
+func tokenPrintable() bool {
+	if os.Getenv("HERDR_EXPOSE_SUPERVISED") != "" {
+		return false
+	}
+	st, err := os.Stderr.Stat()
+	if err != nil {
+		return false
+	}
+	return st.Mode()&os.ModeCharDevice != 0
+}
+
+// cmdToken mints a replacement server token.
+//
+// It exists because the token is shown once and a supervised daemon has no
+// terminal to show it on, so the first start of a systemd or launchd unit used
+// to leave the owner with a credential they could only recover from the
+// journal -- which is exactly where it must not be.
+//
+// Rotating INVALIDATES the old token. Paired devices are untouched: they hold
+// their own tokens, and this is the server token, not theirs.
+func cmdToken(args []string) error {
+	if len(args) == 0 || args[0] != "rotate" {
+		return errors.New("usage: herdr-expose token rotate")
+	}
+	if !tokenPrintable() {
+		return errors.New("refusing to print a token to something that is not a terminal")
+	}
+	state, err := StateDir()
+	if err != nil {
+		return err
+	}
+	auth, err := serve.NewAuth(state, newLogger(), nil)
+	if err != nil {
+		return err
+	}
+	tok, err := auth.ResetServerToken()
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "\n  herdr-expose server token (shown once):\n\n    %s\n\n", tok)
+	fmt.Fprintln(os.Stderr, "  the previous server token no longer works; paired devices are unaffected.")
+	fmt.Fprintln(os.Stderr, "  restart the server for it to take effect: herdr-expose stop && herdr-expose daemon")
 	return nil
 }
 

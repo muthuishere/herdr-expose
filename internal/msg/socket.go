@@ -62,11 +62,19 @@ func (s Socket) sessions(ctx context.Context) ([]upstream.Session, error) {
 	return upstream.RunningSessions(all), nil
 }
 
-// Agents lists agents across every running session, from session.snapshot.
+// Agents lists agents across every running session, from `agent.list`.
 //
-// The same call the daemon already makes to build its tree, so listing agents
-// for messaging costs nothing a running daemon was not already paying -- and,
-// unlike `herdr agent list`, it does not attach to anything.
+// It was session.snapshot, and that was a regression: the snapshot's agents
+// carry no NAME and the snapshot's panes carry no label on 0.9.x, so every
+// agent came back addressable only as `session/wR:p1`, with an empty cwd, for
+// agents herdr knows perfectly well as `marketing` in
+// .../agents/marketing-team. Box agents address Mac agents BY NAME, so this
+// broke messaging between machines.
+//
+// agent.list carries name and cwd, and -- the part that matters -- it is a
+// SOCKET method. The attach that made this package move off the CLI in the
+// first place belongs to the herdr CLIENT, not to the call: `herdr agent list`
+// attaches, `agent.list` over the socket does not touch the pane.
 func (s Socket) Agents(ctx context.Context) ([]Agent, error) {
 	sessions, err := s.sessions(ctx)
 	if err != nil {
@@ -80,25 +88,17 @@ func (s Socket) Agents(ctx context.Context) ([]Agent, error) {
 		}
 		cctx, cancel := context.WithTimeout(ctx, callTimeout)
 		var res struct {
-			Snapshot upstream.Snapshot `json:"snapshot"`
+			Agents []upstream.Agent `json:"agents"`
 		}
-		err := c.CallInto(cctx, "session.snapshot", map[string]any{}, &res)
+		err := c.CallInto(cctx, "agent.list", map[string]any{}, &res)
 		cancel()
 		if err != nil {
 			continue
 		}
-		// A pane's label is what a person named it; it is on the pane rather
-		// than the agent, so it has to be looked up by pane id or every agent
-		// is addressable only by its pane.
-		label := map[string]string{}
-		for _, p := range res.Snapshot.Panes {
-			if p.Label != "" {
-				label[p.PaneID] = p.Label
-			}
-		}
-		for _, a := range res.Snapshot.Agents {
-			name := label[a.PaneID]
-			id := name
+		for _, a := range res.Agents {
+			// An unnamed agent is still addressable, by its pane id. Both forms
+			// keep working: Service.find matches Name OR PaneID.
+			id := a.Name
 			if id == "" {
 				id = a.PaneID
 			}
@@ -106,10 +106,16 @@ func (s Socket) Agents(ctx context.Context) ([]Agent, error) {
 			if title == "" {
 				title = a.TerminalTitle
 			}
+			// ForegroundCwd is where the agent actually IS when it has cd'd;
+			// cwd is where its shell started. Prefer the live one.
+			cwd := a.ForegroundCwd
+			if cwd == "" {
+				cwd = a.Cwd
+			}
 			out = append(out, Agent{
 				Address: sess.Name + "/" + id, Session: sess.Name,
-				Name: name, PaneID: a.PaneID, Kind: a.Agent,
-				Status: a.AgentStatus, Title: title,
+				Name: a.Name, PaneID: a.PaneID, Kind: a.Agent,
+				Status: a.AgentStatus, Title: title, Cwd: cwd,
 			})
 		}
 	}

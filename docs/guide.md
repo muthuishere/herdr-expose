@@ -797,6 +797,11 @@ is a screenshot. So authentication here is the primary feature, not a checkbox.
   per-device tokens issued by pairing.
 - **Hashes only.** SHA-256, in 0600 state, never plaintext, never in config,
   never in a log, never in `/v1/config`. Every comparison is constant-time.
+  The server token is printed once, at generation, and only to a terminal: a
+  supervised unit's stderr is the journal, so a daemon started by systemd or
+  launchd mints it silently and tells you to run `herdr-expose token rotate`,
+  which prints a fresh one and invalidates the old. Paired devices are
+  unaffected by a rotation — they hold their own tokens.
 - **Pairing codes** are 6 characters, single-use, valid 10 minutes, and
   rate-limited per source address.
 - **Device tokens** are 32 random bytes with a sliding 30-day expiry, capped at

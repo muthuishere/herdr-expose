@@ -110,8 +110,12 @@ type Workspace struct {
 
 // Agent is an agent bound to a terminal.
 type Agent struct {
-	TerminalID            string        `json:"terminal_id"`
-	Agent                 string        `json:"agent"`
+	TerminalID string `json:"terminal_id"`
+	Agent      string `json:"agent"`
+	// Name is the agent's own name (`herdr agent rename`). ONLY agent.list and
+	// agent.get carry it -- the agents inside session.snapshot do not, which is
+	// why a lister built on the snapshot can only address a pane by its id.
+	Name                  string        `json:"name,omitempty"`
 	TerminalTitle         string        `json:"terminal_title,omitempty"`
 	TerminalTitleStripped string        `json:"terminal_title_stripped,omitempty"`
 	AgentStatus           string        `json:"agent_status,omitempty"`

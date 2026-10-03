@@ -25,12 +25,14 @@ func (f *fakeCaller) CallInto(_ context.Context, method string, _ any, out any) 
 		return f.err
 	}
 	if r, ok := out.(*struct {
-		Snapshot upstream.Snapshot `json:"snapshot"`
+		Agents []upstream.Agent `json:"agents"`
 	}); ok {
-		r.Snapshot = upstream.Snapshot{
-			Panes:  []upstream.Pane{{PaneID: "w1:p1", Label: "ops"}},
-			Agents: []upstream.Agent{{PaneID: "w1:p1", Agent: "claude", AgentStatus: "idle"}},
-		}
+		r.Agents = []upstream.Agent{{
+			PaneID: "w1:p1", Agent: "claude", AgentStatus: "idle",
+			Name: "ops", Cwd: "/src", ForegroundCwd: "/src/sub",
+		}, {
+			PaneID: "w1:p2", Agent: "claude", AgentStatus: "idle",
+		}}
 	}
 	return nil
 }
@@ -82,12 +84,18 @@ func TestPromptToAnUnknownSessionIsReported(t *testing.T) {
 	}
 }
 
-// Listing agents uses session.snapshot -- the same call the daemon already
-// makes for its tree -- so it costs nothing extra and, unlike `herdr agent
-// list`, touches no pane. The listing is what ran every two seconds for as
-// long as a message awaited a reply, so this is the call that was resizing
-// somebody's pane on a timer.
-func TestAgentsListsFromTheSnapshotAndNamesByLabel(t *testing.T) {
+// Listing agents uses agent.list, which carries the agent's NAME and cwd.
+//
+// session.snapshot does not: its agents have no name and its panes have no
+// label on 0.9.x, so a lister built on it addressed every agent as
+// `session/wR:p1` with an empty cwd. Agents on other machines address Mac
+// agents by name, so that broke messaging between boxes.
+//
+// agent.list is still a SOCKET call and so still touches no pane -- the attach
+// that moved this package off the CLI belongs to the herdr client, not to the
+// call. This listing is what runs every two seconds for as long as a message
+// awaits a reply, so it is the one that must never resize anything.
+func TestAgentsListsByNameAndCwd(t *testing.T) {
 	f := &fakeCaller{}
 	s := Socket{
 		Client: func(string) Caller { return f },
@@ -99,17 +107,23 @@ func TestAgentsListsFromTheSnapshotAndNamesByLabel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(f.calls) != 1 || f.calls[0] != "session.snapshot" {
-		t.Fatalf("calls = %v, want exactly [session.snapshot]", f.calls)
+	if len(f.calls) != 1 || f.calls[0] != "agent.list" {
+		t.Fatalf("calls = %v, want exactly [agent.list]", f.calls)
 	}
-	if len(got) != 1 {
-		t.Fatalf("got %d agents, want 1", len(got))
+	if len(got) != 2 {
+		t.Fatalf("got %d agents, want 2", len(got))
 	}
-	// A pane's label lives on the PANE, not the agent, so an agent is
-	// addressable by the name a person gave it only if the lookup crosses
-	// over -- otherwise every agent is addressable solely by pane id.
+	// Named: addressed by the name, and the cwd filled in. ForegroundCwd wins
+	// because it is where the agent actually is once it has cd'd.
 	if got[0].Address != "work/ops" || got[0].Name != "ops" || got[0].PaneID != "w1:p1" {
-		t.Fatalf("agent = %+v, want it addressed by its label", got[0])
+		t.Fatalf("agent = %+v, want it addressed by its name", got[0])
+	}
+	if got[0].Cwd != "/src/sub" {
+		t.Fatalf("cwd = %q, want the foreground cwd", got[0].Cwd)
+	}
+	// Unnamed: still addressable, by pane id. Service.find matches either.
+	if got[1].Address != "work/w1:p2" || got[1].Name != "" {
+		t.Fatalf("unnamed agent = %+v, want it addressed by pane id", got[1])
 	}
 }
 
@@ -133,7 +147,7 @@ func TestOneDeadSessionDoesNotHideTheRest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0].Session != "work" {
-		t.Fatalf("got %+v, want the live session's agent", got)
+	if len(got) != 2 || got[0].Session != "work" || got[1].Session != "work" {
+		t.Fatalf("got %+v, want only the live session's agents", got)
 	}
 }
