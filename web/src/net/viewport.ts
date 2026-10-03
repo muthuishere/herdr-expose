@@ -27,7 +27,20 @@ let scheduled = false
  * a transcript while the pane LIST still declares it a summary tile must not
  * silently demote it back to a summary poll.
  */
-const RANK: Record<ViewportMode, number> = { live: 3, transcript: 2, summary: 1, none: 0 }
+// Every transcript FLAVOUR ranks the same, because the rank answers "how
+// expensive is this to serve", and the flavours differ in how much the server
+// removes before sending, never in how much it reads. Giving one a higher rank
+// would let a cleaner view outrank a rawer one for the same pane, and the
+// merge would hand back a shape the other viewer did not ask for.
+const RANK: Record<ViewportMode, number> = {
+  live: 3,
+  transcript: 2,
+  transcript_clean: 2,
+  transcript_prose: 2,
+  transcript_settled: 2,
+  summary: 1,
+  none: 0,
+}
 
 function merged(): Record<PaneId, ViewportMode> {
   const out: Record<PaneId, ViewportMode> = {}

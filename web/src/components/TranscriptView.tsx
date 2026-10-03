@@ -69,7 +69,17 @@ export function TranscriptView({ target }: { target: PaneId }) {
   useEffect(() => {
     const start = () => {
       sendSubscribe([target])
-      declareViewport('transcript', { [target]: 'transcript' })
+      // transcript_CLEAN, not raw transcript.
+      //
+      // The raw screen ends with the agent's own furniture: an empty input
+      // caret, the context meter, the mode banner, and a progress line that
+      // redraws every second. None of it is anything the agent said, and on a
+      // phone it is the last thing on screen, so it is what you land on.
+      //
+      // The server already knows how to remove exactly those lines, and the
+      // frame reports what it took out, so this is not the client guessing --
+      // it is asking for a shape the protocol defines and then saying so.
+      declareViewport('transcript', { [target]: 'transcript_clean' })
     }
     start()
     const off = onReconnected(() => {
@@ -96,6 +106,7 @@ export function TranscriptView({ target }: { target: PaneId }) {
         truncated={!!frame?.truncated}
         collapsed={shaped.collapsed}
         codeBlocks={shaped.codeBlocks}
+        cleaned={frame?.cleaned}
         rejoined={shaped.rejoined}
       />
       {blocked ? <AnswerKeys target={target} /> : null}
@@ -119,6 +130,7 @@ function TranscriptBody({
   collapsed,
   rejoined,
   codeBlocks,
+  cleaned,
 }: {
   target: PaneId
   items: ReturnType<typeof shapeTranscript>['items']
@@ -129,6 +141,7 @@ function TranscriptBody({
   collapsed: number
   rejoined: number
   codeBlocks: number
+  cleaned?: { chrome: number; blank: number; code?: number }
 }) {
   const ref = useRef<HTMLDivElement>(null)
   const pinnedRef = useRef(true)
@@ -196,6 +209,7 @@ function TranscriptBody({
         collapsed={collapsed}
         rejoined={rejoined}
         codeBlocks={codeBlocks}
+        cleaned={cleaned}
       />
     </>
   )
@@ -215,6 +229,7 @@ function Provenance({
   collapsed,
   rejoined,
   codeBlocks,
+  cleaned,
 }: {
   target: PaneId
   source?: string
@@ -222,12 +237,22 @@ function Provenance({
   collapsed: number
   rejoined: number
   codeBlocks: number
+  cleaned?: { chrome: number; blank: number; code?: number }
 }) {
   const what = source ? (SOURCE_LABEL[source] ?? source) : 'this pane'
   // Every transform is named. The list is built rather than hard-coded so a
   // transform that did nothing this frame says nothing, and one we add later
   // cannot be left out of the sentence by accident.
   const applied = ['escape codes stripped']
+  // What the SERVER removed, reported from the frame's own `cleaned` record
+  // rather than inferred here. The sentence exists so nobody is handed a
+  // different shape than the pane actually showed and has to work out why --
+  // which means it has to account for the server's half too, not just ours.
+  if (cleaned?.chrome) {
+    applied.push(
+      `${cleaned.chrome} line${cleaned.chrome === 1 ? '' : 's'} of the agent's own furniture removed (its input caret, context meter and mode banner)`,
+    )
+  }
   if (collapsed > 0) applied.push(`${collapsed} blank line${collapsed === 1 ? '' : 's'} collapsed`)
   if (rejoined > 0) {
     applied.push(`${rejoined} line${rejoined === 1 ? '' : 's'} rejoined where the pane wrapped them`)

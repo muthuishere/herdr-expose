@@ -277,6 +277,10 @@ export interface TranscriptData {
   /** Herdr's raw agent_status at read time; "" for a plain pane. */
   state?: string
   at?: string
+  /** Present only on a cleaned flavour: the server's account of what it
+   *  removed. A client must be able to tell it is not looking at the raw
+   *  screen without diffing against one. */
+  cleaned?: { chrome: number; blank: number; code?: number }
 }
 
 export interface ResultData {
@@ -317,7 +321,14 @@ export type ServerFrame =
  * PTY is the entire point (SPEC J3). The server enforces it too, but the client
  * is the one that knows what it is drawing.
  */
-export type ViewportMode = 'live' | 'summary' | 'transcript' | 'none'
+export type ViewportMode =
+  | 'live'
+  | 'summary'
+  | 'transcript'
+  | 'transcript_clean'
+  | 'transcript_prose'
+  | 'transcript_settled'
+  | 'none'
 
 export interface HelloData {
   protocol: 'v1'
