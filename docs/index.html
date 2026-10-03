@@ -730,6 +730,62 @@ table.cmp .no { color: var(--fg-faint); }
   table.cmp tbody td.us::before { color: var(--accent); }
   table.cmp tbody td code { white-space: normal; word-break: break-word; }
 }
+/* --------------------------------------------------------- architecture ----
+   The four planes read outside-in, so they are one ordered list of cards and
+   not a drawing: a diagram of boxes and arrows would need a fixed width, and
+   this has to survive 375px. Each plane lists its parts as name + what it is
+   for, on one column on a phone and two from 720px up. */
+.planes { list-style: none; margin: 28px 0 0; padding: 0; display: grid; gap: 14px; }
+.planes > li {
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--line);
+  border-radius: var(--radius);
+  padding: 18px 20px;
+}
+.planes > li.is-core { border-left-color: var(--accent); }
+.plane-n {
+  display: block;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 8px;
+}
+.planes h3 { margin: 0 0 4px; }
+.planes > li > p { font-size: 14.5px; color: var(--fg-faint); margin: 0; max-width: 68ch; }
+
+.parts { list-style: none; margin: 14px 0 0; padding: 0; display: grid; gap: 12px; }
+.parts li {
+  display: grid;
+  /* minmax(0,…) for the same reason the ladder needs it: a long identifier in
+     the prose column must be allowed to break, not push the row sideways. */
+  grid-template-columns: minmax(0, 1fr);
+  gap: 3px 14px;
+  align-items: baseline;
+}
+@media (min-width: 720px) { .parts li { grid-template-columns: auto minmax(0, 1fr); } }
+.parts .p-name {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--fg);
+  background: var(--bg-3);
+  border-radius: 5px;
+  padding: 2px 8px;
+  justify-self: start;
+  white-space: nowrap;
+  /* Fixed, so every part's prose starts at the same left edge. */
+  min-width: 124px;
+  text-align: center;
+}
+.parts .p-what { font-size: 14.5px; color: var(--fg-dim); overflow-wrap: anywhere; }
+.parts .p-what code { font-size: 12.5px; background: var(--bg-3); border-radius: 5px; padding: 1px 6px; color: var(--fg); }
+
+/* The transcript rungs are identifiers, not flags, so they need a wider gutter
+   than the exposure ladder's `--quick`. */
+.ladder.ladder-rungs .flag { min-width: 156px; text-align: left; }
 </style>
 </head>
 
@@ -1489,6 +1545,184 @@ is not reversible.<span class="m-tr-rule"></span>Run migration 0042 against dev?
       29&nbsp;&rarr;&nbsp;85&nbsp;&rarr;&nbsp;86 lines over three polls, every
       one a legitimately different screen — <b>eight near-identical messages for
       one answer</b> before the server learned to wait.
+    </p>
+  </div>
+</section>
+
+<!-- ---------------------------------------------------------- architecture -->
+<section id="architecture">
+  <div class="wrap">
+    <p class="eyebrow">How it is put together</p>
+    <h2>Four planes, outside-in. Nothing in the middle gets a private door.</h2>
+    <p class="lede">
+      Read it from the outside in: who reaches in, what they come through, the
+      one process that answers, and what that process drives. The interesting
+      part is not the layering — it is that every layer reaches the next one
+      through the contract that is already written down, so there is no
+      shortcut for the client that happens to ship in the same binary.
+    </p>
+
+    <ol class="planes">
+      <li>
+        <span class="plane-n">Plane 01 / who reaches in</span>
+        <h3>An agent, a person, or a chat app</h3>
+        <ul class="parts">
+          <li>
+            <span class="p-name">an agent</span>
+            <span class="p-what">Claude, Codex, Devin — through a skill, from the session it is already in.</span>
+          </li>
+          <li>
+            <span class="p-name">a person</span>
+            <span class="p-what">A phone, a tablet, the laptop in the other room — gated by a pairing code.</span>
+          </li>
+          <li>
+            <span class="p-name">a chat app</span>
+            <span class="p-what">Telegram, Discord or Slack, through an adapter.</span>
+          </li>
+        </ul>
+      </li>
+
+      <li>
+        <span class="plane-n">Plane 02 / what they come through</span>
+        <h3>Three front ends, no privileged one</h3>
+        <ul class="parts">
+          <li>
+            <span class="p-name">skills</span>
+            <span class="p-what"><code>herdr-share</code> for expose, share and revoke; <code>herdr-message</code> to list the agents and message them. Deliberately thin — the binary is the product, and what the skill adds is the judgement about which exposure rung your words actually asked for.</span>
+          </li>
+          <li>
+            <span class="p-name">web UI</span>
+            <span class="p-what">A React PWA compiled <em>into</em> the binary with <code>go:embed</code>, so there is no node at runtime and nothing to serve separately. It is the API's first client, not a privileged one.</span>
+          </li>
+          <li>
+            <span class="p-name">chat adapter</span>
+            <span class="p-what">A command — <code>node x.js</code>, <code>bun x.ts</code>, <code>go run x.go</code>, <code>python3 x.py</code> — supervised by the daemon and speaking newline-delimited JSON on stdin and stdout. Any language that can read a line qualifies. Ships disabled.</span>
+          </li>
+        </ul>
+      </li>
+
+      <li class="is-core">
+        <span class="plane-n">Plane 03 / the binary</span>
+        <h3>One process, supervised by launchd or systemd</h3>
+        <p>
+          Everything below is inside that single process. It is the only thing
+          that holds a connection to your sessions, and the only thing with an
+          opinion about who may type.
+        </p>
+        <ul class="parts">
+          <li>
+            <span class="p-name">server</span>
+            <span class="p-what">Auth, pairing, device tokens, origin checks. Two planes travel one WebSocket: a JSON control plane and a binary terminal data plane, because a reader and a typist want very different framing.</span>
+          </li>
+          <li>
+            <span class="p-name">hub</span>
+            <span class="p-what">Decides what each connection is <em>sent</em>, rather than what it asks for. One poll serves every subscriber; dedup is per reader, so a second viewer never changes what the first one sees.</span>
+          </li>
+          <li>
+            <span class="p-name">store</span>
+            <span class="p-what">An immutable tree of every session, workspace, pane and agent. Readers never mutate it, which is what makes looking cheap and safe to do from four devices at once.</span>
+          </li>
+          <li>
+            <span class="p-name">transcript poller</span>
+            <span class="p-what">Reads a pane's screen at about once a second, declaring <em>no</em> geometry, then cleans it, folds code, and holds it until the agent settles.</span>
+          </li>
+          <li>
+            <span class="p-name">messaging API</span>
+            <span class="p-what"><code>/v1/agents</code> and <code>/v1/messages</code>, on their <em>own</em> token — so a link you handed out for watching can never type into a pane.</span>
+          </li>
+          <li>
+            <span class="p-name">chat manager</span>
+            <span class="p-what">One supervised adapter per enabled channel. Five restarts with doubling backoff, then it stays down and says so, instead of looping forever against something that is not coming back.</span>
+          </li>
+        </ul>
+      </li>
+
+      <li>
+        <span class="plane-n">Plane 04 / what it drives</span>
+        <h3>Herdr, and the agents inside it</h3>
+        <ul class="parts">
+          <li>
+            <span class="p-name">herdr</span>
+            <span class="p-what">Panes, tabs and workspaces, with agents bound to terminals — reached over a unix socket, one request per connection.</span>
+          </li>
+          <li>
+            <span class="p-name">the agents</span>
+            <span class="p-what">Prompted through <code>agent.prompt</code> and <code>agent.send_keys</code>. Never by writing raw bytes at a transcript, which would be guessing where the cursor was a second ago.</span>
+          </li>
+        </ul>
+      </li>
+    </ol>
+
+    <h3 style="margin:42px 0 16px">The exposure ladder</h3>
+    <p class="lede" style="margin-bottom:18px">
+      Four rungs, and nothing ever climbs above the one you asked for.
+    </p>
+    <ol class="ladder">
+      <li>
+        <span class="flag">local</span>
+        <span class="reach">This machine only</span>
+        <span class="why">An opt-in, for testing what a share would expose before anyone has the link.</span>
+      </li>
+      <li class="is-default">
+        <span class="flag">lan</span>
+        <span class="reach">This machine and this network<span class="tag-default">share default</span></span>
+        <span class="why">The everyday case, because a share exists to be opened from somewhere else.</span>
+      </li>
+      <li>
+        <span class="flag">quick</span>
+        <span class="reach">An anonymous <code>*.trycloudflare.com</code> hostname</span>
+        <span class="why">Nothing is created in an account of yours, so there is nothing to clean up afterwards.</span>
+      </li>
+      <li>
+        <span class="flag">domain</span>
+        <span class="reach">The internet, on a name you own</span>
+        <span class="why">The rung with a real blast radius, which is why it is the one you have to name.</span>
+      </li>
+    </ol>
+
+    <h3 style="margin:42px 0 16px">The transcript ladder</h3>
+    <p class="lede" style="margin-bottom:18px">
+      Four rungs again, and each one strictly reduces the rung above it. You
+      subscribe to the one your reader can actually use: a browser at full width
+      wants the first, a chat message wants the last.
+    </p>
+    <ol class="ladder ladder-rungs">
+      <li>
+        <span class="flag">transcript</span>
+        <span class="reach">The screen, with the ANSI stripped</span>
+        <span class="why">Everything that was on the pane, as characters rather than as a grid.</span>
+      </li>
+      <li>
+        <span class="flag">transcript_clean</span>
+        <span class="reach">The furniture gone</span>
+        <span class="why">Rules, the input line, status and timing banners — present for someone sitting at the terminal, noise for everyone else.</span>
+      </li>
+      <li>
+        <span class="flag">transcript_prose</span>
+        <span class="reach">Code folded to <code>[12&nbsp;lines&nbsp;of&nbsp;code]</code></span>
+        <span class="why">Lossy, and it says so. You asked what the agent wants, not to review the diff on a phone.</span>
+      </li>
+      <li>
+        <span class="flag">transcript_settled</span>
+        <span class="reach">Held until the agent stops <em>and</em> the screen stops moving</span>
+        <span class="why">Both conditions, because an agent that has reported done is often still painting.</span>
+      </li>
+    </ol>
+
+    <div class="turn">
+      <p>
+        The web UI, a chat adapter and another agent are all clients of the same
+        contract. <b>None of them can do anything the documented API does not
+        already allow</b> — which is the only version of this that stays true
+        once someone writes the second client.
+      </p>
+    </div>
+
+    <p class="cmd-note" style="margin-top:22px">
+      It runs on macOS, Linux and Windows, and the supervisor owns the whole
+      process <em>tree</em> — a process group on Unix, a job object on Windows —
+      so a restarted adapter cannot leave an orphan behind still polling your
+      panes.
     </p>
   </div>
 </section>
