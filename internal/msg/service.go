@@ -71,7 +71,16 @@ func (s *Service) Send(ctx context.Context, from, to, body string, hops int) (Re
 // deliver makes one attempt. Busy and blocked targets stay pending; delivery
 // never answers a dialog on the target's behalf. A request already typed in is
 // never typed again: its status just follows the target (blocked or not).
+//
+// One request is only ever in one attempt at a time. Send delivers inline and
+// the retry loop ticks every couple of seconds, so both can hold the same
+// request while the first is still typing — and the stored copy does not read
+// "delivered" until that typing is done.
 func (s *Service) deliver(ctx context.Context, r Request) Request {
+	if !s.Store.Claim(r.ID) {
+		return r // already being delivered; the holder records the outcome
+	}
+	defer s.Store.Release(r.ID)
 	session, target, _ := SplitAddress(r.To)
 	var status, errText string
 	if r.DeliveredAt != nil {

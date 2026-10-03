@@ -4,7 +4,9 @@ import (
 	"context"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 type fakeHerdr struct {
@@ -98,5 +100,65 @@ func TestDeliveredThenBlockedIsReportedNotRetyped(t *testing.T) {
 	}
 	if len(f.prompts) != 1 {
 		t.Fatalf("typed %d times, want 1", len(f.prompts))
+	}
+}
+
+// slowHerdr types slowly, the way the real one does: an agent listing, then a
+// prompt that has to reach Herdr and be typed into a pane.
+type slowHerdr struct {
+	mu      sync.Mutex
+	agents  []Agent
+	prompts int
+	typing  time.Duration
+}
+
+func (h *slowHerdr) Agents(context.Context) ([]Agent, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.agents, nil
+}
+
+func (h *slowHerdr) Prompt(_ context.Context, _, _, _ string) (string, error) {
+	h.mu.Lock()
+	h.prompts++
+	h.mu.Unlock()
+	time.Sleep(h.typing)
+	return "", nil
+}
+
+func (h *slowHerdr) typed() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.prompts
+}
+
+// One send must reach the agent exactly once, even though the retry loop ticks
+// several times while the first delivery is still typing. delivered_at is
+// written only after the prompt returns, so for that whole window the stored
+// request still reads "queued" — without a claim the loop types it again.
+func TestOneSendIsTypedOnceWhileTheRetryLoopTicks(t *testing.T) {
+	st, _ := newTestStore(t, 100)
+	h := &slowHerdr{
+		agents: []Agent{{Session: "work", Name: "peer", PaneID: "w1:p1", Status: "idle"}},
+		typing: 250 * time.Millisecond,
+	}
+	svc := &Service{Store: st, Herdr: h, Machine: "mac", Log: slog.Default()}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go svc.Run(ctx, 10*time.Millisecond)
+
+	r, err := svc.Send(ctx, "mac/work/me", "work/peer", "hi", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Status != StatusDelivered {
+		t.Fatalf("status %s, want delivered", r.Status)
+	}
+	time.Sleep(100 * time.Millisecond) // let any retry already past the claim land
+	cancel()
+	time.Sleep(50 * time.Millisecond)
+
+	if got := h.typed(); got != 1 {
+		t.Fatalf("typed %d times, want 1 — the same envelope arrived more than once", got)
 	}
 }

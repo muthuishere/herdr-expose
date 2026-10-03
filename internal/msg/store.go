@@ -77,6 +77,10 @@ type Store struct {
 	expiry time.Duration
 	now    func() time.Time
 	mu     sync.Mutex
+	// delivering holds the requests whose text is being typed right now. It is
+	// in memory only, which is enough: one daemon owns this directory, and the
+	// CLI is a thin HTTP client of it rather than a second writer.
+	delivering map[string]bool
 }
 
 // NewStore opens (creating) <dir>.
@@ -91,6 +95,32 @@ func NewStore(dir string, keep int, expiry time.Duration) (*Store, error) {
 		return nil, err
 	}
 	return &Store{dir: dir, keep: keep, expiry: expiry, now: time.Now}, nil
+}
+
+// Claim reserves a request for delivery, reporting whether the caller got it.
+// A delivery is slow — an agent listing, then a prompt that has to reach Herdr
+// and be typed into a pane — and delivered_at is written only once the prompt
+// returns. For that whole window the stored request still reads "queued", so
+// without a claim the retry loop picks it up and types the same envelope a
+// second time. Release it when the attempt is over, whatever its outcome.
+func (s *Store) Claim(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.delivering[id] {
+		return false
+	}
+	if s.delivering == nil {
+		s.delivering = make(map[string]bool)
+	}
+	s.delivering[id] = true
+	return true
+}
+
+// Release gives up a claim taken by Claim.
+func (s *Store) Release(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.delivering, id)
 }
 
 var idRe = regexp.MustCompile(`^r-[0-9]{13}-[0-9a-f]{4}$`)
