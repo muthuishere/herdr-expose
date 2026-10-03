@@ -1,65 +1,82 @@
+#!/usr/bin/env node
 /*
  * A chat adapter: the whole contract, and nothing else.
  *
- * Copy this file, implement two functions, point [[chat.adapters]] at it.
- * There is no third function, no lifecycle to learn and no Herdr concept in
- * here -- an adapter does not know what a pane is, what an agent is, or that
- * it is talking to a terminal at all.
+ * Copy this, make it talk to your chat app, point [[chat.adapters]] at it with
+ * `command = "node my-adapter.js"`. Any runtime works -- bun, python3, a Go
+ * binary -- because the host runs a COMMAND and speaks newline-delimited JSON
+ * to it, which every language reads with no dependency.
+ *
+ *   stdin   <- { type: "send", text, thread, choices: [{label, data}] }
+ *   stdout  -> { type: "ready" }
+ *              { type: "message", text, thread, from }
+ *   stderr  -> your own debugging; the host logs it, scrubbed of secrets.
  *
  * WHAT THE HOST ALREADY DID, so you do not:
  *   - stripped the terminal's furniture out of the text
- *   - folded code and diffs to "[12 lines of code]" markers
- *   - waited until the agent STOPPED and the screen stopped moving, so you
- *     get one message per answer instead of a dozen half-written ones
- *   - remembered what this reader has already been shown, and sent you only
- *     the new part
- *   - made sure only one of you is running per channel
- * Every one of those was written twice before it moved here, and both copies
- * grew the same bugs. Do not reimplement them; you will get a worse answer.
+ *   - folded code and diffs into "[12 lines of code]" markers
+ *   - waited until the agent STOPPED and the screen stopped moving, so you get
+ *     one message per answer instead of a dozen half-written ones
+ *   - sent you only what this reader has not already seen
+ *   - kept menus, commands and state, so you need none of them
+ * Each of those was written twice before it moved into the host, and both
+ * copies grew the same bugs. `text` arrives finished: send it as it is.
  *
- * THE HOST API, all of it:
- *   ctx.config       the [chat.adapters.env] table, as strings
- *   ctx.env(name)    read a process env var BY NAME. The value is registered
- *                    as a secret, so it cannot reach a log even if you try to
- *                    print it. This is how a token gets in. Never put a
- *                    token in ctx.config -- that is a plaintext credential in
- *                    a config file.
- *   ctx.http(req)    { method, url, headers, body, timeoutMs } ->
- *                    { status, headers, body }
- *   ctx.log(...)     a log line, scrubbed of every registered secret
+ * `choices` are buttons IF your app has them. If it does not, ignore them --
+ * `text` already lists the same options and the same strings work when typed,
+ * so a plain adapter is not a degraded one. When somebody taps a button, send
+ * that choice's `data` back as `text`, unmodified: that is what makes a tap and
+ * a typed command the same event, so no command is implemented twice.
+ *
+ * Secrets come from the ENVIRONMENT, never from argv (which `ps` shows) and
+ * never from the config file (which gets backed up). Config holds "$NAME"; the
+ * host expands it and hands you the value here.
  */
 
-export function name() {
-  return 'template'
+const TOKEN = process.env.MY_SERVICE_TOKEN
+if (!TOKEN) {
+  console.error('MY_SERVICE_TOKEN is not set')
+  process.exit(1)
 }
 
-/*
- * Return the messages that arrived since the last call.
- *
- * Block if your API long-polls; return [] if there is nothing. You are called
- * in a sequential loop and never re-entered while you are still inside, so
- * you do not need a lock and you cannot miss a call by being slow.
- *
- * Each message: { text, thread, from? }
- *   text    what the person typed. A tapped BUTTON must come back here as
- *           that button's `data` string -- then a tap and a typed command are
- *           the same thing to the host, and no command logic is written twice.
- *   thread  the conversation id, handed back to you in send().
- *   from    a display name, optional, only used in logs.
- */
-export async function poll() {
-  return []
+function out(obj) {
+  // One frame, one line: a newline inside the JSON is read as two frames.
+  process.stdout.write(JSON.stringify(obj) + '\n')
 }
 
-/*
- * Deliver one message.
- *
- * opts.choices is [{ label, data }] when the host is offering options.
- * Render them as buttons if your app has them, and feed a tap back through
- * poll() as `data`. If it has no buttons, print them -- the text commands
- * accept the same payloads, which is why the console adapter is not a
- * degraded experience, just a plainer one.
- */
-export async function send(text, thread, opts) {
-  ctx.log('send:', text.slice(0, 60))
+/* Read frames from the host. A frame can arrive in pieces, so keep the
+ * remainder rather than treating a partial line as a whole one. */
+let buf = ''
+process.stdin.setEncoding('utf8')
+process.stdin.on('data', (chunk) => {
+  buf += chunk
+  let i
+  while ((i = buf.indexOf('\n')) >= 0) {
+    const line = buf.slice(0, i)
+    buf = buf.slice(i + 1)
+    if (!line.trim()) continue
+    let m
+    try {
+      m = JSON.parse(line)
+    } catch {
+      console.error('unparseable frame:', line.slice(0, 120))
+      continue
+    }
+    if (m.type === 'send') deliver(m)
+  }
+})
+
+async function deliver(m) {
+  // Send m.text to your chat app, in m.thread. Render m.choices as buttons if
+  // you have them. That is the entire job.
+  console.error('would send:', (m.text || '').slice(0, 80))
 }
+
+/* Report what arrives from your chat app. Long-poll if your API supports it;
+ * you are never called concurrently with yourself. */
+async function listen() {
+  // out({ type: 'message', text: 'what they typed', thread: 'conversation id' })
+}
+
+out({ type: 'ready' })
+listen()

@@ -2,6 +2,7 @@ package chat
 
 import (
 	"encoding/json"
+	"errors"
 	"time"
 )
 
@@ -11,3 +12,9 @@ import (
 const callTimeout = 15 * time.Second
 
 func decode(line []byte, v any) error { return json.Unmarshal(line, v) }
+
+// asGiveUpErr is errors.As for a *GiveUp, kept here so manager.go reads as
+// intent rather than as plumbing.
+func asGiveUpErr(err error, out **GiveUp) bool { return errorsAs(err, out) }
+
+func errorsAs(err error, target any) bool { return errors.As(err, target) }

@@ -385,6 +385,18 @@ func cmdServe(args []string) error {
 		}
 	}
 
+	// Chat adapters. Start() launches NOTHING unless both [chat].enabled and
+	// an adapter's own enabled are true, which is not how it ships, so the
+	// default daemon behaves exactly as it did before chat existed.
+	chatDir, cderr := config.ChatAdaptersDir()
+	if cderr != nil {
+		chatDir = ""
+	}
+	chatMgr := chat.NewManager(hub, st, chatDir, func(f string, a ...any) {
+		log.Info(fmt.Sprintf(f, a...))
+	})
+	chatMgr.Start(ctx, cfg.Chat)
+
 	srv, err := serve.New(serve.Options{
 		Version:  version,
 		Config:   adapter,
@@ -399,11 +411,7 @@ func cmdServe(args []string) error {
 		// nothing here spawns an adapter, so opening the web UI cannot start
 		// a chat bot as a side effect. Launching is a separate, explicit act.
 		ChatStatus: func() any {
-			dir, err := config.ChatAdaptersDir()
-			if err != nil {
-				dir = ""
-			}
-			return chat.Plan(cfg.Chat, dir, nil)
+			return chat.Plan(cfg.Chat, chatDir, chatMgr.Live())
 		},
 	})
 	if err != nil {
