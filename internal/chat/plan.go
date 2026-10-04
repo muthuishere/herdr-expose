@@ -92,6 +92,12 @@ func PlanFor(envSource string, c config.Chat, adaptersDir string, running map[st
 			st.State = StateMisconfigured
 		case !c.Enabled || !a.Enabled:
 			st.State = StateOff
+		case running == nil:
+			// No supervisor view AT ALL: this is the CLI, holding the config
+			// and nothing else. A missing ENTRY in a live map means the
+			// supervisor has not got to this adapter yet, which is genuinely
+			// "restarting"; a missing MAP means we never asked anyone.
+			st.State = StateUnknown
 		default:
 			// Enabled, runnable, and no supervisor has reported in yet.
 			st.State = StateRestarting

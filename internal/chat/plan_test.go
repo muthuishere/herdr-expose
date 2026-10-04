@@ -261,3 +261,39 @@ func TestEnvResolutionIsAttributedToTheEnvironmentItWasReadFrom(t *testing.T) {
 		t.Fatalf("a resolved value reached the wire: %s", blob)
 	}
 }
+
+// The CLI is a different process from the daemon: it holds the config and has
+// never spoken to a supervisor. It used to answer "restarting", which is a
+// claim about a supervisor it cannot see -- and it said that about an adapter
+// the daemon had REFUSED outright and written to the log as refused. Not
+// knowing is a legitimate answer; guessing sends the reader nowhere.
+func TestWithoutASupervisorViewTheStateIsUnknownNotRestarting(t *testing.T) {
+	c := config.Chat{Enabled: true, Adapters: []config.ChatAdapter{
+		{ID: "telegram", Enabled: true, Command: "node telegram.js"},
+	}}
+	stubLookPath(t, "node")
+	dir := "/tmp/adapters"
+
+	cli := PlanFor(EnvSourceCLI, c, dir, nil)
+	if len(cli.Adapters) != 1 {
+		t.Fatalf("adapters = %d", len(cli.Adapters))
+	}
+	if got := cli.Adapters[0].State; got != StateUnknown {
+		t.Fatalf("CLI state = %q, want %q", got, StateUnknown)
+	}
+
+	// The daemon DOES have a view. A live map that simply lacks this adapter
+	// means the supervisor has not reached it yet, which really is restarting.
+	daemon := PlanFor(EnvSourceDaemon, c, dir, map[string]Status{})
+	if got := daemon.Adapters[0].State; got != StateRestarting {
+		t.Fatalf("daemon state = %q, want %q", got, StateRestarting)
+	}
+
+	// And a refusal the daemon recorded must survive into the summary.
+	refused := PlanFor(EnvSourceDaemon, c, dir, map[string]Status{
+		"telegram": {ID: "telegram", State: StateRefused, Problems: []string{"TOKEN is not set"}},
+	})
+	if got := refused.Adapters[0].State; got != StateRefused {
+		t.Fatalf("refused state = %q, want %q", got, StateRefused)
+	}
+}

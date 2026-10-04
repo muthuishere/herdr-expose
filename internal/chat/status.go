@@ -6,6 +6,18 @@ import "time"
 // go on the wire and a client must be able to show one it has never heard of
 // rather than crash on it.
 const (
+	// StateUnknown is "this process cannot see the supervisor".
+	//
+	// `chat status` runs in the CLI, which is a DIFFERENT PROCESS from the
+	// daemon that actually runs the adapters. It has the config and nothing
+	// else, so it knows what SHOULD happen and not what IS happening. It used
+	// to fall through to StateRestarting, which is a claim about a supervisor
+	// it has never spoken to -- and it made the CLI say "restarting" about an
+	// adapter the daemon had refused outright and logged as such.
+	//
+	// Not knowing is a legitimate answer. Saying so sends the reader to the
+	// daemon, which does know; guessing sends them nowhere.
+	StateUnknown = "unknown"
 	// StateOff is configured but switched off -- either [chat].enabled is
 	// false or this adapter's own enabled is. It is the SHIPPED state.
 	StateOff = "off"
