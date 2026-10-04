@@ -1105,8 +1105,9 @@ button {
 .tr-prompt {
   flex: 0 0 auto;
   display: grid;
-  grid-template-columns: 1fr auto;
-  grid-template-rows: auto 16px;
+  /* attach | textarea | send. The attachment strip and the status row each
+     span the lot, so the middle row places itself. */
+  grid-template-columns: auto 1fr auto;
   gap: 8px 8px;
   align-items: end;
   padding: 8px calc(var(--safe-right) + 12px)
@@ -1153,6 +1154,74 @@ button {
 
 /* The status row is ALWAYS in the layout, empty or not: a result appearing must
    not shove the prompt box under the user's thumb. */
+/* Attachments are shown as THINGS, not as paths: a temp path is ninety
+   characters of noise in a text box, and what the person needs to know is that
+   the image is attached. The agent is given the path on send. */
+.tr-shots {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.tr-shot {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 3px 4px 3px 3px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-2);
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+.tr-shot img {
+  width: 28px;
+  height: 28px;
+  object-fit: cover;
+  border-radius: 3px;
+  display: block;
+}
+
+.tr-shot-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 14ch;
+}
+
+.tr-shot-x {
+  color: var(--fg-faint);
+  font-size: 12px;
+  padding: 0 2px;
+  line-height: 1;
+}
+
+.tr-shot.is-busy {
+  padding: 6px 8px;
+  font-style: italic;
+}
+
+/* The attach control sits left of the box, where a paperclip lives in every
+   messaging app the phone already has. */
+.tr-clip {
+  height: 40px;
+  min-width: 36px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-2);
+  color: var(--fg-dim);
+  font-size: 17px;
+  line-height: 1;
+}
+
+.tr-prompt.is-dragging {
+  outline: 2px dashed var(--accent);
+  outline-offset: -3px;
+}
+
 .tr-status {
   grid-column: 1 / -1;
   font-size: 11px;

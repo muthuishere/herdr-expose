@@ -440,6 +440,21 @@ func cmdServe(args []string) error {
 		Exposure: exposeAdapter{mgr},
 		Msg:      msgSvc,
 		MsgToken: msgTok,
+		// An image for a pane on another machine must be WRITTEN on that
+		// machine, so the path the agent is handed names a file it can open.
+		// Peers are already reachable over authenticated HTTP, which is what
+		// messaging uses, so the upload rides the same saved credentials.
+		Peer: func(machine string) (string, string, bool) {
+			peers, err := loadPeers(state)
+			if err != nil {
+				return "", "", false
+			}
+			p, ok := peers[machine]
+			if !ok || p.URL == "" {
+				return "", "", false
+			}
+			return p.URL, p.Token, true
+		},
 		// Chat STATUS only. Reporting what is configured is not running it:
 		// nothing here spawns an adapter, so opening the web UI cannot start
 		// a chat bot as a side effect. Launching is a separate, explicit act.

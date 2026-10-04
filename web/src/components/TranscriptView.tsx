@@ -28,6 +28,7 @@ import { declareViewport, releaseViewport, resendViewport } from '../net/viewpor
 import { shapeTranscript } from './transcriptText'
 import { hasRealAgent } from './agentPresence'
 import { renderInline } from './inlineText'
+import { imagesFrom, uploadImage, type Upload } from '../net/upload'
 
 /**
  * The answer keys from SPEC J2, sent as NAMED KEYS through `agent.send_keys`.
@@ -325,6 +326,33 @@ function PromptBox({ target }: { target: PaneId }) {
   const [text, setText] = useState('')
   const [state, setState] = useState<'idle' | 'sending' | 'sent' | 'failed'>('idle')
   const [error, setError] = useState<string | null>(null)
+  const [shots, setShots] = useState<Upload[]>([])
+  const [busy, setBusy] = useState(0)
+  const [dragging, setDragging] = useState(false)
+  const fileRef = useRef<HTMLInputElement | null>(null)
+
+  // An attachment is shown, not its path. A temp path is ninety characters of
+  // noise in a text box; the person wants to see THAT THEY ATTACHED A THING.
+  // The agent gets the path, because a path is the only form it can act on.
+  const attach = (files: File[]) => {
+    if (files.length === 0) return
+    setError(null)
+    setBusy((n) => n + files.length)
+    for (const f of files) {
+      void uploadImage(f, target)
+        .then((u) => setShots((prev) => [...prev, u]))
+        .catch((e: unknown) => {
+          setState('failed')
+          setError(e instanceof Error ? e.message : 'the image was not accepted')
+        })
+        .finally(() => setBusy((n) => n - 1))
+    }
+  }
+
+  const drop = (u: Upload) => {
+    URL.revokeObjectURL(u.preview)
+    setShots((prev) => prev.filter((x) => x !== u))
+  }
 
   // The result is cleared on the next edit rather than on a timer: a status
   // that vanishes by itself is a layout shift you did not ask for.
@@ -333,13 +361,19 @@ function PromptBox({ target }: { target: PaneId }) {
   }, [text, state])
 
   const submit = () => {
-    const body = text.trim()
-    if (!body || state === 'sending') return
+    const typed = text.trim()
+    // The paths go with the message, one per line, so an agent can read them
+    // straight out of the prompt. A message that is ONLY images is still worth
+    // sending: the paths are the content.
+    const body = [typed, ...shots.map((s) => s.path)].filter(Boolean).join('\n')
+    if (!body || busy > 0 || state === 'sending') return
     setState('sending')
     setError(null)
     void sendCommand('agent.prompt', { target, text: body }).then((r) => {
       if (r.ok) {
         setText('')
+        shots.forEach((s) => URL.revokeObjectURL(s.preview))
+        setShots([])
         setState('sent')
       } else {
         setState('failed')
@@ -350,12 +384,68 @@ function PromptBox({ target }: { target: PaneId }) {
 
   return (
     <form
-      className="tr-prompt"
+      className={`tr-prompt${dragging ? ' is-dragging' : ''}`}
       onSubmit={(e) => {
         e.preventDefault()
         submit()
       }}
+      onDragOver={(e) => {
+        if (imagesFrom(e.dataTransfer).length > 0 || e.dataTransfer?.types.includes('Files')) {
+          e.preventDefault()
+          setDragging(true)
+        }
+      }}
+      onDragLeave={() => setDragging(false)}
+      onDrop={(e) => {
+        const files = imagesFrom(e.dataTransfer)
+        setDragging(false)
+        if (files.length === 0) return
+        e.preventDefault()
+        attach(files)
+      }}
     >
+      {shots.length > 0 || busy > 0 ? (
+        <div className="tr-shots">
+          {shots.map((u) => (
+            <span className="tr-shot" key={u.path}>
+              <img src={u.preview} alt="" />
+              <span className="tr-shot-name" title={u.path}>
+                {u.name}
+                {u.machine ? ` · ${u.machine}` : ''}
+              </span>
+              <button
+                type="button"
+                className="tr-shot-x"
+                aria-label={`Remove ${u.name}`}
+                onClick={() => drop(u)}
+              >
+                ✕
+              </button>
+            </span>
+          ))}
+          {busy > 0 ? <span className="tr-shot is-busy">uploading…</span> : null}
+        </div>
+      ) : null}
+      <input
+        ref={fileRef}
+        type="file"
+        accept="image/*"
+        multiple
+        hidden
+        onChange={(e) => {
+          attach(Array.from(e.target.files ?? []))
+          e.target.value = ''
+        }}
+      />
+      <button
+        type="button"
+        className="tr-clip"
+        aria-label="Attach an image"
+        title="Attach an image"
+        onClick={() => fileRef.current?.click()}
+      >
+        ⊕
+      </button>
       <textarea
         className="tr-input"
         value={text}
@@ -363,6 +453,16 @@ function PromptBox({ target }: { target: PaneId }) {
         placeholder="Send a prompt to this agent…"
         aria-label="Send a prompt to this agent"
         onChange={(e) => setText(e.target.value)}
+        onPaste={(e) => {
+          // A pasted screenshot arrives as a file on the clipboard. Take it and
+          // let the text through untouched -- pasting text must keep working
+          // exactly as it did, including multi-line, which lands as one value
+          // because this is a textarea and not a terminal.
+          const files = imagesFrom(e.clipboardData)
+          if (files.length === 0) return
+          e.preventDefault()
+          attach(files)
+        }}
         onKeyDown={(e) => {
           // Enter submits; shift+enter is a newline. A phone keyboard has no
           // other obvious submit, and the button is right there for the rest.
@@ -375,7 +475,7 @@ function PromptBox({ target }: { target: PaneId }) {
       <button
         type="submit"
         className="tr-send"
-        disabled={state === 'sending' || text.trim() === ''}
+        disabled={state === 'sending' || busy > 0 || (text.trim() === '' && shots.length === 0)}
       >
         {state === 'sending' ? '…' : 'Send'}
       </button>
