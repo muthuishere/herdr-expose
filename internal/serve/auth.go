@@ -107,6 +107,14 @@ const (
 	DeviceTTL = 30 * 24 * time.Hour
 	// MaxDevices caps the paired set; the least recently seen is evicted.
 	MaxDevices = 32
+	// LastSeenPersistInterval is how stale a device's on-disk last-seen may be.
+	//
+	// It used to be written on EVERY authenticated request, which meant a
+	// connected phone rewrote auth.json several times a second — the write
+	// storm that erased pairing codes minted by the CLI. Nothing needs that
+	// precision: last-seen feeds a 30-DAY sliding window, so a minute of lag
+	// is three parts in a million of the thing it measures.
+	LastSeenPersistInterval = time.Minute
 	// DeviceTokenBytes is the entropy of a device token.
 	DeviceTokenBytes = 32
 	// ServerTokenBytes is the entropy of the server token.
@@ -303,24 +311,45 @@ func (a *Auth) Authenticate(token, remoteIP, userAgent string) (Identity, error)
 	}
 	if !found.ExpiresAt.IsZero() && now.After(found.ExpiresAt) {
 		a.log.Info("auth: device token expired, revoking", "device", found.ID, "ip", remoteIP)
-		a.removeDeviceLocked(found.ID)
-		_ = a.save()
+		id := found.ID
+		a.removeDeviceLocked(id)
+		_ = a.commit(func() { a.removeDeviceLocked(id) })
 		return Identity{}, ErrUnauthorized
 	}
 	if now.Sub(found.LastSeen) > DeviceTTL {
 		a.log.Info("auth: device idle past its TTL, revoking", "device", found.ID, "ip", remoteIP)
-		a.removeDeviceLocked(found.ID)
-		_ = a.save()
+		id := found.ID
+		a.removeDeviceLocked(id)
+		_ = a.commit(func() { a.removeDeviceLocked(id) })
 		return Identity{}, ErrUnauthorized
 	}
+	prev := found.LastSeen
 	found.LastSeen = now
 	found.LastIP = remoteIP
 	if userAgent != "" {
 		found.UserAgent = userAgent
 	}
-	_ = a.save()
+	id, name, ua := found.ID, found.Name, found.UserAgent
+	// Persisted at most once a minute, and through commit so the write merges
+	// with whatever another process has put in the file meanwhile — a pairing
+	// code from the CLI, most of all. In memory it is always current; only the
+	// trip to disk is throttled.
+	if prev.IsZero() || now.Sub(prev) >= LastSeenPersistInterval {
+		_ = a.commit(func() {
+			for _, d := range a.state.Devices {
+				if d.ID != id {
+					continue
+				}
+				d.LastSeen, d.LastIP = now, remoteIP
+				if ua != "" {
+					d.UserAgent = ua
+				}
+				break
+			}
+		})
+	}
 	a.limiter.reset("authfail:" + remoteIP)
-	return Identity{Kind: "device", DeviceID: found.ID, Name: found.Name}, nil
+	return Identity{Kind: "device", DeviceID: id, Name: name}, nil
 }
 
 var codeAlphabet = base32.NewEncoding("0123456789ABCDEFGHJKMNPQRSTVWXYZ").WithPadding(base32.NoPadding)
@@ -342,11 +371,13 @@ func (a *Auth) NewPairingCode(name string) (string, time.Time, error) {
 	if !a.deadline.IsZero() && exp.After(a.deadline) {
 		exp = a.deadline
 	}
-	a.reloadLocked()
-	a.gcPairingLocked()
-	a.state.Pairing = append(a.state.Pairing,
-		&pairingRecord{SHA: sha256hex(code), Expires: exp, Name: name})
-	if err := a.save(); err != nil {
+	// Under the state lock: this runs in the CLI's process while the daemon is
+	// rewriting the same file for every request it serves.
+	if err := a.commit(func() {
+		a.gcPairingLocked()
+		a.state.Pairing = append(a.state.Pairing,
+			&pairingRecord{SHA: sha256hex(code), Expires: exp, Name: name})
+	}); err != nil {
 		return "", time.Time{}, err
 	}
 	// The CODE itself is never logged — only that one was issued, for whom and
@@ -379,9 +410,11 @@ func (a *Auth) reloadLocked() {
 		return
 	}
 	a.state.Pairing = fresh.Pairing
-	if len(fresh.Devices) > len(a.state.Devices) {
-		a.state.Devices = fresh.Devices
-	}
+	// Devices come across WHOLESALE. It used to take them only when disk had
+	// MORE of them, a guess that existed because reads were not serialised: it
+	// silently ignored another process revoking one. Under the state lock the
+	// file is simply the truth at the moment we read it.
+	a.state.Devices = fresh.Devices
 	if fresh.ServerTokenSHA != "" {
 		a.state.ServerTokenSHA = fresh.ServerTokenSHA
 	}
@@ -398,6 +431,10 @@ func (a *Auth) RedeemPairing(code, name, remoteIP, userAgent string) (token stri
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	// Held across the WHOLE read-find-consume-write: the code being redeemed
+	// was minted by another process, and consuming it must not race that
+	// process writing another one.
+	defer a.holdState()()
 	a.reloadLocked()
 	a.gcPairingLocked()
 
