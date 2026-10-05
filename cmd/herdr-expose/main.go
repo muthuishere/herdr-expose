@@ -125,11 +125,13 @@ func usage() {
                         unit's stderr is the journal, and a credential does not
                         belong in a log. Rotating invalidates the old server
                         token; paired devices keep working.
-  agents [--state S] [--json]
+  agents [QUERY] [--state S] [--json]
                         what every agent on this machine is DOING: working,
                         free, blocked on a dialog a human must answer, or
                         stopped because something broke. Says how long each has
-                        been idle and which are safe to close.
+                        been idle and which are safe to close. A bare QUERY
+                        searches name, session, pane, cwd and title, so finding
+                        an agent never needs a pipe into grep.
   whoami [--json]       which agent and which session this shell is in
   msg ...               message agents here and on peer machines (msg for help)
   skill install | uninstall | status

@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"sort"
+	"strings"
 
 	"github.com/muthuishere/herdr-expose/internal/inventory"
 )
@@ -20,6 +21,42 @@ import (
 // It is one HTTP call to the daemon, because the daemon is the only thing that
 // has been watching long enough to say how long an agent has been idle. Herdr
 // reports "idle", never "idle since 9:14".
+
+// matching finds agents by name, session, pane id, working directory or title.
+//
+// A substring, case-insensitively, across all of them, because you remember an
+// agent by whichever of those you last saw: "jevcli" is a directory, "research"
+// is a name, "w12:p1" is a pane. Ranked so an exact or name match comes first,
+// since that is the one you meant when several things contain the word.
+func matching(all []inventory.Agent, q string) []inventory.Agent {
+	q = strings.ToLower(strings.TrimSpace(q))
+	type hit struct {
+		a    inventory.Agent
+		rank int
+	}
+	var hits []hit
+	for _, a := range all {
+		name, addr := strings.ToLower(a.Name), strings.ToLower(a.Address)
+		switch {
+		case addr == q || name == q:
+			hits = append(hits, hit{a, 0})
+		case name != "" && strings.Contains(name, q):
+			hits = append(hits, hit{a, 1})
+		case strings.Contains(addr, q):
+			hits = append(hits, hit{a, 2})
+		case strings.Contains(strings.ToLower(a.Cwd), q):
+			hits = append(hits, hit{a, 3})
+		case strings.Contains(strings.ToLower(a.Title), q):
+			hits = append(hits, hit{a, 4})
+		}
+	}
+	sort.SliceStable(hits, func(i, j int) bool { return hits[i].rank < hits[j].rank })
+	out := make([]inventory.Agent, 0, len(hits))
+	for _, h := range hits {
+		out = append(out, h.a)
+	}
+	return out
+}
 
 // localAddress is this agent as the inventory names it: session/name, with no
 // machine prefix, because an inventory covers one machine.
@@ -91,11 +128,30 @@ func cmdAgents(args []string) error {
 		return e.Encode(sum)
 	}
 
-	only := ""
-	for i := 0; i < len(args)-1; i++ {
-		if args[i] == "--state" {
+	only, query := "", ""
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "--state" && i+1 < len(args):
 			only = args[i+1]
+			i++
+		case strings.HasPrefix(args[i], "-"):
+			// a flag we already handled, or do not know
+		case query == "":
+			// A bare word is a SEARCH. Finding the agent you mean should not
+			// require piping this through grep: grep matches the rendered
+			// line, so it cannot see a cwd that was truncated for width, and
+			// it answers with text when what you want is an address.
+			query = args[i]
 		}
+	}
+	if query != "" {
+		agents := matching(sum.Agents, query)
+		if len(agents) == 0 {
+			fmt.Printf("no agent matches %q.\n", query)
+			fmt.Println("searched name, session, pane id, working directory and title.")
+			return nil
+		}
+		sum.Agents = agents
 	}
 
 	agents := sum.Agents
@@ -124,6 +180,12 @@ func cmdAgents(args []string) error {
 		me := ""
 		if a.Self {
 			me = "  ← you"
+		}
+		if query != "" {
+			// A search is usually "which one is in that directory?", so the
+			// answer shows the directory rather than making you look it up.
+			fmt.Printf("%-34s %-8s %-8s %s%s\n", a.Address, a.Kind, a.State, a.Cwd, me)
+			continue
 		}
 		fmt.Printf("%-38s %-8s %-8s %s%s\n", a.Address, a.Kind, a.State, a.Reason, me)
 	}
