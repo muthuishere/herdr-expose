@@ -14,7 +14,7 @@ Herdr 0.9.0 verification.
 | [0002](0002-socket-api-is-the-only-contract.md) | The Herdr socket API is the only upstream contract | Accepted |
 | [0003](0003-terminal-streaming-via-subprocess.md) | Terminal streaming goes through the `herdr terminal session` subprocess | Accepted |
 | [0004](0004-loopback-only-auth-is-the-product.md) | Loopback-only bind; auth is the primary feature | Accepted, relaxed by 0022/0023 |
-| [0005](0005-static-domain-api-provisioned-tunnel.md) | One static domain, provisioned through the Cloudflare API from Go | Accepted for the permanent deployment; its ban on ephemeral tunnels is narrowed by 0027/0028, its `ngrok` clause **removed** by 0034 |
+| [0005](0005-static-domain-api-provisioned-tunnel.md) | One static domain, provisioned through the Cloudflare API from Go | **Superseded by 0038** |
 | [0006](0006-split-plane-json-control-binary-data.md) | Split plane: JSON control frames, binary data frames | Accepted |
 | [0007](0007-server-owned-viewport-modes.md) | Server-owned viewport modes; per-connection LIVE streams | Accepted; its "geometry before the first frame" rule is **withdrawn** by 0031 |
 | [0008](0008-per-connection-seen-state.md) | Seen state is per-connection, never global | Accepted |
@@ -31,22 +31,23 @@ Herdr 0.9.0 verification.
 | [0019](0019-three-layer-supervision.md) | Three-layer supervision with a managed-pid ledger | Accepted |
 | [0020](0020-absolute-path-herdr-binary.md) | Resolve the `herdr` binary to an absolute path before any spawn | Accepted |
 | [0021](0021-one-socket-connection-per-rpc.md) | One Herdr socket connection per RPC | Accepted |
-| [0022](0022-three-exposure-modes.md) | Three exposure modes: local, lan, cloudflare | Accepted |
+| [0022](0022-three-exposure-modes.md) | Three exposure modes: local, lan, cloudflare | Accepted; **two** modes after 0038 |
 | [0023](0023-loopback-no-token-but-origin-host-pinning.md) | No token on loopback, but Origin and Host pinning are mandatory | Accepted |
 | [0024](0024-predictive-echo-in-v1.md) | Predictive echo ships in v1 | Accepted |
 | [0025](0025-hex-namespaced-entrypoint-ids.md) | All plugin entrypoint ids are namespaced `hex:` | Accepted |
 | [0026](0026-scoped-time-boxed-shares.md) | A share is a scoped, time-boxed, self-destructing second instance | Accepted |
-| [0027](0027-ephemeral-dns-for-shares-only.md) | Ephemeral DNS is legal — for shares only | Accepted |
-| [0028](0028-quick-tunnels-for-shares.md) | Quick tunnels come back — for shares only | Accepted; its provider-parity clause narrowed by 0034 |
-| [0029](0029-exposure-ladder-climbed-never-guessed.md) | The exposure ladder is climbed, never guessed | Accepted |
+| [0027](0027-ephemeral-dns-for-shares-only.md) | Ephemeral DNS is legal — for shares only | **Superseded by 0038** |
+| [0028](0028-quick-tunnels-for-shares.md) | Quick tunnels come back — for shares only | **Superseded by 0038** |
+| [0029](0029-exposure-ladder-climbed-never-guessed.md) | The exposure ladder is climbed, never guessed | Accepted; **two rungs** after 0038 |
 | [0030](0030-transcript-view-not-a-terminal-mirror.md) | Agent panes get a TRANSCRIPT view, not a terminal mirror | Accepted; its per-pane defaults superseded by 0031 |
 | [0031](0031-looking-must-not-touch.md) | Looking must not touch | Accepted |
 | [0032](0032-local-rotating-log-no-otel.md) | A local rotating log file, and no OpenTelemetry | Accepted |
 | [0033](0033-self-documenting-config.md) | The config file documents itself | Accepted |
-| [0034](0034-cloudflare-is-the-only-built-in-provider.md) | Cloudflare is the only built-in provider; everything else is an adapter | Accepted; **removes** 0005's `ngrok` clause and narrows 0028's provider parity |
+| [0034](0034-cloudflare-is-the-only-built-in-provider.md) | Cloudflare is the only built-in provider; everything else is an adapter | **Superseded by 0038** |
 | [0035](0035-all-sessions-share.md) | `share --all`: an all-sessions share, confirmed out loud | Accepted; extends 0026's scoped share with the absence of a scope, and leaves 0029's ladder untouched |
 | [0036](0036-one-install-binary-plugin-and-skill.md) | One install: the binary, the plugin AND the agent skill | Accepted; adds the `skill` verb and makes 0001's build step finish the install |
 | [0037](0037-windows-is-a-build-tagged-platform-seam.md) | Windows is a build-tagged platform seam, not a `runtime.GOOS` branch | Accepted; adds `internal/platform` and a third platform, and changes no Unix behaviour |
+| [0038](0038-no-tunnel-the-lan-is-the-top-rung.md) | herdr-expose does not raise tunnels; the LAN is the top rung | Accepted; **supersedes** 0005/0027/0028/0034, truncates 0029's ladder to two rungs |
 
 ## Supersessions
 
@@ -74,6 +75,7 @@ Herdr 0.9.0 verification.
 | 0035 | extends the scoped share with `--all` (no scope at all); changes nothing about the rung ladder, pairing or time-boxing |
 | 0036 | extends 0001's build step (it now links into $HOME, announced) and 0025's id set (`hex:install-skill`); changes no runtime behaviour |
 | 0037 | extends 0001's build matrix (six targets, `.exe`) and 0007's supervision with a Windows Service; moves every Unix syscall behind `internal/platform` without changing what it does |
+| 0038 | **supersedes 0005, 0027, 0028 and 0034 entirely**, removes 0022's `cloudflare` mode and truncates 0029's ladder to two rungs; leaves 0004, 0023, 0026 and 0035 carrying the whole product |
 
 ## Themes
 
@@ -81,11 +83,14 @@ Herdr 0.9.0 verification.
   contract a client that has never seen this repo can be built against. See
   [`../api.md`](../api.md).
 - **Security is a feature, not a checkbox** — 0004, 0009, 0010, 0017, 0026,
-  0029, 0032, 0034. This binary executes arbitrary commands, so the questions
-  that matter are *who can reach it* (0029's ladder), *what can they reach*
-  (0026's server-side scope), *for how long* (0026's three-way expiry) and
-  *what gets written down* (0032's redaction). 0034 adds the one about the
+  0029, 0032, 0034, 0038. This binary executes arbitrary commands, so the
+  questions that matter are *who can reach it* (0029's ladder), *what can they
+  reach* (0026's server-side scope), *for how long* (0026's three-way expiry)
+  and *what gets written down* (0032's redaction). 0034 adds the one about the
   surface itself: code that has never actually run does not get to sit on it.
+  0038 is the same argument carried to its conclusion — the safest thing to do
+  with the most dangerous code in the product was to delete it and let a tool
+  that forwards a port do the forwarding.
 - **Looking must not touch** — 0030, 0031, 0008. Viewing a pane from a phone
   must not move the pane somebody is typing in. This was got wrong first, then
   measured, then fixed; 0031 has the measurements.
@@ -107,6 +112,6 @@ Herdr 0.9.0 verification.
 
 ## Troubleshooting
 
-When one of these decisions surfaces as a confusing symptom — a working tunnel
-that looks dead, a quick hostname that stopped accepting a paired device, no
-install prompt on a LAN IP — see [`../troubleshooting.md`](../troubleshooting.md).
+When one of these decisions surfaces as a confusing symptom — a config key
+that no longer does anything, a share flag that is refused, no install prompt
+on a LAN IP — see [`../troubleshooting.md`](../troubleshooting.md).

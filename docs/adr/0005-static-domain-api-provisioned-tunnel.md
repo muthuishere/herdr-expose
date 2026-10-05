@@ -5,6 +5,10 @@ narrowed by 0027/0028, and its `ngrok = true` clause is **removed** by 0034
 (supersedes both the "all exposure is a JS adapter" draft and the "quick tunnel
 by default" draft)
 
+> **Superseded by [ADR 0038](0038-no-tunnel-the-lan-is-the-top-rung.md).** herdr-expose no longer
+> raises tunnels at all. This ADR is kept as the record of why the static domain was chosen
+> over an ephemeral one while a tunnel lived in this binary.
+
 ## Context
 
 Two earlier drafts were wrong in opposite directions.

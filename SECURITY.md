@@ -41,8 +41,10 @@ error message is a vulnerability. Please report those.
 - Anyone on the network can reach a `--lan` share's port. They still cannot pair
   without seeing the screen. This is stated at create time.
 - A `--lan` share is plain HTTP, so it is not a secure context: no service
-  worker, no PWA install. Only a tunnel gives those.
-- A `--quick` share is on the public internet on a guessable-length random
+  worker, no PWA install. Only HTTPS gives those, which means a tunnel or a
+  proxy you put in front of the port yourself — herdr-expose raises neither.
+- Anything you point at the port inherits the whole threat model. A tunnel is
+  on the public internet on a guessable-length random
   hostname. It is pairing-gated, scoped and time-boxed, but it is public.
 - `/healthz` is unauthenticated by design. It returns only `{"ok","api"}` to an
   anonymous caller; the detailed body requires auth.

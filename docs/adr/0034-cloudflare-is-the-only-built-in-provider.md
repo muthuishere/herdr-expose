@@ -3,6 +3,10 @@
 Status: Accepted (SPEC AMENDMENTS 18; **narrows** ADR 0028's provider parity and
 removes the `ngrok = true` clause of ADR 0005)
 
+> **Superseded by [ADR 0038](0038-no-tunnel-the-lan-is-the-top-rung.md).** There is no built-in
+> provider now, and no adapter host to replace it. The lesson in here outlived the decision:
+> code whose tests have only ever run against a fake does not get to sit on the attack surface.
+
 ## Context
 
 herdr-expose shipped two built-in providers. ADR 0005 gave ngrok the same

@@ -101,19 +101,12 @@ description = "Link skill/ into ~/.claude/skills (and ~/.agents/skills) so an ag
 command = ["./bin/herdr-expose", "skill", "install"]
 contexts = ["global"]
 
-[[actions]]
-id = "hex:expose"
-title = "Expose over a tunnel"
-description = "Start the configured tunnel and print the public URL"
-command = ["./bin/herdr-expose", "expose", "start"]
-contexts = ["global"]
-
-[[actions]]
-id = "hex:unexpose"
-title = "Stop exposing"
-description = "Tear down the tunnel; the server stays up on loopback"
-command = ["./bin/herdr-expose", "expose", "stop"]
-contexts = ["global"]
+# `hex:expose` and `hex:unexpose` are GONE, not disabled. They ran
+# `herdr-expose expose start|stop`, a verb that no longer exists: herdr-expose
+# does not raise tunnels (docs/adr/0038). An action in this manifest whose
+# command the binary does not have is a menu entry that fails when clicked, so
+# it leaves the manifest with the verb. Reaching this machine from outside the
+# network is a tunnel you point at the port — `cftunnel add 21118 herdr`.
 
 # Opened by the `pair` action, or on its own, to show the pairing QR without
 # leaving the TUI. Overlay so it floats above the current layout and closes
@@ -126,11 +119,11 @@ command = ["./bin/herdr-expose", "pair", "--pane"]
 # overlay takes the whole terminal area; width/height are only valid for popup
 placement = "overlay"
 
-# A small status pane: local URL, tunnel URL, connected clients.
+# A small status pane: the URL, the reach, connected clients.
 [[panes]]
 id = "hex:status"
 title = "herdr-expose status"
-description = "Live server and tunnel status"
+description = "Live server status: where it listens and who can reach it"
 command = ["./bin/herdr-expose", "status", "--watch"]
 placement = "popup"
 width = "70%"

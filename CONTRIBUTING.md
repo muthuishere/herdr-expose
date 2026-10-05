@@ -44,14 +44,15 @@ AMENDMENTS 20 are a table of numbers somebody measured; add to it the same way.
 user's API keys, their `.env`, their customer data. It goes to the client and
 nowhere else — not to the log at any level, not into an error string, not into a
 test fixture. Credentials are verified by USING them and reporting the outcome
-(see `doctor`'s Cloudflare check); the value never reaches stdout, a log line or
+(the log scrubber reads them by name to redact them); the value never reaches stdout, a log line or
 a state file. `redactSecrets` is the belt, not the trousers.
 
-**The exposure ladder is never climbed for you.** Local, LAN, quick tunnel and
-named domain are four separate, explicit requests (AMENDMENTS 16/17). A failure
-at one rung degrades LOUDLY; it never quietly widens exposure to succeed. If your
-change makes something "just work" by reaching further onto the network, it is
-wrong even if it is convenient.
+**The exposure ladder is never climbed for you.** Local and LAN are two
+separate, explicit requests, and there is no rung above them (ADR 0038). A
+request this binary cannot serve is REFUSED out loud, never quietly downgraded
+to one it can. If your change makes something "just work" by reaching further
+onto the network, it is wrong even if it is convenient — and if it makes
+something look like it worked when it did not, it is worse.
 
 **Looking must not touch.** Read paths are read-only. A viewer must never resize
 a PTY, send input, or change anything about a pane its owner is working in

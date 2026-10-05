@@ -17,7 +17,7 @@ PASTE HERE
 This is the single most useful thing in the report. `doctor` checks every
 external thing this binary depends on — the herdr binary and its PATH, the
 session socket, the port and who holds it, the resolved exposure mode, the
-tunnel, DNS from both a public resolver and this machine's, live shares and the
+the resolved exposure mode, live shares and the
 log — and it never prints a credential, so the output is safe to paste.
 
 ## Versions
@@ -29,7 +29,7 @@ log — and it never prints a credential, so the output is safe to paste.
 
 ## What you did
 
-<!-- The exact command, including the exposure rung: bare (lan), --quick,
+<!-- The exact command, including the exposure rung: bare (lan) or --local,
      --domain or --local. -->
 
 ## What you expected, and what happened instead

@@ -4,6 +4,10 @@ Status: Accepted (SPEC AMENDMENTS 16 and 17; withdraws the auto-escalation
 introduced with ADR 0028, and supersedes ADR 0022's automatic promotion for
 shares)
 
+> **Amended by [ADR 0038](0038-no-tunnel-the-lan-is-the-top-rung.md).** The ladder is two rungs
+> high, not four. Its rule is unchanged and is what the amputation was held to: exposure is
+> climbed, never guessed, and the resolver still refuses to resolve above what was requested.
+
 ## Context
 
 Once `--quick` existed (ADR 0028), a bare `herdr-expose share` resolved

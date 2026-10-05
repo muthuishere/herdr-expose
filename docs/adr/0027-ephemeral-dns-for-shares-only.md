@@ -2,6 +2,9 @@
 
 Status: Accepted (SPEC AMENDMENTS 9 §G4; the single exception to ADR 0005)
 
+> **Superseded by [ADR 0038](0038-no-tunnel-the-lan-is-the-top-rung.md).** There is no DNS record,
+> ephemeral or otherwise, for this binary to create: a share reaches the LAN and stops.
+
 ## Context
 
 ADR 0005 is categorical: the tunnel is static, `cloudflare = true` requires a

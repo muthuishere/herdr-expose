@@ -83,6 +83,11 @@ type shareView struct {
 	Scope   string `json:"scope"`
 	Session string `json:"session"`
 	URL     string `json:"url"`
+	// Port is the share's own ephemeral port, and it is in this projection
+	// for one reason: pointing a tunnel at a share is now the documented way
+	// to reach it from outside the network, and that needs the port. Reading
+	// it out of URL means parsing a host:port a DHCP lease can change.
+	Port int `json:"port"`
 	// SecureContext is false for a LAN share: plain HTTP on 192.168.x.x is not
 	// a secure context (localhost is exempt, a LAN IP is not), so the browser
 	// grants no service worker and no PWA install there. Surfaced because the
@@ -107,7 +112,7 @@ func (r *shareRecord) view() shareView {
 	}
 	return shareView{
 		ID: r.ID, Mode: r.mode(), Scope: r.Scope, Session: r.Session,
-		URL: r.CurrentURL(), SecureContext: r.SecureContext, FellBack: r.FellBack,
+		URL: r.CurrentURL(), Port: r.Port, SecureContext: r.SecureContext, FellBack: r.FellBack,
 		State: r.State, CreatedAt: r.CreatedAt, ExpiresAt: r.ExpiresAt,
 		Remaining: left.Round(time.Second).String(), Seconds: int64(left.Seconds()),
 		PID: r.PID, Alive: pidAlive(r.PID), Expired: time.Now().After(r.ExpiresAt),

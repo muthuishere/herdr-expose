@@ -6,6 +6,10 @@ ban). Its **provider parity** clause is narrowed by
 provider now, so parity is a property of the ladder rather than a claim about
 two implementations.
 
+> **Superseded by [ADR 0038](0038-no-tunnel-the-lan-is-the-top-rung.md).** The quick rung is gone;
+> `--quick` is refused rather than downgraded. Kept for the provider-parity reasoning that
+> ADR 0034 then disproved by measurement.
+
 ## Context
 
 ADR 0005 deleted the quick-tunnel path entirely: no `*.trycloudflare.com`, not

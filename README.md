@@ -25,7 +25,7 @@ binary, the Herdr plugin, and the skill.
 </p>
 
 <p align="center">
-  <em>A real session through a real tunnel — nothing staged. An agent stops to
+  <em>A real session over a real network — nothing staged. An agent stops to
   ask whether it may overwrite a file, and gets answered from a phone.</em>
 </p>
 
@@ -70,7 +70,7 @@ Or skip the sharing and just open it locally: `herdr-expose daemon` then
 | **Answer it** | Type a reply, or tap y/n when it's blocked on a question |
 | **Give someone a link** | `herdr-expose share` — one session, pairing-gated, gone when it expires. Not SSH to your laptop forever |
 | **Reach your own machines** | `herdr-expose share --all` — every session on this box, from any device on the network |
-| **Reach it from anywhere** | `--quick` for a throwaway `trycloudflare.com` URL, `--domain yours.com` for your own |
+| **Reach it from anywhere** | Point a tunnel at the port — `cftunnel add 21118 herdr`, ngrok, tailscale, an SSH forward. herdr-expose serves loopback and the LAN; it does not raise tunnels ([why](docs/adr/0038-no-tunnel-the-lan-is-the-top-rung.md)) |
 | **Stop everything** | `herdr-expose panic` |
 
 **Looking at a pane doesn't touch it.** Opening one on your phone can't resize
@@ -104,7 +104,7 @@ never answered for it, and a hop limit stops two agents replying forever.
 
 A peer is just a URL and that machine's messaging token
 (`herdr-expose msg token`). How the URL is reachable is your choice: a LAN
-address, a `--domain` tunnel, or anything that forwards HTTP. The messaging
+address, a tunnel you run, or anything else that forwards HTTP. The messaging
 token is separate from share links, so a link for watching a pane can never
 send messages.
 
@@ -140,17 +140,21 @@ The row that matters is the first one.
 | **Who starts the share** | **The agent — you say "share this"** | You do | You do | You do | You do — scan a QR |
 | **Ships an agent skill** | **Yes — `herdr-share`** | No — terminal proxy, no skill or MCP | No | No | n/a |
 | **Account or relay** | **None — your own network, direct** | None | Relay + account, $9/mo; plaintext on their servers unless self-hosted | Free relay, E2E encrypted, self-hostable | Through Anthropic's servers |
-| **On a name you own** | **`--domain yours.com`** — your Cloudflare; expiry deletes the DNS record and tunnel it made | Bring your own tunnel, by hand | Their hostname | Their hostname | No |
+| **On a name you own** | Bring your own tunnel — one command (`cftunnel add 21118 herdr`), but yours to run | Bring your own tunnel, by hand | Their hostname | Their hostname | No |
 | **Windows** | **Yes** — verified on real hardware, no Administrator rights | "Windows is not yet supported" | not claimed | Yes | Through WSL |
 | **Agents it covers** | 21 kinds Herdr detects, plus any plain shell | Any terminal | Claude Code | Claude Code and Codex | Claude Code only |
 | **What a link exposes** | **One session** — pairing-gated, expires on its own | Server-wide auth; no per-session expiry documented | Your account's sessions | Your account's sessions | The session you paired |
 | **What it costs you** | It needs Herdr | — | $9/mo | — | A Pro or Max plan |
 
-Two rows are deliberately not a clean sweep. **Happy Coder runs on Windows
-too** — VibeTunnel is the one that says it does not — and **herdr-expose is the
-only one here that needs another tool installed**, namely Herdr, which the rest
-do not. A comparison you can catch out on one row is worth nothing on the
-others, so those stay in. Everything above is from each project's own
+Three rows are deliberately not a clean sweep. **Happy Coder runs on Windows
+too** — VibeTunnel is the one that says it does not. **herdr-expose is the only
+one here that needs another tool installed**, namely Herdr, which the rest do
+not. And on *"on a name you own"* it is now level with VibeTunnel rather than
+ahead of it: herdr-expose used to provision a Cloudflare tunnel for you and
+that code has been deleted on purpose, because a binary that reads your agent
+sessions is the wrong place to keep it (ADR 0038). You get a hostname with one
+extra command instead of none. A comparison you can catch out on one row is
+worth nothing on the others, so those stay in. Everything above is from each project's own
 documentation as of September 2026; check it before you believe it.
 
 ---

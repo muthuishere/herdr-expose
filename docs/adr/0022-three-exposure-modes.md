@@ -2,6 +2,10 @@
 
 Status: Accepted (relaxes ADR 0004's loopback-only rule, deliberately)
 
+> **Amended by [ADR 0038](0038-no-tunnel-the-lan-is-the-top-rung.md).** Two modes, not three: the
+> `cloudflare` mode is gone. Everything this ADR says about `local`, `lan` and the
+> non-settable `bind` key still stands.
+
 ## Context
 
 ADR 0004 said: bind `127.0.0.1`, always, and reach it remotely only through a
