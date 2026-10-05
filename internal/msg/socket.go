@@ -150,3 +150,30 @@ func (s Socket) Prompt(ctx context.Context, session, target, text string) (strin
 	}
 	return "", err
 }
+
+// Screen reads the tail of a pane's buffer over the socket.
+//
+// `pane.read` takes a pane id, a source and a line count, and NO geometry — so
+// reading a screen to work out whether an agent stopped on an error cannot
+// resize the pane it is reading. Same rule as everything else here.
+func (s Socket) Screen(ctx context.Context, session, pane string, lines int) (string, error) {
+	c := s.Client(session)
+	if c == nil {
+		return "", fmt.Errorf("no session %q", session)
+	}
+	cctx, cancel := context.WithTimeout(ctx, callTimeout)
+	defer cancel()
+	var res struct {
+		Read struct {
+			Text string `json:"text"`
+		} `json:"read"`
+	}
+	params := map[string]any{
+		"pane_id": pane, "source": "recent_unwrapped", "format": "text",
+		"strip_ansi": true, "lines": lines,
+	}
+	if err := c.CallInto(cctx, "pane.read", params, &res); err != nil {
+		return "", err
+	}
+	return res.Read.Text, nil
+}

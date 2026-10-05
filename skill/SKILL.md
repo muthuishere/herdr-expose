@@ -606,9 +606,38 @@ address and is pairing-gated — mint a code with `share pair <id>`, `POST
 /v1/pair {"code","name"}` once to exchange it for a device token, then send
 `Authorization: Bearer <token>`. The token expires with the share.
 
+## Knowing what is running before you share it
+
+A share exposes a SESSION, so the first question is which session, and the
+second is whether anything in it is worth looking at.
+
+```bash
+herdr-expose whoami     # which session and pane this shell is in
+herdr-expose agents     # what every agent on this machine is doing
+```
+
+`agents` separates five states that `msg agents` runs together: `working`
+(mid-turn), `idle` (free), `blocked` (stopped on a dialog **a human** must
+answer), `error` (idle because something broke — Herdr calls this "idle" too),
+and `unknown` (no agent status, usually a plain shell). It also reports how
+long each has been idle, which ones are safe to close, and each agent's
+`collaborators` — the free agents in the same session, who share a workspace
+and are therefore the cheap ones to hand work to.
+
+Two uses when sharing:
+
+- **Pick the session that is actually busy.** `herdr-expose agents --json` and
+  group by session; sharing a session where everything is idle wastes the
+  owner's attention.
+- **Say what the owner will find.** "Shared `deemwar-one-os` — 1 agent blocked
+  on a dialog, 3 working" is a useful message. A bare URL is not.
+
+`--all` still needs the owner's yes in this conversation. Knowing what is
+running is not permission to expose it.
+
 ## Verbs this skill does NOT cover
 
-`serve`, `daemon`, `stop`, `open`, `pair`, `devices`, `install-service`,
+`serve`, `daemon`, `stop`, `open`, `pair`, `devices`, `token`, `install-service`,
 `uninstall-service`, `service`, `config`, `version` — those are the **permanent
 deployment**, not sharing. Touch them only when the owner is clearly talking
 about the daemon itself. In particular `herdr-expose stop` stops the main

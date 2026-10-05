@@ -20,7 +20,8 @@ import (
 //	POST /v1/messages/{id}/reply     {from, body} → response
 
 func isMsgPath(p string) bool {
-	return p == "/v1/agents" || p == "/v1/messages" || strings.HasPrefix(p, "/v1/messages/")
+	return p == "/v1/agents" || p == "/v1/inventory" ||
+		p == "/v1/messages" || strings.HasPrefix(p, "/v1/messages/")
 }
 
 func (s *Server) msgAuthorized(r *http.Request) bool {
@@ -55,6 +56,21 @@ func (s *Server) handleMsg(w http.ResponseWriter, r *http.Request) {
 			agents = []msg.Agent{}
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"machine": s.msg.Machine, "agents": agents})
+
+	case path == "/v1/inventory" && r.Method == http.MethodGet:
+		// Who is working, who is free, who stopped on an error, and who has
+		// done nothing long enough to be worth closing. `agents` says what
+		// EXISTS; this says what it MEANS, which is what a caller acts on.
+		if s.Inventory == nil {
+			jsonErr(w, http.StatusNotFound, "inventory is not enabled")
+			return
+		}
+		sum, err := s.Inventory(r.Context(), r.URL.Query().Get("self"))
+		if err != nil {
+			jsonErr(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, sum)
 
 	case path == "/v1/messages" && r.Method == http.MethodPost:
 		var in struct {

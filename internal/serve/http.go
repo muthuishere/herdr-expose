@@ -57,13 +57,15 @@ type Server struct {
 	// chatStatus is Options.ChatStatus; nil when chat is not wired.
 	chatStatus func() any
 	// Peer resolves a saved peer for upload forwarding; nil when none.
-	Peer     PeerResolver
-	auth     *Auth
-	log      Logger
-	slog     *slog.Logger
-	static   fs.FS
-	exposure Exposure
-	upgrader websocket.Upgrader
+	Peer PeerResolver
+	// Inventory answers /v1/inventory; nil when not wired.
+	Inventory func(ctx context.Context, self string) (any, error)
+	auth      *Auth
+	log       Logger
+	slog      *slog.Logger
+	static    fs.FS
+	exposure  Exposure
+	upgrader  websocket.Upgrader
 	// conns gates WebSocket handshakes per proven identity, with concurrency
 	// caps as the backstop. See connlimit.go.
 	conns *connGate
@@ -85,6 +87,10 @@ type Options struct {
 	// Msg enables the messaging API; MsgToken is the only token it accepts.
 	Msg      *msg.Service
 	MsgToken string
+
+	// Inventory answers /v1/inventory: what every agent on this machine is
+	// actually doing. A function, because the answer is a live reading.
+	Inventory func(ctx context.Context, self string) (any, error)
 
 	// Peer resolves a saved peer machine for upload forwarding, or nil when
 	// this machine has none. An image for a pane on another box has to be
@@ -131,6 +137,7 @@ func New(o Options) (*Server, error) {
 		msgToken:   o.MsgToken,
 		chatStatus: o.ChatStatus,
 		Peer:       o.Peer,
+		Inventory:  o.Inventory,
 		conns:      newConnGate(),
 		addr:       net.JoinHostPort(bind, fmt.Sprint(o.Config.Port())),
 	}
@@ -173,6 +180,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/v1/stream", s.handleStream)
 	mux.HandleFunc("/v1/uploads", s.handleUpload)
 	mux.HandleFunc("/v1/agents", s.handleMsg)
+	mux.HandleFunc("/v1/inventory", s.handleMsg)
 	mux.HandleFunc("/v1/messages", s.handleMsg)
 	mux.HandleFunc("/v1/messages/", s.handleMsg)
 	mux.Handle("/", s.staticHandler())

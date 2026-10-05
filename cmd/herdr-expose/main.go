@@ -24,6 +24,7 @@ import (
 	"github.com/muthuishere/herdr-expose/internal/config"
 	"github.com/muthuishere/herdr-expose/internal/core"
 	"github.com/muthuishere/herdr-expose/internal/expose"
+	"github.com/muthuishere/herdr-expose/internal/inventory"
 	"github.com/muthuishere/herdr-expose/internal/msg"
 	"github.com/muthuishere/herdr-expose/internal/platform"
 	"github.com/muthuishere/herdr-expose/internal/serve"
@@ -78,6 +79,10 @@ func main() {
 		fmt.Println("herdr-expose", version)
 	case "token":
 		err = cmdToken(os.Args[2:])
+	case "agents":
+		err = cmdAgents(os.Args[2:])
+	case "whoami":
+		err = cmdWhoami(os.Args[2:])
 	case "msg":
 		err = runMsg(os.Args[2:])
 	case "chat":
@@ -120,6 +125,12 @@ func usage() {
                         unit's stderr is the journal, and a credential does not
                         belong in a log. Rotating invalidates the old server
                         token; paired devices keep working.
+  agents [--state S] [--json]
+                        what every agent on this machine is DOING: working,
+                        free, blocked on a dialog a human must answer, or
+                        stopped because something broke. Says how long each has
+                        been idle and which are safe to close.
+  whoami [--json]       which agent and which session this shell is in
   msg ...               message agents here and on peer machines (msg for help)
   skill install | uninstall | status
                         link this checkout's skill/ into ~/.claude/skills (and
@@ -404,6 +415,40 @@ func cmdServe(args []string) error {
 	msgSvc.Log = log
 	go msgSvc.Run(ctx, 2*time.Second)
 
+	// The inventory needs to WATCH, not just ask. Herdr reports "idle", never
+	// "idle since 9:14", so "this pane has done nothing for three hours" can
+	// only be known by something that was here the whole time. The daemon was,
+	// so it keeps the clock: one attach-free agent.list per round, which is
+	// cheap and is the same call messaging already makes.
+	invTracker := inventory.NewTracker()
+	invSource := msg.InventorySource{Herdr: msgSvc.Herdr}
+	if sock, ok := msgSvc.Herdr.(msg.Socket); ok {
+		invSource.Reader = sock.Screen
+	}
+	go func() {
+		t := time.NewTicker(inventoryInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+			ictx, cancel := context.WithTimeout(ctx, 20*time.Second)
+			if _, err := inventory.Collect(ictx, invSource, invTracker, ""); err != nil {
+				log.Debug("inventory round failed", "err", err)
+			}
+			cancel()
+		}
+	}()
+	inventoryFn := func(ctx context.Context, self string) (any, error) {
+		agents, err := inventory.Collect(ctx, invSource, invTracker, self)
+		if err != nil {
+			return nil, err
+		}
+		return inventory.Summarise(msgSvc.Machine, nil, agents), nil
+	}
+
 	// Write the bundled adapters out where they can be read and edited. It
 	// NEVER overwrites, so an edited adapter survives every upgrade, and it
 	// does not enable anything: there is now a telegram.js on disk and
@@ -431,15 +476,16 @@ func cmdServe(args []string) error {
 	chatMgr.Start(ctx, cfg.Chat)
 
 	srv, err := serve.New(serve.Options{
-		Version:  version,
-		Config:   adapter,
-		Hub:      hub,
-		Auth:     auth,
-		Log:      log,
-		Static:   webFS(), // nil unless workstream D wired an embedded bundle
-		Exposure: exposeAdapter{mgr},
-		Msg:      msgSvc,
-		MsgToken: msgTok,
+		Version:   version,
+		Config:    adapter,
+		Hub:       hub,
+		Auth:      auth,
+		Log:       log,
+		Static:    webFS(), // nil unless workstream D wired an embedded bundle
+		Exposure:  exposeAdapter{mgr},
+		Msg:       msgSvc,
+		MsgToken:  msgTok,
+		Inventory: inventoryFn,
 		// An image for a pane on another machine must be WRITTEN on that
 		// machine, so the path the agent is handed names a file it can open.
 		// Peers are already reachable over authenticated HTTP, which is what
@@ -1194,3 +1240,9 @@ func superviseExposure(ctx context.Context, mgr *expose.Manager, state string, l
 		}
 	}
 }
+
+// inventoryInterval is how often the daemon re-reads what every agent is
+// doing, so it can say how long one has been idle. agent.list is attach-free
+// and costs a fraction of a millisecond, so this is cheap; what it buys is a
+// clock nobody else keeps.
+const inventoryInterval = 20 * time.Second

@@ -12,6 +12,16 @@ to reach any of them. It sees every agent kind, not just Claude sessions.
 **Use this, not Claude's `ListAgents` / `SendMessage`, for anything running in
 Herdr.** Those only see Claude sessions on this machine.
 
+## Know where you are first
+
+```bash
+herdr-expose whoami
+```
+
+Your own session and pane. You cannot address colleagues without it, and you
+cannot avoid messaging YOURSELF without it either — a message to your own
+address comes back to you and waits for a reply you are supposed to send.
+
 ## Find agents
 
 ```bash
@@ -21,6 +31,41 @@ herdr-expose msg agents --all    # plus every peer machine
 
 The address is the first column: `session/name` here, `peer:session/name` on a
 peer. An agent with no name is addressed by its pane id (`session/w1:p2`).
+
+## Find the RIGHT agent
+
+`msg agents` lists what exists. `agents` says what it means, which is what you
+act on:
+
+```bash
+herdr-expose agents                     # everyone, sorted by who needs attention
+herdr-expose agents --state idle        # free to take work
+herdr-expose agents --state blocked     # waiting on a human
+herdr-expose agents --state error       # stopped because something BROKE
+herdr-expose agents --json              # the same, for a program
+```
+
+Five states, and they are not interchangeable:
+
+| state | what it means | what to do |
+|---|---|---|
+| `working` | mid-turn | leave it alone; a prompt now queues behind its turn |
+| `idle` | finished, waiting | free — this is who you ask |
+| `blocked` | stopped on a dialog | **a human answers it.** Do not try; you cannot see the dialog, and guessing at a permission prompt is answering on somebody's behalf |
+| `error` | idle BECAUSE something broke | read `error` for the line that says so, then decide. Herdr calls this "idle" too, which is why it is worth separating |
+| `unknown` | Herdr reports no agent status | usually a plain shell pane, not a fault |
+
+**Who can help.** Each agent carries `collaborators`: the free agents in the
+SAME session. Same session means a shared workspace and panes they can see, so
+they are the cheap ones to ask — no file copying, no explaining where things
+are. Prefer one of those over an agent in another session.
+
+**What can be closed.** `closable` is true for an agent idle longer than 30
+minutes with nothing in flight, and `reason` says how long. It is a
+SUGGESTION, not an instruction: closing a pane is the owner's call, so report
+the list rather than acting on it. An agent whose idle time is unknown — the
+daemon started recently and has not watched it long enough — is never
+suggested, because "I have no idea" must not read as "safe to close".
 
 ## Ask an agent something
 
