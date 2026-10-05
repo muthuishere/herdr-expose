@@ -12,8 +12,8 @@
  * LATENCY MODEL (SPEC F2.5 — measure, do not assert): every emission is held
  * for rtt/2 and every inbound message is treated as having already spent rtt/2
  * in flight, so a keystroke's echo comes back at ~rtt and ping/pong reads ~rtt
- * too. Override with `?rtt=150` on the URL; default 90ms, roughly a Cloudflare
- * quick tunnel. `?rtt=0` gives the LAN-ish baseline.
+ * too. Override with `?rtt=150` on the URL; default 90ms, roughly a tunnel
+ * hop. `?rtt=0` gives the LAN-ish baseline.
  */
 
 import {
@@ -141,16 +141,16 @@ const PANES: MockPane[] = [
       id: 'agent-3',
       kind: 'codex',
       state: 'blocked',
-      summary: 'Waiting: overwrite adapters/ngrok.js?',
+      summary: 'Waiting: overwrite adapters/chat/telegram.js?',
     },
     detection: [
-      `${C.bold}adapters/ngrok.js${C.reset} already exists and has local changes.`,
+      `${C.bold}adapters/chat/telegram.js${C.reset} already exists and has local changes.`,
       ``,
       `  ${C.yellow}1${C.reset}) Overwrite it`,
       `  ${C.yellow}2${C.reset}) Keep mine, write ngrok.new.js`,
       `  ${C.yellow}3${C.reset}) Show me the diff first`,
       ``,
-      `${C.cyan}?${C.reset} Overwrite adapters/ngrok.js? ${C.grey}(y/N)${C.reset} `,
+      `${C.cyan}?${C.reset} Overwrite adapters/chat/telegram.js? ${C.grey}(y/N)${C.reset} `,
     ].join('\r\n'),
   }),
   pane({
@@ -251,7 +251,7 @@ class MockSocket implements Transport {
       this.onmessage?.({ data })
       return
     }
-    // Jitter the tail slightly; a real tunnel is not a constant.
+    // Jitter the tail slightly; a real network is not a constant.
     const jitter = Math.random() < 0.08 ? half * (1 + Math.random() * 2) : half
     setTimeout(() => {
       if (!this.closedFlag) this.onmessage?.({ data })

@@ -17,9 +17,9 @@ That is the whole thing. It builds, sets up, asserts, and tears down.
 2. Starts its **own** throwaway Herdr session (`hexe2e-<n>`), with three panes:
    an agent pane (`claude`), and two plain shells.
 3. Asserts the AMENDMENTS 16 default: a BARE `share` (no transport flag) must
-   resolve to the **lan** rung — a plain-HTTP LAN URL, no tunnel process, no
-   Cloudflare credentials, no DNS — even though `[expose]` on this machine has
-   a domain configured. That share is revoked immediately.
+   resolve to the **lan** rung — a plain-HTTP LAN URL, answering, with no
+   subprocess and no provider state — even though `[expose]` on this machine
+   still carries the dead tunnel keys. That share is revoked immediately.
 4. `share --lan --hours 1` on that session only, and mints a pairing code.
 5. Drives Chromium through the pairing screen, the `?pair=` deep link, the pane
    tree, the terminal, typing, the blocked-agent panel, a 65-second idle soak
@@ -86,10 +86,10 @@ It only ever touches what it created:
 - the session name is forced to start with `hexe2e-`;
 - every `herdr` call is pinned to that session's socket by environment;
 - every share it creates is LAN-or-lower, scoped with `--session`, and expires
-  in an hour — it never raises a tunnel and never touches DNS;
+  in an hour, and it raises nothing but a listener;
 - teardown revokes the share, stops only its own server, and reports (does not
   kill) anything left holding the session name;
 - afterwards it checks that the daemon on `:21118` still answers `/healthz`.
 
 It never stops a Herdr server it did not start, never restarts the daemon, and
-never goes near the permanent tunnel.
+never goes near the permanent daemon.

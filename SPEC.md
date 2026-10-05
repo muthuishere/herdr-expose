@@ -112,6 +112,11 @@ keys take defaults. Never write the token to logs or to `/v1/config`.
 
 ## 6. Exposure adapters — JS on embedded goja (workstream C)
 
+> **WITHDRAWN by AMENDMENTS 22.** There is no adapter host and no tunnel. This
+> section, A2 and the whole of AMENDMENTS 3, 15 and 18 describe software that
+> was deleted; they are kept as the record of how the contract got here. Do not
+> implement them.
+
 > **SUPERSEDED** by AMENDMENTS 3. Cloudflare is built in; JS adapters are the escape hatch only.
 
 An adapter is a JS file exporting three functions. The Go side runs it in goja;
@@ -212,6 +217,8 @@ Enable per-message deflate. Terminal output compresses ~10x and that is what
 makes a tunnel usable on cellular.
 
 ## A2. Cloudflare is FIRST-CLASS, not a JS adapter (replaces §6's default path)
+
+> **WITHDRAWN by AMENDMENTS 22.**
 
 The common case must be two lines of config and zero JavaScript:
 
@@ -420,6 +427,10 @@ crediting it plainly.
 
 # AMENDMENTS 3 — STATIC DOMAIN ONLY (supersedes A2 and all prior expose text)
 
+> **WITHDRAWN WHOLE by AMENDMENTS 22** (C1–C4). The reasoning in C1 and the
+> `cloudflared login` argument in C2 are still worth reading; the software is
+> gone.
+
 Owner's direction, verbatim intent: the tunnel is STATIC, on HIS domain, built
 from Go using the Cloudflare token + the cloudflared CLI + the domain name.
 
@@ -565,6 +576,8 @@ Owner's direction: "if cloudflared is not there let it expose everywhere so
 people in wifi and all they can connect."
 
 ## E1. Three exposure modes, resolved in this order
+
+> **NARROWED to two by AMENDMENTS 22** (`local`, `lan`). E2 and E3 stand.
 
 1. **cloudflare** — `cloudflare = true` AND `domain` set AND the cloudflared
    binary is resolvable. Public, static domain. Binds 127.0.0.1; the tunnel is
@@ -756,6 +769,8 @@ One share = one process = one port = one domain = one scope. Killing a share
 cannot affect the main instance or another share.
 
 ## G4. Ephemeral DNS — this is the ONE exception to AMENDMENTS 3
+
+> **WITHDRAWN by AMENDMENTS 22.** A share creates no DNS record.
 
 C1 said tunnels are static and `stop` never removes DNS. That rule exists so a
 PERMANENT endpoint keeps a stable hostname. A share is the opposite: it is
@@ -1074,6 +1089,8 @@ upstream traffic.
 
 # AMENDMENTS 15 — quick tunnels come back, for SHARES only
 
+> **WITHDRAWN WHOLE by AMENDMENTS 22** (K1–K3).
+
 Owner: "sometimes just cloudflare is enough and sometimes domain."
 
 AMENDMENTS 3 (C1) deleted the quick-tunnel path outright. That was right for the
@@ -1141,6 +1158,8 @@ thing the user asked for.
 
 ## L1. Four rungs, each one an explicit request
 
+> **NARROWED to two rungs by AMENDMENTS 22.** L2 and L3 stand unchanged.
+
 | rung | flag | reach |
 |---|---|---|
 | **local** (DEFAULT) | none | `http://127.0.0.1:<port>` — this machine only |
@@ -1205,6 +1224,9 @@ be configured. Fallback degrades downward on an explicit ask, never upward.
 ---
 
 # AMENDMENTS 18 — one built-in transport. Everything else is an adapter.
+
+> **WITHDRAWN WHOLE by AMENDMENTS 22** (M1–M5). M2's argument — unverified
+> surface is not a feature — is what AMENDMENTS 22 carries to its conclusion.
 
 Owner: "no need ngrok — cloudflare is enough."
 
@@ -1434,3 +1456,114 @@ code was correct with respect to a rule that had already been superseded.
 told an unauthenticated scanner what was behind a public URL. `auth_required`,
 `authenticated`, `targets.format` and `targets.separator` stay public, because a
 client legitimately needs them before it can pair.
+
+---
+
+# AMENDMENTS 22 — there is no tunnel. The LAN is the top rung.
+
+**WITHDRAWS** §6 (exposure adapters on goja), A2 (Cloudflare is first-class),
+AMENDMENTS 3 whole (C1–C4: static domain, API provisioning, preflight, ngrok and
+JS adapters), G4 (ephemeral DNS for shares), AMENDMENTS 15 whole (K1–K3: quick
+tunnels for shares) and AMENDMENTS 18 whole (M1–M5: one built-in transport).
+**NARROWS** E1 to two modes and L1 to two rungs. **LEAVES STANDING** E2, E3, F1,
+G1–G3, G5, G6, AMENDMENTS 10, 16's L2/L3 and 17 — which now carry the whole of
+exposure between them.
+
+Everything above about tunnels, providers, adapters, zones, DNS records and
+`cloudflared` describes software that no longer exists. It is kept because this
+file is the record of how the contract got here, and because the reasoning in
+C1 (a hostname that changes breaks PWA installs and origin-bound tokens) and
+M2 (unverified surface is not a feature) is still correct and still load-bearing
+elsewhere. Do not implement any of it.
+
+## P1. Two modes, two rungs, and nothing above them
+
+```
+local   127.0.0.1:<port>         this machine only          <- the DAEMON's default
+lan     http://<lan-ip>:<port>   this machine + this network <- a SHARE's default
+```
+
+`internal/expose.Resolve` is a pure function of the `[expose]` table and the
+port. It shells out to nothing, probes for nothing and can fail in no way. The
+`binaryFound` parameter stays in its signature and is ignored, so every caller
+and test that passes a stub keeps compiling; `Resolution.FellBack` is always
+empty on a fresh resolve and is kept only because a share RECORD written by an
+older build can carry one.
+
+`config.Rung` keeps its ORDER rather than collapsing into a bool. The invariant
+of 16/L2 is a comparison — "resolved ≤ requested" — and it is checked at the one
+place every create passes through. Two rungs do not need an ordering; the
+invariant does, and it must still hold if a rung is ever added back.
+
+`RungOf` keeps a default arm that answers `RungLAN`, for exactly one input: a
+mode string this build has never heard of, read from a share record written
+before this amendment. An unknown mode must never sort SAFER than it is.
+
+## P2. Reaching it from outside the network is not this binary's job
+
+A tunnel, a VPN or an SSH forward pointed at the port. On the machine this was
+built on that is one command — `cftunnel add 21118 herdr` — and the product
+names it in errors and docs because it is what is installed here, not because it
+is privileged.
+
+The argument is not line count, it is blast radius. This binary reads and writes
+the owner's agent sessions and runs arbitrary commands inside them. A tunnel in
+the same process means every bug in the tunnel can reach the sessions and every
+bug in the sessions can be reached from the internet. A separate process that
+forwards a TCP port cannot forward a pane. ADR 0038 has the full argument and
+the inventory of what was deleted.
+
+## P3. Nothing fails silently — this is the normative part
+
+An amputation's whole risk is a request that is accepted and then not honoured.
+So:
+
+1. `--quick`, `--domain` and `--provider` are **REFUSED** with an error naming
+   the replacement. They are never treated as a LAN share. A share that
+   publishes nothing while reporting success is discovered by the person the
+   link was sent to, which is the worst possible moment.
+2. A config still carrying `cloudflare`, `domain`, `tunnel_name`, `tunnel`,
+   `adapter` or `[[expose.adapters]]` still **LOADS**. An upgrade that refuses
+   to start is the one failure a user cannot work around. The keys are parsed
+   for the sole purpose of being reported: `Expose.DeadKeys()` names them,
+   startup logs them once with what is being served instead, and `Save` drops
+   them on the next rewrite — the treatment the withdrawn `ngrok` key already
+   had under M5.
+3. `[share] default_mode = "quick"` or `"domain"` reads as `lan`, and
+   `config.DeadShareMode` reports it so startup and `share` can say so. A
+   withdrawn value that silently means the opposite of what it says is worse
+   than one that is rejected.
+4. A share **record** on a withdrawn rung is refused by the instance, not
+   downgraded. `share restore` runs on every daemon start, so such a record
+   will be handed to `share run`; returning it on a LAN address under the same
+   id would be a different share wearing its name, with `share list` printing a
+   URL that was public yesterday and paired tokens that no longer match its
+   origin. It stays revocable.
+5. `panic` no longer claims to stop anything it cannot. It had been raising an
+   `EXPOSE-HALT` flag that the tunnel supervisor used to poll; with the
+   supervisor gone, nothing read that path and the command reported success for
+   doing nothing. It now revokes every share and states what it does not touch:
+   the daemon's own listener (`herdr-expose stop`) and anything outside this
+   binary that is publishing the port.
+
+## P4. Teardown is three facts
+
+`process_gone`, `port_free`, `state_wiped` — each verified by re-reading the
+world, never assumed. `dns_gone`, `tunnel_gone` and `cloudflare_not_applicable`
+are removed from the JSON: they reported on resources that can no longer exist,
+and a field that is always `true` tells a reader nothing except that somebody
+once worried. `share list --json` gains `port`, because pointing a tunnel at a
+share is now the documented way to reach it and that needs the port rather than
+a `host:port` parsed out of a URL the DHCP lease can move.
+
+## P5. What did NOT change
+
+Auth is mandatory on every rung (B5). The pairing code is minted locally and
+shown only on the physically-present machine — no HTTP endpoint mints or
+displays one (E2) — which is the only reason `lan = true` was ever acceptable
+and is now the only reason a tunnel somebody else points at the port is
+acceptable either. Loopback still swaps the device token for a strict Origin
+allowlist and Host pinning rather than removing it (F1). A share is still a
+separate scoped process (G3), still server-side scoped (G2), still expired three
+ways (G5) and still pairing-gated (G6). Chat adapters (`[[chat.adapters]]`) are
+a different table answering a different contract and are untouched.

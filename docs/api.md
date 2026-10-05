@@ -64,26 +64,32 @@ and disappear while the server runs — a session going down marks its entry
 This API can run arbitrary commands on the machine hosting it. `pane.run` and
 `agent.prompt` are, by design, remote code execution as the logged-in user.
 
-The server runs in one of **four exposure modes**, and the mode decides both the
+The server runs in one of **two exposure modes**, and the mode decides both the
 bind address and whether you need a token.
 
 **The mode is always something a human asked for** (AMENDMENTS 16). The ladder —
-`local` -> `lan` -> `quick` -> `cloudflare` — is climbed only by an explicit
-flag or config key, never automatically: the daemon defaults to `local`, a
-`share` defaults to `lan`, and nothing escalates above what was requested. A
-failed explicit request for a tunnel may degrade DOWN to `lan`, with the reason
-in `fell_back`. As a client, read `mode` from `GET /v1/config`; never infer
-reach from the URL you were handed. **`secure_context` is NOT a field on
-`/v1/config`** — it is reported by `herdr-expose status`, `herdr-expose expose
-status --json` and `herdr-expose share list --json`, and in a browser you simply
-read `window.isSecureContext`.
+`local` -> `lan` — is climbed only by an explicit flag or config key, never
+automatically: the daemon defaults to `local`, a `share` defaults to `lan`, and
+nothing escalates above what was requested. As a client, read `mode` from
+`GET /v1/config`; never infer reach from the URL you were handed.
+**`secure_context` is NOT a field on `/v1/config`** — it is reported by
+`herdr-expose status` and `herdr-expose share list --json`, and in a browser you
+simply read `window.isSecureContext`.
+
+> **The server never terminates TLS and never raises a tunnel.** If you reached
+> it over `https://`, something in front of it did that — a tunnel or reverse
+> proxy the operator runs ([ADR 0038](adr/0038-no-tunnel-the-lan-is-the-top-rung.md)).
+> This matters to you in three ways: `mode` describes the **origin server's**
+> bind, not your path to it, so an `https` client can legitimately see
+> `mode: "lan"`; `secure_context` is likewise about the server's own URL, so
+> trust `window.isSecureContext` over it for your own page; and the proxy
+> collapses every client to one remote address, which is why per-IP limits are
+> keyed on the proved token instead.
 
 | mode | bind | device token | Origin + Host pinning | secure context |
 |---|---|---|---|---|
 | `local` | `127.0.0.1` | **not** required | required | yes (`localhost` is exempt) |
 | `lan` | `0.0.0.0` | **required** | required | **no** |
-| `quick` | `127.0.0.1` + tunnel | **required** | required | yes |
-| `cloudflare` | `127.0.0.1` + tunnel | **required** | required | yes |
 
 - **`local`** — the **daemon's** default, and `herdr-expose share --local`.
   Anyone who can reach loopback already has shell on the box, so no token is
@@ -99,20 +105,17 @@ read `window.isSecureContext`.
   worker does not register and
   the PWA cannot be installed**. Your client must detect this and not offer an
   install prompt that cannot work. A native mobile client is unaffected.
-- **`quick`** — loopback plus an ephemeral TryCloudflare tunnel on a random
-  `*.trycloudflare.com` hostname. https, so a secure context, and a device token
-  is mandatory exactly as everywhere else: **an unguessable hostname is not a
-  credential.** It exists only for `herdr-expose share`, never for the permanent
-  deployment. The hostname is **new on every share**, and device tokens are
-  origin-bound, so a client that stored one for a previous quick URL must pair
-  again rather than retry — treat the `401` as "return to pairing". Do not offer
-  a persistent "Add to Home Screen" for a `quick` URL: the install would be
-  pinned to a hostname that stops existing when the share expires.
-- **`cloudflare`** — loopback plus a static, API-provisioned tunnel on the user's
-  own domain. The permanent deployment is ALWAYS this mode and never ephemeral:
-  a hostname that changes on restart breaks PWA installs, bookmarks and
-  origin-bound device tokens, which is precisely why `quick` is confined to
-  time-boxed shares.
+**If a proxy is in front of the server**, two rules still bind you, and they are
+the ones the removed `quick` and `cloudflare` modes used to teach:
+
+- **An unguessable hostname is not a credential.** A device token is mandatory
+  on every path that is not loopback, whatever the URL looks like.
+- **Device tokens are origin-bound.** A token stored against one hostname means
+  nothing at another, so a client that followed a URL change must **pair again
+  rather than retry** — treat the `401` as "return to pairing", not as a
+  transient error. Only offer a persistent "Add to Home Screen" against a
+  hostname the operator says is stable; an install pinned to a throwaway
+  hostname breaks silently when that hostname stops existing.
 
 Read `mode` from `/v1/config`; never infer it from the URL. For secure-context,
 use `window.isSecureContext` (browser) or the `secure_context` field of
@@ -152,7 +155,7 @@ for *watching* a pane, and must never be able to type into one.
 ### `GET /healthz`
 
 Liveness, and it answers **two different bodies** depending on who is asking.
-That is deliberate: an anonymous prober behind a tunnel learns only that
+That is deliberate: an anonymous prober learns only that
 something herdr-shaped is alive, while an authenticated client (or a loopback
 caller under the local-mode bypass, which is what `status` and `doctor` use)
 gets the operational detail.
@@ -223,8 +226,9 @@ secret.** Send your bearer token anyway when you have one — it is what makes
 > because a client needs them *before* it can pair. Do not treat a missing
 > `scope` as "one session": it means either unauthenticated, or no restriction.
 
-- `mode` is `local`, `lan`, `quick`, `cloudflare` or `js` (`js` is a JS
-  adapter — the escape hatch for any transport that is not built in).
+- `mode` is `local` or `lan`. A client written against an older server may also
+  see `quick`, `cloudflare` or `js`; treat any unrecognised mode as "at least as
+  exposed as `lan`" and require a token, which is what the server itself does.
 - **`auth_required` and `authenticated` are the two fields that matter most**,
   and they exist for one reason: a browser **cannot read the status of a failed
   WebSocket handshake**. The WebSocket API surfaces no close code when the
@@ -239,9 +243,10 @@ secret.** Send your bearer token anyway when you have one — it is what makes
   there is no scope, so the instance is the ordinary multi-session server —
   time-boxed and pairing-gated, but not narrowed. Do not read a missing `scope`
   as "one session"; read it as "no restriction".
-- `exposure` is present only when a tunnel is up, and `exposure.url` is the
-  public URL. In `quick` mode the edge assigns that hostname at start, so read
-  it and do not remember it.
+- `exposure.url` is the URL the SERVER knows it is reachable at: loopback, or
+  the LAN address in `lan` mode. It is re-resolved on network change, so read it
+  rather than remembering it. It is **not** the URL you arrived on if a proxy is
+  in front — the server cannot see that, and does not guess.
 - There is **no `features` array, no `secure_context` and no `public_url`** in
   this body — earlier drafts of this document claimed all three. Secure-context
   is something you determine yourself (`window.isSecureContext`, or simply:
@@ -411,15 +416,19 @@ The QR encodes the full URL so a scan needs no typing at all, and the host in it
 follows the mode:
 
 ```
-cloudflare   https://herdr.example.com/?pair=7K2QX9
-quick        https://mid-ancient-stuff-tokyo.trycloudflare.com/?pair=7K2QX9
 lan          http://192.168.1.24:21118/?pair=7K2QX9
 local        http://127.0.0.1:21118/?pair=7K2QX9
 ```
 
 In `lan` mode the IP is re-resolved on network change, so a DHCP lease change
-does not leave a stale URL behind. In `quick` mode the hostname belongs to that
-one share and is gone when it expires.
+does not leave a stale URL behind — but a QR printed before the lease moved is
+already wrong, so re-issue rather than resend.
+
+The QR always encodes the address the **server** knows. If the operator put a
+proxy in front of it, the QR will not carry the public hostname and cannot: the
+server is not told. The code in it is still valid — it is bound to the code, not
+to the host — so a device can be pointed at the public URL by hand with the same
+`?pair=` value.
 
 **`POST /v1/pair`**
 

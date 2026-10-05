@@ -784,7 +784,7 @@ table.cmp .no { color: var(--fg-faint); }
 .parts .p-what code { font-size: 12.5px; background: var(--bg-3); border-radius: 5px; padding: 1px 6px; color: var(--fg); }
 
 /* The transcript rungs are identifiers, not flags, so they need a wider gutter
-   than the exposure ladder's `--quick`. */
+   than the exposure ladder's `--local`. */
 .ladder.ladder-rungs .flag { min-width: 156px; text-align: left; }
 </style>
 </head>
@@ -972,7 +972,7 @@ table.cmp .no { color: var(--fg-faint); }
         </video>
       </div>
       <p class="shot-cap">
-        A real session through a real tunnel — two Claude agents and a shell, no
+        A real session over a real network — two Claude agents and a shell, no
         mock-ups and nothing staged. One of them stops to ask whether it may
         overwrite a file; it gets answered from the phone, and the reply lands
         back in the terminal.
@@ -1280,8 +1280,8 @@ is not reversible.<span class="m-tr-rule"></span>Run migration 0042 against dev?
       <li><b>Answer it</b><span>Type a reply, or tap y / n / 1 2 3 / esc / arrows when it is blocked on a question. Generic across agent kinds.</span></li>
       <li><b>Give someone a link</b><span><code>herdr-expose share</code> — a URL scoped to <em>one</em> session in the server, pairing-gated, gone when it expires. They can read that session and drive it; the rest of your machine is not merely hidden from them, it is absent.</span></li>
       <li><b>Reach all of them yourself</b><span><code>herdr-expose share --all</code> — every session on the machine, which is exactly what you want when the other device is your own. It reads back what that means before it does it.</span></li>
-      <li><b>From further than the house</b><span><code>--quick</code> for a throwaway <code>trycloudflare.com</code> URL, <code>--domain yours.com</code> for your own name.</span></li>
-      <li><b>Stop everything</b><span><code>herdr-expose panic</code> — every share revoked and the main tunnel down, in one pass.</span></li>
+      <li><b>From further than the house</b><span>Point a tunnel at the port — <code>cftunnel add 21118 herdr</code>, ngrok, <code>ssh -R</code>. herdr-expose serves loopback and your network, and raises no tunnels of its own.</span></li>
+      <li><b>Stop everything</b><span><code>herdr-expose panic</code> — every share revoked in one pass.</span></li>
     </ul>
 
     <h3 style="margin:36px 0 14px">The four rungs</h3>
@@ -1292,26 +1292,21 @@ is not reversible.<span class="m-tr-rule"></span>Run migration 0042 against dev?
         <span class="why">This is the everyday case: your other laptop, the desktop upstairs, a tablet, a phone. A share exists to be opened from somewhere else, so loopback would make it pointless. The daemon's own default stays loopback, because it serves whoever is already sitting there.</span>
       </li>
       <li>
-        <span class="flag">--quick</span>
-        <span class="reach">A throwaway <code>trycloudflare.com</code> hostname</span>
-        <span class="why">Nothing is created in your Cloudflare account, so expiry is just stopping the process.</span>
-      </li>
-      <li>
-        <span class="flag">--domain X</span>
-        <span class="reach">The internet, on a name you own</span>
-        <span class="why">Expiry also deletes the DNS record and the named tunnel — only the ones it created.</span>
-      </li>
-      <li>
         <span class="flag">--local</span>
         <span class="reach">Loopback only — an explicit opt-in, for testing</span>
         <span class="why">Bound to this machine. Useful for checking what a share actually exposes before you hand the link to anyone.</span>
       </li>
     </ol>
     <p class="cmd-note" style="margin-top:14px">
-      Cloudflare is the only built-in transport; anything else is an adapter you
-      write. A <code>--quick</code> or <code>--domain</code> request with no
-      <code>cloudflared</code> to run degrades to your network and prints why —
-      because you did ask to be reachable, and that is the nearest honest answer.
+      <b>That is the whole ladder.</b> herdr-expose used to climb two rungs
+      higher, provisioning a Cloudflare tunnel for you; that code is gone on
+      purpose. A binary that reads and writes your agent sessions is the wrong
+      place to keep a tunnel, and a tool that forwards a TCP port cannot
+      accidentally forward a pane. To reach a share from outside your network,
+      point one at its port — <code>cftunnel add &lt;port&gt; &lt;name&gt;</code> —
+      and leave the share on <code>--lan</code>. <code>--quick</code> and
+      <code>--domain</code> are <i>refused</i>, never quietly turned into a LAN
+      share: a link that does not open is worse than an error.
     </p>
   </div>
 </section>
@@ -1393,7 +1388,7 @@ is not reversible.<span class="m-tr-rule"></span>Run migration 0042 against dev?
           </tr>
           <tr>
             <th>On a name you own</th>
-            <td class="us" data-c="herdr-expose"><b><code>--domain yours.com</code></b> — your Cloudflare account; expiry deletes the DNS record and the tunnel it made</td>
+            <td data-c="herdr-expose">Bring your own tunnel — one command (<code>cftunnel add 21118 herdr</code>), but yours to run and yours to take down</td>
             <td data-c="VibeTunnel">Bring your own tunnel, wired up by hand</td>
             <td class="no" data-c="Omnara">Their hostname</td>
             <td class="no" data-c="Happy Coder">Their hostname</td>
@@ -1451,8 +1446,9 @@ is not reversible.<span class="m-tr-rule"></span>Run migration 0042 against dev?
 
     <div class="sec-lead">
       <p>
-        Typing into it runs commands as you, on your machine. The moment a tunnel
-        is up, that is a remote code execution endpoint on the public internet.
+        Typing into it runs commands as you, on your machine. The moment it is
+        reachable off this box — your wifi, or anything you put in front of the
+        port — that is a remote code execution endpoint.
       </p>
       <p>
         <b>That is the feature.</b> A terminal you cannot type into is a
@@ -1480,7 +1476,7 @@ is not reversible.<span class="m-tr-rule"></span>Run migration 0042 against dev?
       </li>
       <li>
         <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 1.6l5.8 2.4v4c0 3.5-2.4 5.9-5.8 6.9-3.4-1-5.8-3.4-5.8-6.9V4z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" style="color:var(--blocked)"/></svg>
-        <span><b>And what you have to do:</b> take the tunnel down when you are done, do not leave LAN mode on at a coffee shop, and treat the URL as a credential even though it is not one. Your tunnel provider terminates TLS — this is not end-to-end encrypted, and nobody should imply otherwise.</span>
+        <span><b>And what you have to do:</b> if you put a tunnel in front of the port, take it down when you are done — <code>panic</code> cannot, and does not pretend to. Do not leave LAN mode on at a coffee shop, and treat the URL as a credential even though it is not one. Whatever you put in front terminates TLS — this is not end-to-end encrypted, and nobody should imply otherwise.</span>
       </li>
     </ul>
 
@@ -1667,16 +1663,6 @@ is not reversible.<span class="m-tr-rule"></span>Run migration 0042 against dev?
         <span class="flag">lan</span>
         <span class="reach">This machine and this network<span class="tag-default">share default</span></span>
         <span class="why">The everyday case, because a share exists to be opened from somewhere else.</span>
-      </li>
-      <li>
-        <span class="flag">quick</span>
-        <span class="reach">An anonymous <code>*.trycloudflare.com</code> hostname</span>
-        <span class="why">Nothing is created in an account of yours, so there is nothing to clean up afterwards.</span>
-      </li>
-      <li>
-        <span class="flag">domain</span>
-        <span class="reach">The internet, on a name you own</span>
-        <span class="why">The rung with a real blast radius, which is why it is the one you have to name.</span>
       </li>
     </ol>
 

@@ -8,92 +8,91 @@ Start with:
 
 ```bash
 herdr-expose doctor          # pass/fail per dependency, with a hint on each failure
-herdr-expose status          # mode, bind, url, tunnel, devices, sessions
+herdr-expose status          # mode, bind, url, reach, devices, sessions
 herdr-expose logs -n 100     # the ONLY way to see what a detached daemon did
 ```
 
 `doctor` checks, in order: `config`, `state dir`, `herdr binary`,
 `herdr sessions`, `herdr socket`, `port`, `service manager`, `exposure`,
-`cloudflared`, `cloudflare token`, `dns`, `shares`, `log`. Read the check name
-first; the hint under a failure names the fix.
+`shares`, `log`. Read the check name first; the hint under a failure names the
+fix.
+
+`doctor` answers for **this binary**. A tunnel or reverse proxy you pointed at
+the port is invisible to it — if the question is "is anything of mine on the
+internet", that is `cftunnel list`, or wherever you started it.
 
 ---
 
-## The tunnel works from every other device, but this machine says it is dead
+## My hostname stopped answering after an upgrade
 
-**Symptom.** `dig` resolves the hostname. The tunnel is registered, Cloudflare
-shows it healthy, a phone on cellular loads the page — and `herdr-expose expose
-start` sits there waiting, or `doctor` reports `dns: <domain> does not resolve`.
+**Symptom.** `https://herdr.example.com` used to load and now does not.
+`herdr-expose status` reports `mode=local` and a loopback URL, and the log has a
+line naming keys in your config.
 
-**Cause: a cached NXDOMAIN in the local stub resolver.** We create a hostname
-and then probe it seconds later. Cloudflare publishes it almost immediately, but
-a stub resolver that was asked for that name *before it existed* can hold the
-negative answer well past the record's TTL. macOS `mDNSResponder` does exactly
-this. Nothing is wrong with the tunnel; the machine that created it is the one
-machine that cannot see it.
+**Cause: herdr-expose no longer raises tunnels.** `cloudflare = true`, `domain`,
+`tunnel_name` and `adapter` are inert — the Cloudflare client, the DNS
+reconciliation and the `cloudflared` supervisor were all removed
+([ADR 0038](adr/0038-no-tunnel-the-lan-is-the-top-rung.md)). The daemon still
+starts and still serves; it just serves loopback, because `lan` was never set.
 
-**How the tool already works around it.** The health probe
-(`internal/expose/status.go`) deliberately resolves through **public DNS**
-(`1.1.1.1`, falling back to `8.8.8.8`) instead of the host resolver, precisely so
-a stale negative cache cannot make a working tunnel look dead.
+This was the one failure mode worth designing for, which is why the keys are
+**reported** rather than silently ignored:
 
-**What `doctor` says.** Note the asymmetry: `doctor`'s `dns` check uses the
-**host** resolver on purpose, so it reports what *your browser* will experience.
+```
+WARN this config asks for a tunnel, and herdr-expose no longer raises one
+     keys="cloudflare = true, domain \"herdr.example.com\""
+     serving="loopback and the LAN only"
+     to_reach_it_from_outside="point a tunnel at the port yourself, e.g. cftunnel add <port> <name>"
+```
 
-- `dns: FAIL — <domain> does not resolve` **while** `exposure: PASS` and the URL
-  answers from another device ⇒ this is the stale cache, not a broken tunnel.
-- `dns: PASS` ⇒ resolution is fine and any failure is elsewhere.
+**Fix.** Raise the tunnel yourself and leave the daemon where it is:
+
+```bash
+cftunnel add 21118 herdr        # hostname + health check, one command
+cftunnel list                   # confirm it is live and answering 200
+```
+
+Your paired devices keep working, because the origin they were paired against is
+the hostname — and that has not changed, only who serves it. If you also want
+the wifi to reach the machine directly, set `lan = true` and restart.
+
+The dead keys leave your config file the next time herdr-expose rewrites it. You
+can delete them by hand now; nothing reads them either way.
+
+---
+
+## `--quick` and `--domain` are refused
+
+**Symptom.**
+
+```
+$ herdr-expose share --quick
+--quick was removed: herdr-expose no longer raises tunnels. It serves loopback
+and the LAN, and nothing else. To reach this from outside the network, point a
+tunnel at the port yourself (cftunnel add <port> <name>) and leave this share
+on --lan
+```
+
+**This is deliberate, and the alternative was considered.** Accepting the flag
+and creating a LAN share instead would "work" — and then the link you sent
+somebody would not open, and neither of you would find out until they tried it.
+An error you see immediately beats a share that lies.
 
 **Fix.**
 
 ```bash
-sudo dscacheutil -flushcache && sudo killall -HUP mDNSResponder   # macOS
-sudo resolvectl flush-caches                                      # systemd-resolved
+PORT=$(herdr-expose share --json | jq -r '.share.port')
+cftunnel add "$PORT" review
+# hand over the cftunnel URL and the pairing code the share printed
 ```
 
-Then re-check from outside the machine before believing anything:
+The pairing code is unaffected: it is minted locally and shown only on this
+machine, so it never travels over whatever you put in front of the port.
 
-```bash
-curl -s https://<domain>/healthz            # expect {"ok":true,"api":"2"}
-dig +short @1.1.1.1 <domain>                # bypasses the stub resolver
-```
-
-**Related trap:** a process that started is not a tunnel that works. The
-Cloudflare edge answers `502` and `530` with a perfectly good HTTP response
-while nothing is routing, which is why only a `200` on `/healthz` counts as up.
-If you see `530` on a hostname that used to work, the tunnel behind it is gone —
-that is a dead DNS record, not a DNS problem.
-
----
-
-## A quick share's URL worked yesterday, and the phone now gets 401
-
-**Symptom.** A paired phone opens a `*.trycloudflare.com` URL and is asked to
-pair again, or is simply rejected. Nothing was revoked.
-
-**Cause: the hostname is new.** A quick tunnel's hostname is assigned by the
-edge at start and is **different every time** — including after a restart within
-the same share. Device tokens are **origin-bound**, so a token issued against
-`mid-ancient-stuff-tokyo.trycloudflare.com` means nothing to
-`brief-copper-orbit-lima.trycloudflare.com`. This is a property of the transport
-(ADR 0028), not a bug, and the CLI prints it once when you create a quick share.
-
-**Fix.** Re-pair at the current address. Do not resend a hostname you read five
-minutes ago.
-
-```bash
-herdr-expose share list --json          # re-reads the LIVE url
-herdr-expose share pair <id> --json     # a fresh single-use code at the current URL
-```
-
-**If you need a link that survives** — a daily driver, a bookmark, a PWA install
-— use `--domain X` (a hostname in a zone your Cloudflare token reaches), or the
-permanent deployment, which requires a static domain for exactly this reason.
-
-**The LAN version of the same problem:** a `--lan` share's IP is a DHCP lease and
-can move, which silently invalidates a printed QR. `share list` re-resolves and
-`share pair <id>` re-issues at the current address. The daemon re-resolves its
-LAN IP on `SIGHUP` and every 30 seconds, so `status` is never stale for long.
+**Three things the tunnel does not inherit from the share.** It does not expire
+when the share does, `share revoke` does not take it down, and `panic` cannot
+see it. When the share ends, the hostname stays up and stops answering — take
+it down yourself (`cftunnel stop review`).
 
 ---
 
@@ -117,15 +116,18 @@ exposure   PASS   mode lan, binds 0.0.0.0:21118, url http://192.168.1.24:21118
 ```
 
 `herdr-expose status` prints the same thing as a `note` line, and
-`share list --json` / `expose status` carry `secure_context: false`.
+`share list --json` carries `secure_context: false`.
 
 **Fix — pick the trade-off deliberately.**
 
 | want | do | cost |
 |---|---|---|
 | a working web app on the wifi, now | nothing; this is working as designed | no install, no offline shell |
-| an installable app | `--quick` (https, but a new hostname each time — install will break) | throwaway only |
-| an installable app that stays installed | `--domain X`, or the permanent deployment | needs a zone your Cloudflare token reaches |
+| an installable app | put HTTPS in front of the port — `cftunnel add 21118 herdr`, or any tunnel or reverse proxy | a second thing to run and to take down |
+
+Use a **stable** hostname if you install it. A PWA is pinned to its origin and
+device tokens are origin-bound, so a hostname that changes on every restart
+breaks the install and the pairing together.
 
 A native mobile client is unaffected by any of this — it talks to the same API
 (`docs/api.md`) and does not care about browser secure-context rules.
@@ -134,39 +136,29 @@ A native mobile client is unaffected by any of this — it talks to the same API
 
 ## `panic` or `revoke` exits non-zero and says something is still up
 
-**Treat a non-zero exit as "still exposed."** Both commands report per component
-— `process_gone`, `dns_gone`, `tunnel_gone`, `port_free`, `state_wiped` — and
-deliberately fail loudly rather than claiming success. A kill switch that
-silently half-works is worse than none.
+**Treat a non-zero exit as "still exposed."** Both commands report three facts
+per share — `process_gone`, `port_free`, `state_wiped` — each re-read from the
+world rather than assumed, and deliberately fail loudly rather than claiming
+success. A kill switch that silently half-works is worse than none.
 
-Two of these look like failures and are not:
-
-**A revoked share sitting in `orphaned` for ~60 seconds.** Cloudflare refuses to
-delete a tunnel until its edge connections are marked inactive, which is roughly
-a minute after `cloudflared` dies. Teardown retries and deliberately **keeps**
-`share.json` (credentials wiped immediately, state `orphaned`) so the next sweep
-can finish the job — deleting the paperwork would strand the tunnel with nothing
-left to clean it up. Re-check rather than re-running:
+**`port STILL BOUND` on a share that died cleanly.** A listening socket is not
+closed synchronously with the process that owned it. Teardown waits for the port
+rather than asking once (this was reproducible on Windows, where a share is
+stopped with `TerminateProcess` rather than a signal it can handle), but a very
+loaded machine can still outlast the wait. Re-check before acting:
 
 ```bash
-herdr-expose share list --json     # expect [] once the sweep completes
+herdr-expose share list --json     # expect []
 ```
 
-**`cloudflared STILL RUNNING` after `panic`.** `panic` raises a halt flag
-*before* killing anything, because the daemon's supervisor would otherwise
-respawn `cloudflared` a second later. If the running daemon is an older build
-that does not poll that flag, the respawn wins. Restart the daemon on the
-current binary and run `panic` again:
-
-```bash
-herdr-expose stop && herdr-expose daemon
-herdr-expose panic
-herdr-expose status                # confirm; then `expose start` to re-arm
-```
-
-For a `lan` or `quick` share, `cloudflare_not_applicable: true` accompanies
-`dns_gone` / `tunnel_gone`. Those mean **"there was never one"**, not "we
-deleted it".
+**What `panic` does NOT do, by design.** It revokes shares. It does not stop the
+daemon — that is `herdr-expose stop` — and it cannot stop a tunnel you pointed
+at the port, because that process is not its to kill. The JSON says so in
+`daemon.note`, and it previously did something worse: it wrote an `EXPOSE-HALT`
+flag that the tunnel supervisor used to poll, and after the supervisor was
+removed nothing read that path at all. A kill switch reporting success for
+writing an unread file is the exact failure this entry exists to prevent, so the
+flag is gone.
 
 ---
 
@@ -201,50 +193,50 @@ somewhere unusual.
 
 ---
 
-## `--domain` fails before creating anything
+## A share created by an older build will not restart
 
-That is by design — a half-provisioned tunnel with no DNS record, or a DNS
-record pointing at no tunnel, is worse than a clean failure. The preconditions
-are checked first.
+**Symptom.** After an upgrade, `herdr-expose share restore` (which the daemon
+runs on every start) reports:
 
 ```
-cloudflare token   FAIL   $CLOUDFLARE_ALLPURPOSE_TOKEN is not set
-                   hint:  export a token with Account:Cloudflare Tunnel:Edit,
-                          Zone:Zone:Read and Zone:DNS:Edit
-cloudflare token   FAIL   cannot reach the zone for x.example.com
-                   hint:  the token must have Zone:Zone:Read and Zone:DNS:Edit
-                          on that zone, and the zone must be in an account the
-                          token can see
-cloudflared        FAIL   not on PATH
-                   hint:  install it (`brew install cloudflared`) — without it
-                          the tunnel cannot start and herdr-expose falls back
-                          to LAN mode
+share 9f2a1c04 was created on the "cloudflare" rung, which herdr-expose no
+longer has (it serves loopback and the LAN, and nothing else). Revoke it with
+`herdr-expose share revoke 9f2a1c04` and create a new one; if you need it
+reachable from outside this network, point a tunnel at the new share's port
+(cftunnel add <port> <name>)
 ```
 
-**The zone must be in an account your token can reach.** An arbitrary domain you
-own elsewhere does not work.
+**Cause: the share's record names a rung that was removed.** Its `share.json`
+says `mode: "cloudflare"` or `"quick"`, and this build cannot serve either.
 
-**If you only need a URL, you do not need any of this.** The default LAN rung and
-`--local` need nothing at all, and `--quick` needs nothing but `cloudflared` —
-no account, no zone, no token, no DNS.
+**Why it refuses instead of doing something sensible.** Quietly bringing it back
+on the LAN would be the wrong kindness. It was a public share yesterday;
+returning it on `192.168.1.24` under the same id gives you a `share list` entry
+whose URL anyone who has the old link will find dead, and paired device tokens
+that no longer match its origin. That is a different share wearing its name.
+
+**Fix.** Revoke it and make a new one. Revoking still works — a share this
+build cannot *run* is still one it can *wipe*, which is the other half of the
+contract:
+
+```bash
+herdr-expose share revoke 9f2a1c04
+herdr-expose share --session <name> --hours 1 --json
+```
 
 ---
 
 ## The exposure is not the rung I asked for
 
-**Read `.share.mode` from the JSON, and `fell_back`.** Nothing ever escalates:
-a bare `share` is LAN and can never become a tunnel because `[expose] domain`
-happens to be set (ADR 0029). Fallback only goes **down**, and it prints the
-reason — an explicit `--quick` or `--domain` with no `cloudflared` resolvable
-degrades to LAN, which is the nearest honest answer to "make me reachable".
+**Read `.share.mode` from the JSON.** It is `local` or `lan`, and nothing can
+escalate because there is no rung above the LAN to escalate to.
 
-Two things that confuse people here:
-
-- A `--domain` share reports `mode: "cloudflare"`, not `"domain"`. `cloudflare`
-  is the resolved *transport*; `domain` is the *rung* you asked for.
-- The top-level `herdr-expose --help` still describes a withdrawn auto-escalating
-  ladder (`none = auto: domain if usable, else quick...`). **The binary does not
-  do that.** `herdr-expose share --help` is the correct text.
+The one case that surprises people: **a `--lan` share can report a loopback
+URL.** If the machine has no non-loopback IPv4 — wifi off, every interface down
+— there is no LAN address to name, so the URL is `http://127.0.0.1:<port>`. The
+mode is still `lan` and the socket is still bound to `0.0.0.0`; it will start
+answering on the network address as soon as there is one. Saying `127.0.0.1` is
+the honest answer rather than inventing a hostname nobody can reach.
 
 ---
 

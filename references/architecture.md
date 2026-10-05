@@ -1,5 +1,13 @@
 # Architecture
 
+> **HISTORICAL.** This is the pre-build design rationale, written before Herdr
+> 0.9.0 was verified live, and it is kept for the reasoning rather than the
+> facts. Two of its premises are now wrong: the remote path is **not** always a
+> tunnel this binary starts (it raises none — see
+> [ADR 0038](../docs/adr/0038-no-tunnel-the-lan-is-the-top-rung.md)), and the
+> bind is not loopback-only (`lan` binds 0.0.0.0 — ADR 0022). `SPEC.md` and the
+> ADRs are authoritative.
+
 A single Go binary, installed as a Herdr plugin, that serves a web UI and (later)
 mobile apps. Herdr stays upstream and untouched.
 

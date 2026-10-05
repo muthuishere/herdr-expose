@@ -175,8 +175,9 @@ to stderr, where it is unconditional.
 ### Why a Job Object, and not `taskkill /T`
 
 `CREATE_NEW_PROCESS_GROUP` only scopes console Ctrl events; killing a pid on
-Windows leaves its children running. `cloudflared` spawns children, and an
-orphaned one holds a tunnel open against a hostname we believe we tore down —
+Windows leaves its children running. A child process that spawns its own
+children can leave an orphan holding a port open after we believe we tore it
+down —
 the exact hazard the Unix stray-reclaim ledger exists for.
 
 A Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` is the only construct

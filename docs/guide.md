@@ -5,15 +5,18 @@
 Your [Herdr](https://herdr.dev) panes, in a browser or on your phone.
 
 One Go binary. It connects to the Herdr socket on your machine, serves a
-mobile-first web UI it has embedded inside itself, and — when you ask it to —
-puts that UI behind a tunnel so you can check on your agents from anywhere.
+mobile-first web UI it has embedded inside itself, so you can check on your
+agents from your phone.
 
 ```
 Herdr  --unix socket-->  herdr-expose  --127.0.0.1:21118-->  browser
                               |
                               +--LAN 0.0.0.0:21118----->  your phone, same wifi
-                              +--cloudflared tunnel---->  your phone, anywhere
-                                 (static, your domain)
+
+                   ...and that is as far as it goes. From anywhere else:
+
+   your phone, anywhere  <--https--  a tunnel YOU run  -->  :21118
+                                     (cftunnel / ngrok / ssh -R / tailscale)
 ```
 
 **The API is the product.** The web UI is its first client; a native mobile app
@@ -125,7 +128,7 @@ herdr plugin action invoke hex:install-skill
 
 `herdr plugin uninstall dev.deemwar.herdr-expose` removes the checkout. It does
 **not** remove `~/.config/herdr-expose/` or `~/.local/state/herdr-expose/` —
-your config, device tokens and tunnel state are yours, and deleting them is your
+your config and device tokens are yours, and deleting them is your
 call.
 
 ### From source
@@ -190,14 +193,12 @@ herdr-expose status
 |---|---|
 | `serve` | run the server in the foreground (what a service unit runs) |
 | `daemon` | fork-exec `serve` detached and return immediately |
-| `status` | server state, local URL, tunnel URL, paired devices |
+| `status` | server state, the URL, who can reach it, paired devices |
 | `stop` | stop the running server |
 | `pair` | mint a single-use pairing code and show a QR |
-| `expose start\|stop\|status` | bring the tunnel up or down |
-| `expose destroy` | remove the DNS record and delete the tunnel (explicit, and only what it created) |
-| `share [--lan\|--quick\|--domain X\|--local]` | expose ONE session on a time-boxed, self-destructing URL (no flag = LAN) |
+| `share [--lan\|--local]` | expose ONE session on a time-boxed, self-destructing URL (no flag = LAN) |
 | `share list\|extend\|pair\|revoke\|restore` | manage shares (every verb takes `--json`) |
-| `panic` | revoke every share and stop the main tunnel |
+| `panic` | revoke every share (the daemon itself is `stop`) |
 | `service install\|uninstall\|status` | install, remove or report the launchd / systemd unit for crash recovery (also spelled `install-service` / `uninstall-service`) |
 | `skill install\|uninstall\|status` | link, unlink or report the `herdr-share` [agent skill](#the-agent-skill) |
 
@@ -205,24 +206,27 @@ herdr-expose status
 
 ## Exposing it
 
-Four modes. The mode decides the bind address — **`bind` is not a setting you
-control**, which is deliberate, because this binary runs commands.
+**Two modes, and the local network is as far as it goes.** The mode decides the
+bind address — **`bind` is not a setting you control**, which is deliberate,
+because this binary runs commands.
 
 | mode | reachable from | device token | installable PWA |
 |---|---|---|---|
 | `local` (the **daemon's** default) | this machine only | not required | yes |
 | `lan` (a **share's** default) | anyone on your wifi | **required** | **no** (see below) |
-| `quick` | the internet, on a throwaway hostname | **required** | not usefully (see below) |
-| `cloudflare` | the internet, on your domain | **required** | yes |
-
-`local`, `lan` and `cloudflare` are what the long-lived server runs in. `quick`
-belongs to [`share`](#sharing-one-session) alone and cannot be configured here.
 
 The daemon defaults to `local` and a `share` defaults to `lan`, deliberately:
 the daemon serves whoever is sitting at this machine, while a share exists to
 be opened from somewhere else. Same principle — the least exposure that still
-does the job — two different jobs. Nothing above those defaults is ever reached
-without asking for it.
+does the job — two different jobs.
+
+> **herdr-expose does not raise tunnels.** It used to: `cloudflare = true` plus
+> a domain made it talk to the Cloudflare API, mint tunnel credentials, upsert a
+> DNS record and supervise `cloudflared`. That is all gone — about 6,300 lines
+> of it — and [ADR 0038](adr/0038-no-tunnel-the-lan-is-the-top-rung.md) is the
+> argument for why. Short version: this binary reads and writes your agent
+> sessions, and a tool that forwards a TCP port cannot accidentally forward a
+> pane. See [Reaching it from the internet](#reaching-it-from-the-internet).
 
 ### local — the daemon's default
 
@@ -246,147 +250,76 @@ lan = true
 ```
 
 ```bash
-herdr-expose expose start
+herdr-expose stop && herdr-expose daemon
+herdr-expose status
 # http://192.168.1.24:21118   (also shown as a QR by `herdr-expose pair`)
 ```
 
 This binds `0.0.0.0`, so **anyone on the network can reach the port** — the
 server logs a warning saying so on every start. It is safe because a device token
 is mandatory and **the pairing code is only ever shown on this machine's screen**;
-no endpoint will hand one out. LAN mode is also the automatic fallback when
-`cloudflare = true` is configured but `cloudflared` is not installed: it logs
-loudly and falls back rather than leaving you with nothing.
+no endpoint will hand one out.
 
 > **No PWA install in lan mode.** Plain HTTP on a LAN IP is not a secure context
 > (`localhost` is exempt; `192.168.x.x` is not), so the browser will not register
 > a service worker or offer to install the app. `status` reports
 > `secure_context: false`. You get a working web app in a browser tab, not a
-> home-screen app. That is a rule of the web platform, not something we can fix.
+> home-screen app. That is a rule of the web platform, not something we can fix —
+> only HTTPS fixes it, and that means putting a tunnel or proxy in front of the
+> port yourself.
 
-### cloudflare — your own domain, static
+### Reaching it from the internet
 
-A stable `https://` URL you can bookmark, install as a PWA, and bind device
-tokens to.
-
-```toml
-[expose]
-cloudflare  = true
-domain      = "herdr.example.com"   # REQUIRED
-tunnel_name = "herdr-expose"        # optional
-```
+Point something at the port. herdr-expose has no opinion about what:
 
 ```bash
-export CLOUDFLARE_ALLPURPOSE_TOKEN=...
-export CLOUDFLARE_ACCOUNT_ID=...
-herdr-expose expose start
-# https://herdr.example.com
+# On the machine this was built on, one command — hostname and health check:
+cftunnel add 21118 herdr
+
+# Or anything else that forwards HTTP:
+ngrok http 21118
+ssh -R 8080:localhost:21118 your-vps
+# tailscale funnel, a reverse proxy, a WireGuard peer — all fine
 ```
 
-That one command verifies your token's scopes, creates or reuses the named
-tunnel, **writes the tunnel credentials itself from the API** (so there is no
-`cloudflared login`, no browser, no interactive `cert.pem` — it works fine over
-SSH), upserts the DNS CNAME, generates the ingress config, runs `cloudflared`,
-**polls `/healthz` until the domain actually answers**, and restarts it if it
-dies. The API token is read from the environment **by name, at point of use** —
-never written to config, state, or a log.
+Then pair as usual. The pairing code is still minted locally and shown only on
+this machine, so **whatever is in front of the port, the credential never
+travels over it**. That is what made `lan = true` acceptable and it is what
+makes this acceptable.
 
-`expose stop` stops `cloudflared` and leaves the tunnel and DNS in place, because
-the domain is meant to be static. `expose destroy` is the explicit verb that
-removes them, and it only ever touches records it created.
+Three things to be clear about, because they are the ones that bite:
 
-> **The permanent deployment is never ephemeral.** `cloudflare = true` without
-> `domain` is a startup error, and there is no key that makes this server run on
-> a `*.trycloudflare.com` hostname. A hostname that changes on every restart
-> breaks PWA installs, bookmarks and origin-bound device tokens — which makes it
-> worse than useless for the endpoint you open every day. A throwaway hostname
-> is available where it actually fits: `herdr-expose share --quick`.
+- **The tunnel is not part of herdr-expose.** `herdr-expose panic` cannot stop
+  it and does not claim to; `share revoke` does not take it down. Stop it where
+  you started it (`cftunnel stop herdr`).
+- **`status` and `share list` report the LAN or loopback URL**, because that is
+  what this binary knows. The public hostname lives in the tunnel tool — read it
+  from there (`cftunnel list`).
+- **A tunnel in front of a share outlives the share.** When the share expires
+  the hostname stays up and stops answering. Take the tunnel down too.
 
-Needs `cloudflared` on your PATH (`brew install cloudflared`).
+`--quick`, `--domain` and `--provider` are **refused**, not quietly turned into
+a LAN share:
 
-### quick — a throwaway public URL, for shares only
-
-`herdr-expose share --quick` runs `cloudflared tunnel --url` and gets a random
-`https://<words>.trycloudflare.com` hostname from Cloudflare's edge. **No
-account, no zone, no DNS record, no API token is read** — the whole Cloudflare
-API path is never entered — and there is nothing left to clean up afterwards:
-the tunnel dies with the process. Measured cold start on a laptop: about ten
-seconds from the command to a URL that answers.
-
-The trade-off, which the CLI prints once at create time: **the hostname is new
-every time.** Device tokens are origin-bound, so every quick share needs a fresh
-pairing scan, and an installed PWA would be pinned to a hostname that stops
-existing. Right for a throwaway, wrong for a daily driver — which is exactly why
-`[expose]` keeps a static domain.
-
-A quick tunnel is on the public internet, so it is **not** more trusted than a
-domain share: same mandatory pairing, same server-side scope, same expiry.
-
-### Anything else: write an adapter
-
-**Cloudflare is the only built-in transport.** ngrok, tailscale funnel, a
-corporate reverse proxy, an SSH `-R`, your homelab — all of those are adapters,
-and an adapter is the supported answer for them, not a consolation prize.
-
-Adapters are small JavaScript files run on an embedded Go JS runtime — **no
-node at run time**. An adapter is a full provider to the host: it declares what
-it creates, its URL is verified before it is published, it is supervised and
-restarted, and its teardown is held to the same idempotency rules as the
-built-in. Start from [`adapters/template.js`](../adapters/template.js), which
-documents the whole `ctx` host API;
-[`adapters/ngrok.js`](../adapters/ngrok.js) is a worked example (~40 lines).
-
-> herdr-expose shipped a second built-in provider, ngrok, and removed it in
-> ADR 0034. The reason was not "unwanted feature" but **unverified surface**:
-> there was no ngrok binary and no token on the machine it was written on, so
-> it was unit-tested and never once exercised end to end. `adapters/ngrok.js`
-> is kept as an example, and is parsed in CI but never run against real ngrok —
-> test it before you trust it. If you want ngrok, an adapter is the right home
-> for it: it lives next to the binary you already have installed and
-> authenticated, and you are the person who can actually verify it.
-
-```js
-// adapters/my-tunnel.js
-export function start(ctx) {
-  const p = ctx.spawn("my-tunnel", ["--port", "21118"]);
-  ctx.onLine(p, (line) => {
-    const m = /(https:\/\/\S+)/.exec(line);
-    if (m) ctx.setUrl(m[1]);
-  });
-  return { pid: p.pid };
-}
-
-export function status(ctx) { return { url: ctx.url, healthy: ctx.isAlive() }; }
-export function stop(ctx)   { ctx.kill(); }   // must be idempotent
+```
+$ herdr-expose share --quick
+--quick was removed: herdr-expose no longer raises tunnels. It serves loopback
+and the LAN, and nothing else. To reach this from outside the network, point a
+tunnel at the port yourself (cftunnel add <port> <name>) and leave this share
+on --lan
 ```
 
-```toml
-[expose]
-adapter = "my-tunnel"      # an adapter id selects the escape hatch
+A config file still carrying `cloudflare`, `domain`, `tunnel_name` or `adapter`
+still **loads** — an upgrade that will not start is the one failure you cannot
+work around — and the daemon names those keys once at startup, says it is
+serving loopback and the LAN only, and drops them the next time it rewrites the
+file. Same for `[share] default_mode = "quick"`, which reads as `lan`.
 
-[[expose.adapters]]
-id = "my-tunnel"
-script = "adapters/my-tunnel.js"
-
-[expose.adapters.env]        # free-form; arrives as ctx.config
-region = "eu"
-```
-
-The host API on `ctx`:
-
-| | |
-|---|---|
-| `spawn(cmd, args)` | start a process |
-| `onLine(proc, fn)` | callback per line of its output |
-| `setUrl(s)` / `url` | publish / read the public URL |
-| `localUrl` | the loopback URL to tunnel to |
-| `isAlive()` / `kill()` | process lifecycle |
-| `log(s)` | write to the plugin log |
-| `config` | this adapter's `env` table |
-| `env(name)` | read a process env var **by name** — the value never reaches logs or state |
-
-Adapter rules: **no filesystem access, no network from JS** (spawn a real tool
-that does it properly), a crash never takes the server down, and `stop()` must be
-safe to call twice. Copy `adapters/template.js` to start.
+> **There are no tunnel adapters any more.** The embedded JavaScript host existed
+> to let you write a transport Cloudflare was not; with no built-in transport to
+> be an alternative to, it went too. **Chat adapters are a different thing** —
+> `[[chat.adapters]]`, a different contract, still here, see
+> [Driving it from a chat app](#driving-it-from-a-chat-app).
 
 ---
 
@@ -398,24 +331,24 @@ does the opposite: **one session, one URL, one deadline, then gone.**
 ```bash
 herdr-expose share                          # http://<lan-ip>:<port>   THE DEFAULT
 herdr-expose share --lan                    # the same, said out loud
-herdr-expose share --quick                  # https://<random>.trycloudflare.com
-herdr-expose share --domain x.example.com   # https://x.example.com    your zone
 herdr-expose share --local                  # http://127.0.0.1:<port>  testing only
 ```
+
+To let somebody outside your network open it, point a tunnel at the share's own
+port and leave the share on `--lan` — see
+[Reaching it from the internet](#reaching-it-from-the-internet). The port is in
+the JSON: `herdr-expose share --json | jq -r '.share.port'`.
 
 ### The ladder is climbed, never guessed (AMENDMENTS 16)
 
 | rung | flag | reach | needs | teardown at expiry |
 |---|---|---|---|---|
-| **lan** | **none** (default) | this machine **and this network** | nothing | stop the process, wipe the state |
-| quick | `--quick` | anyone on the internet | `cloudflared` | stop the process, wipe the state (nothing exists in Cloudflare) |
-| domain | `--domain X` | anyone on the internet, on a name you own | `cloudflared` + a zone your token reaches | the above **plus** delete the DNS record and the named tunnel |
-| local | `--local` | this machine only — an opt-**in** for testing | nothing | stop the process, wipe the state |
+| **lan** | **none** (default) | this machine **and this network** | nothing | stop the process, free the port, wipe the state |
+| local | `--local` | this machine only — an opt-**in** for testing | nothing | the same |
 
-The flags are mutually exclusive, and **no flag means LAN**. Never `--quick`,
-never a configured domain. There is no auto-escalation: a bare `share` will not
-put a session on the public internet because `[expose] domain` happens to be
-set for the permanent deployment.
+The flags are mutually exclusive, and **no flag means LAN**. There is nothing
+above LAN to escalate to, and `--quick` / `--domain` / `--provider` are refused
+rather than silently downgraded.
 
 LAN is the default rather than loopback because a share exists to be **opened
 from somewhere else** — at this machine you would just use the daemon on
@@ -423,22 +356,16 @@ from somewhere else** — at this machine you would just use the daemon on
 goes no further. (The daemon's own `[expose]` default stays `local`. Same
 principle — the least exposure that still does the job — different job.)
 
-**Fallback only ever goes down.** An explicit `--quick` or `--domain` with no
-`cloudflared` installed degrades to LAN and prints the reason, because you did
-ask to be reachable and a LAN address is the nearest honest answer. Nothing
-ever escalates above what you asked for.
-
-Why the ceremony: this binary runs arbitrary commands inside your agent
-sessions. The blast radius of each rung differs by orders of magnitude — this
-machine, this room, the entire internet — and that difference must never be a
-config key you forgot you set. Typing `--quick` takes a second and makes the
-reach a conscious choice, which is the only thing that makes the pairing, scope
-and TTL guarantees below mean anything.
+Why the ceremony survives a two-rung ladder: this binary runs arbitrary
+commands inside your agent sessions, and the difference between "this machine"
+and "this café's wifi" must never be a config key you forgot you set. The
+resolver still refuses to resolve above what was requested, and that check is
+what the whole amputation was held to.
 
 The chosen rung and its reach are printed at create time (`exposure: lan —
 anyone on this network`), so you never have to infer it from the URL.
 
-Everything else is identical across all four: **scope is enforced in the
+Everything else is identical across both: **scope is enforced in the
 server** (the shared instance's tree contains only that session — other sessions
 are absent from the tree, from subscribe, and rejected at the hub), **pairing is
 mandatory**, and every share is time-boxed three ways (an in-process timer, a
@@ -449,15 +376,20 @@ share; a long one is `--days 30`.
 herdr-expose share list [--json]            # also reaps anything past its deadline
 herdr-expose share extend <id> --hours 2
 herdr-expose share pair <id>                # another code for a share already running
-herdr-expose share revoke <id> | --all      # immediate, idempotent, verified against the API
-herdr-expose panic                          # every share down AND the main tunnel stopped
+herdr-expose share revoke <id> | --all      # immediate, idempotent, verified
+herdr-expose panic                          # every share down, right now
+herdr-expose stop                           # ...and this stops the daemon itself
 ```
 
-`revoke --all` and `panic` handle a mix of local + lan + quick + domain shares
-in one pass; one rung's failure never aborts the others. Teardown reports per
-component and exits non-zero if anything survived — for `local`, `lan` and
-`quick` the DNS and tunnel lines read as not-applicable, because nothing was
-ever created.
+`revoke --all` and `panic` handle every share in one pass, and one failure never
+aborts the others. Teardown reports three facts per share — process gone, port
+free, state wiped — each re-read rather than assumed, and exits non-zero if
+anything survived.
+
+**`panic` does not stop the daemon, and says so.** It revokes shares; the
+daemon's own listener is loopback or the LAN and comes down with
+`herdr-expose stop`. If you pointed a tunnel at the port, that is outside this
+binary entirely — `cftunnel stop <name>`, or wherever you started it.
 
 ---
 
@@ -477,8 +409,8 @@ It is how the owner of this tool actually drives it: you say what
 you want in English, the agent runs the CLI.
 
 It is a thin wrapper, on purpose — **the binary is the product.** The skill
-never reimplements a rung, never hand-rolls `cloudflared`, never touches DNS.
-What it adds is judgement: which rung the words you used actually asked for,
+never reimplements a rung and never invents a transport. What it adds is
+judgement: which rung the words you used actually asked for,
 what to read back before creating anything, and what never to paste into a
 channel.
 
@@ -488,19 +420,21 @@ agent:  herdr-expose share --json
         -> http://192.168.1.24:49213, pairing code, expires in 1h
 
 you:    "I'm not on the same wifi"
-agent:  herdr-expose share --quick --json
-        -> https://<random>.trycloudflare.com, new pairing code
+agent:  herdr-expose share --json            (still a LAN share)
+        + cftunnel add <that share's port> review
+        -> https://review.…, the same pairing code
 
 you:    "is anything of mine exposed right now?"
-agent:  herdr-expose share list --json  +  herdr-expose expose status
+agent:  herdr-expose share list --json  +  herdr-expose status
 ```
 
 The rules it works under are in [`skill/SKILL.md`](../skill/SKILL.md), and two are
 worth knowing before you let an agent near this:
 
-- **It never climbs the ladder for you.** "Share this" is a LAN share. Getting a
-  public URL takes words that mean public — the agent is told, in as many words,
-  not to reach for `--quick` to be helpful.
+- **It never climbs the ladder for you.** "Share this" is a LAN share, and a
+  public URL is a second, separate step it has to tell you about rather than
+  take on your behalf — herdr-expose cannot raise a tunnel, so the agent cannot
+  quietly put a session on the internet even if it wanted to.
 - **`share --all` needs your explicit yes, in the conversation.** Before running
   it the agent must tell you how many sessions it covers and name them, state
   the rung and the expiry, and wait. The CLI's own typed-`yes` prompt exists for
@@ -735,33 +669,34 @@ theme = "auto"
 default_view = "grid"        # grid | focus
 
 [expose]
-cloudflare  = false
-domain      = ""             # REQUIRED when cloudflare = true
-tunnel_name = "herdr-expose"
-lan         = false          # also the automatic fallback if cloudflared is missing
-autostart   = false
+lan       = false            # bind 0.0.0.0 so the wifi can reach this machine
+autostart = false
 
 [share]
-domain_suffix  = ""          # with default_mode = "domain": `share --name review` -> review.<suffix>
 default_hours  = 1           # TTL when neither --hours nor --days is given
-default_mode   = "lan"       # local | lan | quick | domain — the rung a bare `share` climbs to
+default_mode   = "lan"       # local | lan — the rung a bare `share` climbs to
 max_concurrent = 10
 ```
 
-`default_mode` ships as `"lan"` and is the only key that can move a bare
-`share` off the LAN — setting it is asking, in the same sense that typing
-`--quick` is asking. A `"auto"` written before AMENDMENTS 16 still loads and now
-means `"lan"`. There is no `quick` key under `[expose]`, on purpose.
+`default_mode` ships as `"lan"` and is the only key that moves a bare `share`
+between rungs.
 
-**Withdrawn keys keep loading.** A config that still carries `ngrok = true`
-(removed in [ADR 0034](adr/0034-cloudflare-is-the-only-built-in-provider.md)),
-a loopback `server.bind`, or `default_mode = "auto"` starts normally: the key is
-read without complaint, ignored, and dropped the next time the file is written.
-A key that no longer does anything is not a reason to take somebody's daemon
-down over a file they cannot act on until it is already up.
+**Withdrawn keys keep loading, and are named out loud.** A config that still
+carries `cloudflare = true`, a `domain`, a `tunnel_name`, an `adapter`,
+`ngrok = true`, a loopback `server.bind` or `default_mode = "auto"` /
+`"quick"` / `"domain"` starts normally. The key is read without complaint,
+**reported once at startup** with what is being served instead, ignored, and
+dropped the next time the file is written.
 
-**There are no secrets in this file.** Tokens live as SHA-256 hashes in the state
-directory at mode 0600; the Cloudflare token is read from the environment. See
+Both halves of that matter. A key that no longer does anything is not a reason
+to take somebody's daemon down over a file they cannot edit until it is back up
+— but a `cloudflare = true` that is silently ignored is how you spend an hour
+in a DNS dashboard wondering why your hostname stopped answering. So it loads,
+and it says so.
+
+**There are no secrets in this file**, and there is nothing left for one to be:
+herdr-expose holds no provider credentials. Device tokens live as SHA-256
+hashes in the state directory at mode 0600. See
 [ADR 0009](adr/0009-toml-config-outside-repo.md) and
 [ADR 0017](adr/0017-hashed-per-device-tokens.md).
 
@@ -773,17 +708,19 @@ directory at mode 0600; the Cloudflare token is read from the environment. See
 
 `herdr-expose` talks to Herdr, and Herdr can run commands. `pane.run`,
 `pane.send_text` and `agent.prompt` are, by design, **arbitrary command
-execution as you, on your machine**. The moment a tunnel is up, this is a remote
-code execution endpoint on the public internet.
+execution as you, on your machine**. The moment it is reachable off this box —
+your wifi, or anything you put in front of the port — this is a remote code
+execution endpoint.
 
 That is not a scary edge case. It is the feature. A terminal you cannot type into
 is a screenshot. So authentication here is the primary feature, not a checkbox.
 
 ### What the tool does about it
 
-- **You do not choose the bind address; the mode does.** `local` and
-  `cloudflare` bind `127.0.0.1`. `lan` binds `0.0.0.0` and says so loudly in the
-  log on every start. There is no free-form `bind` setting to get wrong.
+- **You do not choose the bind address; the mode does.** `local` binds
+  `127.0.0.1`; `lan` binds `0.0.0.0` and says so loudly in the log on every
+  start. There is no free-form `bind` setting to get wrong, and no mode that
+  reaches past your network.
 - **The pairing code is only ever displayed on this machine** — the terminal, or
   the QR pane inside the Herdr TUI. **No HTTP endpoint mints or reveals one.**
   `POST /v1/pair` only accepts codes. That is what makes `lan` mode defensible:
@@ -815,21 +752,21 @@ is a screenshot. So authentication here is the primary feature, not a checkbox.
 
 ### What you have to do about it
 
-- **Do not leave a tunnel up.** `herdr-expose expose stop` when you are done. The
-  server keeps running on loopback.
+- **Do not leave a tunnel up.** If you pointed one at the port, take it down
+  when you are done (`cftunnel stop <name>`). herdr-expose cannot do this for
+  you — `panic` does not touch it and does not pretend to — so it is genuinely
+  your job to remember.
 - **Do not leave `lan = true` on at a conference or a coffee shop.** It is meant
   for your own network.
 - **Revoke devices you no longer use.** `herdr-expose status` lists them;
   `herdr-expose devices --revoke <id>` removes one.
-- **Your tunnel provider terminates TLS.** Cloudflare — or whatever your
-  adapter dials — can see the traffic. This is not end-to-end encrypted and
-  nobody should imply otherwise.
+- **Whatever you put in front of the port terminates TLS.** Cloudflare, ngrok,
+  your own reverse proxy — it can see the traffic. This is not end-to-end
+  encrypted and nobody should imply otherwise.
 - **Treat the URL as a credential** even though it is not one. A public URL plus
   an unpatched auth bug is a shell; do not paste it into a group chat.
-- **Prefer a named tunnel with Cloudflare Access** in front of it if you are
-  doing this from a work machine.
-- **Adapters spawn processes.** An adapter you did not write is code you are
-  choosing to trust.
+- **Put an identity layer in front of it on a work machine** — Cloudflare
+  Access, an mTLS proxy, a VPN. Pairing is good; two gates are better.
 
 Found a security problem? Open a private security advisory on the repository
 rather than a public issue.
@@ -850,7 +787,7 @@ Short version, with the details in the ADRs:
   ([ADR 0006](adr/0006-split-plane-json-control-binary-data.md)).
 - **The server picks the mode** — live, summary or none — so a client cannot ask
   for twenty live terminals ([ADR 0007](adr/0007-server-owned-viewport-modes.md)).
-- **Predictive local echo**, Mosh-style, in v1: paint time is ~1ms and tunnel RTT
+- **Predictive local echo**, Mosh-style, in v1: paint time is ~1ms and network RTT
   is 30-150ms, so this is the only thing that makes a remote terminal feel local.
   A prediction is invisible until confirmed, so a phantom character is never
   shown ([ADR 0024](adr/0024-predictive-echo-in-v1.md)).
@@ -929,9 +866,12 @@ after drawing and falls back to the DOM renderer when the surface comes back
 dead, remembering the result. If it is still blank, file an issue with your
 device and browser — that probe has a device list to grow.
 
-**`cloudflare = true` refuses to start.** You need `domain` set — there is no
-ephemeral tunnel to fall back to, by design. Either set a domain, or use
-`lan = true`.
+**My `cloudflare = true` config stopped working.** It no longer does anything:
+herdr-expose does not raise tunnels ([ADR 0038](adr/0038-no-tunnel-the-lan-is-the-top-rung.md)).
+The daemon starts, serves loopback, and logs a warning naming the dead keys. To
+get the hostname back, point a tunnel at the port yourself —
+`cftunnel add 21118 herdr` — and set `lan = true` only if you also want the
+wifi to reach it directly.
 
 **My agent does not know about `herdr-share`.** Skills are discovered when an
 agent session starts, so a skill installed mid-session is not visible until the

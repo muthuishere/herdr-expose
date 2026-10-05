@@ -229,3 +229,40 @@ func TestSafeHandlerEnabledDelegates(t *testing.T) {
 		t.Fatalf("WithAttrs bypassed the filter:\n%s", buf.String())
 	}
 }
+
+// The dead-tunnel-keys warning must actually NAME the keys.
+//
+// This is a regression test for a real bug: the warning first shipped with the
+// attribute called `keys`, which is in the scrubber's refused set because it
+// means KEYSTROKES. The line survived, the names did not, and the result was a
+// warning that said "this config asks for a tunnel" without saying which key —
+// which is most of the way back to the silent failure the warning exists to
+// prevent. Caught by reading the output against the owner's real config.
+func TestTheDeadTunnelKeyWarningNamesTheKeys(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Expose.DeadCloudflare = true
+	cfg.Expose.DeadDomain = "herdr.example.com"
+	cfg.Share.DefaultMode = "quick"
+
+	var buf bytes.Buffer
+	warnTunnelConfigIsDead(cfg, slog.New(newSafeHandler(slog.NewTextHandler(&buf, nil))))
+	out := buf.String()
+
+	for _, want := range []string{"cloudflare = true", "herdr.example.com", "default_mode", "cftunnel"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("the warning does not name %q — it has to say WHICH keys are inert:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, safeValue) {
+		t.Fatalf("the scrubber withheld the warning's own payload; pick an attribute name "+
+			"that is not in payloadAttrKeys:\n%s", out)
+	}
+
+	// And a clean config says nothing at all: a warning that fires for everyone
+	// is a warning nobody reads.
+	buf.Reset()
+	warnTunnelConfigIsDead(config.Defaults(), slog.New(newSafeHandler(slog.NewTextHandler(&buf, nil))))
+	if buf.Len() != 0 {
+		t.Fatalf("a config with no dead keys warned anyway:\n%s", buf.String())
+	}
+}

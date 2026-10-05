@@ -1,5 +1,13 @@
 # Spec: connecting agents through Herdr
 
+> **The cross-machine runs in here used Cloudflare tunnels, which herdr-expose
+> no longer raises** ([ADR 0038](adr/0038-no-tunnel-the-lan-is-the-top-rung.md)).
+> The measurements stand — they were about fanout, memory and latency, not about
+> the transport — and the "quick links are not reliable enough to test with"
+> finding is now moot for a different reason. To reproduce these runs, point a
+> tunnel at the port yourself (`cftunnel add <port> <name>`) and treat it as
+> part of the harness rather than part of the product.
+
 Status: draft, 2026-10-01. Spec first; nothing here is built or run yet.
 
 ## Goal

@@ -19,9 +19,9 @@
  * ---------------------------------------------------------------------------
  * These images are published, so the question is what a frame leaks.
  *
- * This used to be `--quick`: a throwaway `https://<random>.trycloudflare.com`
- * that belonged to nobody and was dead within the hour. The tunnel rungs are
- * gone, and what replaced them is BETTER for this job rather than worse.
+ * This used to be `--quick`: a throwaway `https://<random>` hostname that
+ * belonged to nobody and was dead within the hour. The tunnel rungs are gone
+ * (ADR 0038), and what replaced them is BETTER for this job, not worse.
  * `--lan` would bake the machine's private IP into every frame showing a URL,
  * the pairing screen's copy, and the page's own `location`. `--local` shows
  * `http://127.0.0.1:<port>`, which identifies nothing: not a hostname, not a
@@ -39,8 +39,8 @@
  * ---------------------------------------------------------------------------
  * The session name is forced to start with `hexshot-`, every herdr call is
  * pinned to that session's own socket by environment, and teardown runs from a
- * finally block. It never stops a Herdr server it did not start, never touches
- * the daemon on :21118, and never goes near the permanent tunnel.
+ * finally block. It never stops a Herdr server it did not start and never
+ * touches the daemon on :21118.
  *
  * ---------------------------------------------------------------------------
  * KNOBS
@@ -56,7 +56,7 @@
  *   HEXSHOT_REUSE=1     attach to a session + local share that a previous
  *                       HEXSHOT_KEEP=1 run left up, instead of building new
  *                       ones. Re-shooting one thing should not cost another
- *                       two agent warm-ups and another tunnel.
+ *                       two agent warm-ups and another share.
  */
 
 import { chromium } from 'playwright'
@@ -272,18 +272,20 @@ async function setup() {
   if (res.share.mode !== 'local' || !/^http:\/\/127\.0\.0\.1:/.test(shareUrl)) {
     throw new Error(`refusing to photograph a '${res.share.mode}' share at ${shareUrl} — only --local is publishable`)
   }
-  if (res.share.domain) throw new Error(`the share claimed a domain (${res.share.domain}); refusing`)
   log(`share ${shareId} at ${shareUrl}`)
 
-  // The CLI returns as soon as cloudflared hands back a hostname, but that
-  // hostname is not resolvable everywhere for a few more seconds — a run that
-  // went straight to the browser got four ERR_NAME_NOT_RESOLVED in a row and
-  // threw away a perfectly good session. Wait for the tunnel to actually
-  // answer before pointing a browser at it.
-  log('waiting for the tunnel to resolve and answer')
-  const tunnelT0 = Date.now()
+  // Wait for the share to actually answer before pointing a browser at it.
+  //
+  // Kept from when this ran over a tunnel, where DNS was not resolvable
+  // everywhere for a few more seconds and a run that went straight to the
+  // browser got four ERR_NAME_NOT_RESOLVED in a row, throwing away a
+  // perfectly good session. On loopback the window is far smaller but it is
+  // not zero: the CLI returns when the share records itself ready, and the
+  // listener accepts a moment later.
+  log('waiting for the share to answer')
+  const readyT0 = Date.now()
   let live = false
-  while (Date.now() - tunnelT0 < 120000) {
+  while (Date.now() - readyT0 < 120000) {
     try {
       execFileSync('curl', ['-fsS', '--max-time', '5', `${shareUrl}/healthz`], { stdio: 'ignore' })
       live = true
@@ -291,7 +293,7 @@ async function setup() {
     } catch { await sleep(2000) }
   }
   if (!live) throw new Error(`the share at ${shareUrl} never answered /healthz`)
-  log(`the tunnel answered after ${Math.round((Date.now() - tunnelT0) / 1000)}s`)
+  log(`the share answered after ${Math.round((Date.now() - readyT0) / 1000)}s`)
   return res.pairing_code
 }
 
@@ -320,7 +322,7 @@ const initScript = () => {
 
 /**
  * Pair a fresh browser exactly as a phone does: follow a `?pair=<code>` deep
- * link. The retry is kept from when this ran over a real tunnel, where a
+ * link. The retry is kept from when this ran over a tunnel, where a
  * laptop changing networks mid-run produced ERR_NETWORK_CHANGED — a flake, not
  * a product failure, and not worth losing a capture to. On loopback it should
  * never fire, which is the point.
@@ -562,7 +564,7 @@ async function captureStills(browser) {
  *   7. cut to desktop 1440: sidebar and pane together
  *
  * Nothing is captioned, staged or reconstructed. What IS done is an edit: a
- * raw Playwright capture is mostly dead air — a page loading, a tunnel
+ * raw Playwright capture is mostly dead air — a page loading, a share
  * negotiating, an agent thinking — and nobody watches that to the end.
  *
  * So the run records a MARK at every beat boundary, and `cutPlan()` below

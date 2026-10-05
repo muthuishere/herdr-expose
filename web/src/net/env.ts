@@ -1,10 +1,10 @@
 /**
  * Environment facts the UI must state plainly rather than fail silently about.
  *
- * SPEC AMENDMENTS 7 adds a LAN mode that binds 0.0.0.0 when cloudflared is
- * absent. A LAN IP over plain HTTP is NOT a secure context: service workers and
- * PWA install are unavailable there. `localhost`/`127.0.0.1` are exempt by
- * spec; `192.168.x.x` is not.
+ * SPEC AMENDMENTS 7 adds a LAN mode that binds 0.0.0.0. A LAN IP over plain
+ * HTTP is NOT a secure context: service workers and PWA install are
+ * unavailable there. `localhost`/`127.0.0.1` are exempt by spec;
+ * `192.168.x.x` is not.
  *
  * The app still works fully over LAN — it is a live WebSocket, which plain HTTP
  * permits. What is lost is offline shell + "Add to Home Screen". Saying so is
@@ -43,8 +43,9 @@ export function envStatus(): EnvStatus {
     pwaAvailable: false,
     note:
       'On a LAN address over plain HTTP, browsers block service workers and ' +
-      'Add to Home Screen — that needs HTTPS. Everything else works. Expose it ' +
-      'through the Cloudflare tunnel to install it as an app.',
+      'Add to Home Screen — that needs HTTPS. Everything else works. To install ' +
+      'it as an app, reach this server over HTTPS instead — a tunnel or proxy ' +
+      'pointed at this port.',
   }
 }
 

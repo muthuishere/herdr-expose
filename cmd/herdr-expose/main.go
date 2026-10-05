@@ -140,18 +140,18 @@ func usage() {
                         A SYMLINK, so a rebuild or a git pull updates the skill.
                         Idempotent; refuses to clobber a real directory;
                         uninstall removes only links it made.
-  share [--local | --lan | --quick | --domain X]
+  share [--local | --lan]
         [--session NAME] [--pane TARGET] [--hours N|--days N]
                         expose ONE herdr session, time-boxed, self-destructing.
-                        FOUR RUNGS, each one an explicit request:
+                        TWO RUNGS, and the local network is the top one:
                         none/--lan = http://<lan-ip>:<port>  (THE DEFAULT),
-                        --quick    = public https on a throwaway hostname
-                                     (no account, no DNS, nothing to clean up),
-                        --domain X = public https on a name you own,
                         --local    = 127.0.0.1 only, an opt-IN for testing.
-                        Nothing ever escalates above what you asked for; an
-                        explicit tunnel request that cannot be honoured
-                        degrades to --lan and says why.
+                        herdr-expose raises no tunnels. To reach a share from
+                        outside this network, point one at the share's own port
+                        (cftunnel add <port> <name>) and leave it on --lan.
+                        --quick/--domain/--provider are REFUSED, never quietly
+                        downgraded: a link that does not open is worse than an
+                        error.
   share --all [rung] [--hours N|--days N] [--yes]
                         expose EVERY running herdr session, not one — the whole
                         herdr, time-boxed and revocable. It names the sessions
@@ -160,7 +160,10 @@ func usage() {
                         --session/--pane.
   share list|extend <id>|pair <id>|revoke <id>|revoke --all|restore
                         manage shares (every verb takes --json)
-  panic                 revoke every share AND stop the main tunnel
+  panic                 revoke every share, right now. It does NOT stop the
+                        daemon (that is the 'stop' verb) and cannot stop a
+                        tunnel you pointed at the port yourself — it says so
+                        rather than implying otherwise.
   config print-default|path|show|edit
                         the self-documenting config: print-default emits the
                         COMPLETE commented file with every key at its default
@@ -232,8 +235,13 @@ func warnTunnelConfigIsDead(cfg *config.Config, log *slog.Logger) {
 	if len(asked) == 0 {
 		return
 	}
+	// The attribute is "inert_keys", not "keys": `keys` is in the log
+	// scrubber's refused set because it means KEYSTROKES, so naming it that
+	// withheld the only part of this line that matters and left the warning
+	// saying "some keys are dead" without saying which. Caught by reading the
+	// real output against the owner's real config.
 	log.Warn("this config asks for a tunnel, and herdr-expose no longer raises one",
-		"keys", strings.Join(asked, ", "),
+		"inert_keys", strings.Join(asked, ", "),
 		"serving", "loopback and the LAN only",
 		"to_reach_it_from_outside", "point a tunnel at the port yourself, e.g. cftunnel add <port> <name>")
 }
