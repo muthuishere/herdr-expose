@@ -225,15 +225,9 @@ func (e exposeAdapter) Status() (string, bool) { return e.mgr.URL(), true }
 // have been using stops answering, and nothing anywhere says why. So it is
 // said once, at the only moment anybody is reading: startup.
 func warnTunnelConfigIsDead(cfg *config.Config, log *slog.Logger) {
-	var asked []string
-	if cfg.Expose.Cloudflare {
-		asked = append(asked, "cloudflare = true")
-	}
-	if d := strings.TrimSpace(cfg.Expose.Domain); d != "" {
-		asked = append(asked, "domain = "+strconv.Quote(d))
-	}
-	if a := strings.TrimSpace(cfg.Expose.Adapter); a != "" {
-		asked = append(asked, "adapter = "+strconv.Quote(a))
+	asked := cfg.Expose.DeadKeys()
+	if config.DeadShareMode(cfg.Share.DefaultMode) {
+		asked = append(asked, "share.default_mode = "+strconv.Quote(cfg.Share.DefaultMode))
 	}
 	if len(asked) == 0 {
 		return
@@ -419,10 +413,6 @@ func cmdServe(args []string) error {
 				}
 			}
 		}()
-	}
-
-	// In lan/local there is nothing to start — the listener IS the exposure.
-	if cfg.Expose.ShouldAutostart() || res.Remote {
 	}
 
 	// Deliver over the SOCKET, never the CLI: a CLI client attaches to the

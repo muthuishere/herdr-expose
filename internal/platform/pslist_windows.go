@@ -14,7 +14,7 @@ import (
 
 // ProcessesMatching returns the pids whose FULL COMMAND LINE contains every one
 // of the given substrings. Same contract as the Unix twin, same reason: the
-// stray-cloudflared reclaim matches on a config path WE generated, never on a
+// stray-process reclaim matches on a config path WE generated, never on a
 // process name, so it cannot hit somebody else's tunnel.
 //
 // Windows has no ps. A Toolhelp snapshot gives process names but not command

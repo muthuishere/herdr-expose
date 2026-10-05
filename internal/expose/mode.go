@@ -10,12 +10,13 @@ import (
 	"github.com/muthuishere/herdr-expose/internal/config"
 )
 
-// Exposure modes (AMENDMENT E1), on the four-rung ladder of AMENDMENTS 16 L1:
+// Exposure modes (AMENDMENT E1), on the two-rung ladder of AMENDMENTS 16 L1:
 //
-//	local   127.0.0.1:<port>                  this machine only
-//	lan     http://<lan-ip>:<port>            this machine + this network
-//	quick   https://<rand>.trycloudflare.com  the internet
-//	domain  https://<your host>               the internet, your name
+//	local   127.0.0.1:<port>         this machine only
+//	lan     http://<lan-ip>:<port>   this machine + this network
+//
+// There is nothing above lan. The rungs that reached the internet went with
+// the tunnel; see Resolve.
 //
 // The DEFAULT differs by caller, and deliberately so: the DAEMON defaults to
 // local (it serves whoever is sitting at this machine, who just opens
@@ -25,48 +26,26 @@ import (
 // different jobs. Both defaults live at the CALLER, in the [expose] table it
 // builds; this function never picks one.
 //
-// Resolve is a PURE FUNCTION of the [expose] table it is handed: every rung
+// Resolve is a PURE FUNCTION of the [expose] table it is handed: the rung
 // above local has to be switched on in that table, and this function never
-// turns one on by itself. Nothing here reads a config file, so the only way to
-// climb is for the caller to ask — `share --quick` / `--domain` build the
-// table from the FLAG, a bare `share` builds the LAN table, and `--local`
-// hands over a zero Expose, which is loopback by construction
-// (AMENDMENTS 16 L1).
+// turns it on by itself. Nothing here reads a config file, so the only way to
+// climb is for the caller to ask — a bare `share` builds the LAN table, and
+// `--local` hands over a zero Expose, which is loopback by construction.
 //
-// The ONE automatic movement is DOWNWARD: a requested tunnel whose binary is
-// not installed falls back to lan, loudly, via FellBack. That is a failure
-// mode of an explicit ask, not a default — the person did ask to be reachable,
-// and a LAN address is the nearest honest answer. Nothing in here can move
-// UPWARD (L2): every branch below either keeps the requested rung or lowers
-// it, and cmd/herdr-expose's TestResolveNeverEscalates holds the whole table
-// of user-requestable rungs to that.
-//
-// Why the asymmetry is worth the inconvenience: this binary runs arbitrary
-// commands inside the owner's agent sessions, and the blast radius of each
-// rung differs by orders of magnitude. The difference between rung 1 and rung
-// 3 must never be a config key somebody forgot they set, because that is what
-// makes the pairing, scope and TTL guarantees elsewhere in this spec mean
-// anything.
+// Nothing in here can move UPWARD (L2), and cmd/herdr-expose's
+// TestResolveNeverEscalates holds the whole table of user-requestable rungs to
+// that. The asymmetry still earns its keep with two rungs: this binary runs
+// arbitrary commands inside the owner's agent sessions, and the difference
+// between "this machine" and "this café's wifi" must never be a config key
+// somebody forgot they set.
 //
 // LAN mode is only acceptable because auth is mandatory in every mode and the
 // pairing code is shown ONLY on the physically-present machine: no HTTP
 // endpoint mints or displays one. A neighbour on the wifi can reach the port
 // and gets nowhere without looking at the owner's screen.
-// quickBinary names the helper the ephemeral rung needs. It stays a function
-// of the [expose] table rather than a constant because `quick` is a RUNG, not
-// a Cloudflare spelling (ADR 0028): whatever carries the ephemeral rung, the
-// fallback message has to name THAT binary, not always `cloudflared`. Today
-// the only built-in that carries it is cloudflared.
-func quickBinary(config.Expose) (bin, label string) {
-	return "cloudflared", "cloudflare"
-}
-
 const (
-	ModeCloudflare = config.ModeCloudflare
-	ModeQuick      = config.ModeQuick
-	ModeJS         = config.ModeJS
-	ModeLAN        = config.ModeLAN
-	ModeLocal      = config.ModeLocal
+	ModeLAN   = config.ModeLAN
+	ModeLocal = config.ModeLocal
 )
 
 // Resolution is the settled answer to "what do we bind, and what URL do people
@@ -79,7 +58,7 @@ const (
 //	res := mgr.Resolution()
 //	store.SetBinding(res.Mode, res.Bind)
 type Resolution struct {
-	Mode config.Mode `json:"mode"` // cloudflare | js | lan | local
+	Mode config.Mode `json:"mode"` // lan | local
 	Bind string      `json:"bind"` // 127.0.0.1 or 0.0.0.0 — never user-settable
 	Port int         `json:"port"`
 
@@ -87,13 +66,14 @@ type Resolution struct {
 	LANIP string `json:"lan_ip,omitempty"`
 	// URL is what the user types / what the pairing QR encodes.
 	URL string `json:"url"`
-	// Remote is true for the tunnel modes.
-	Remote bool `json:"remote"`
 	// SecureContext is false for plain HTTP on a LAN IP. Browsers only grant
 	// service workers and PWA install in a secure context, and a LAN IP — unlike
 	// localhost — is not one. Real property of the mode, not a bug.
 	SecureContext bool `json:"secure_context"`
-	// FellBack explains an automatic downgrade, e.g. missing cloudflared.
+	// FellBack explained an automatic downgrade. Nothing downgrades any more —
+	// there is no helper binary that can be missing — so it is always empty on
+	// a fresh resolution. The field stays because a share RECORD written by an
+	// older version can carry one, and `share list` must keep printing it.
 	FellBack string `json:"fell_back,omitempty"`
 }
 
@@ -113,15 +93,8 @@ func (r Resolution) AllowedOrigins(configured []string) []string {
 	for _, o := range configured {
 		add(strings.TrimSpace(o))
 	}
-	switch r.Mode {
-	case ModeCloudflare, ModeJS, ModeQuick:
-		// For a quick tunnel r.URL is empty until the hostname is scraped;
-		// Manager.AllowedOrigins appends the live one as soon as it is known.
-		add(r.URL)
-	case ModeLAN:
-		if r.LANIP != "" {
-			add(fmt.Sprintf("http://%s:%d", r.LANIP, r.Port))
-		}
+	if r.Mode == ModeLAN && r.LANIP != "" {
+		add(fmt.Sprintf("http://%s:%d", r.LANIP, r.Port))
 	}
 	// Loopback is always allowed: the owner's own browser on this machine.
 	add(fmt.Sprintf("http://127.0.0.1:%d", r.Port))
@@ -138,14 +111,6 @@ func (r Resolution) Rung() config.Rung { return config.RungOf(r.Mode) }
 // the line printed when an exposure is created.
 func (r Resolution) Reach() string { return r.Rung().Reach() }
 
-// Resolve decides the mode. binaryFound reports whether a helper binary is
-// installed; pass nil for the real check.
-//
-// It starts at the bottom rung and only climbs where the [expose] table it was
-// handed explicitly asks it to (AMENDMENTS 16 L1). A zero Expose therefore
-// resolves to loopback, which is what makes the daemon's local default — and
-// `share --local` — true by construction rather than by a default somewhere up
-// the call stack.
 // Resolve decides where the server listens and what URL to show.
 //
 // TWO RUNGS, and there will not be a third here. herdr-expose used to carry a
@@ -202,11 +167,7 @@ func Resolve(e config.Expose, port int, binaryFound func(string) bool) Resolutio
 // LAN warning when it applies.
 func (r Resolution) Describe() string {
 	var b strings.Builder
-	url := r.URL
-	if url == "" && r.Mode == ModeQuick {
-		url = "<assigned by cloudflare at start>"
-	}
-	fmt.Fprintf(&b, "expose: mode=%s bind=%s:%d url=%s", r.Mode, r.Bind, r.Port, url)
+	fmt.Fprintf(&b, "expose: mode=%s bind=%s:%d url=%s", r.Mode, r.Bind, r.Port, r.URL)
 	if r.FellBack != "" {
 		fmt.Fprintf(&b, " (fallback: %s)", r.FellBack)
 	}

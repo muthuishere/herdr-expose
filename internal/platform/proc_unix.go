@@ -10,7 +10,7 @@ import (
 )
 
 // ProcGroup owns a spawned process TREE so that stopping a tunnel cannot leave
-// an orphaned cloudflared behind. On Unix the tree is a process group and the
+// an orphaned child behind. On Unix the tree is a process group and the
 // group id is enough to address it, so the handle carries no state.
 type ProcGroup struct{}
 

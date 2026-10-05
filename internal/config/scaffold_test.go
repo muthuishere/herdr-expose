@@ -32,9 +32,8 @@ func TestFirstRunWritesEverySectionAndKey(t *testing.T) {
 		"pairing_ttl_seconds = 600", "max_devices = 32", "device_ttl_days = 30",
 		"pair_attempts_per_minute = 10", "handshake_attempts_per_minute = 60",
 		`theme = "auto"`, `default_view = "grid"`,
-		"cloudflare = false", `domain = ""`, `tunnel_name = "herdr-expose"`,
 		"lan = false", "autostart = false",
-		`domain_suffix = ""`, "default_hours = 1", `default_mode = "lan"`, "max_concurrent = 10",
+		"default_hours = 1", `default_mode = "lan"`, "max_concurrent = 10",
 		`level = "info"`, `format = "text"`, `file = ""`, "max_size_mb = 10", "keep = 3",
 	} {
 		if !strings.Contains(text, want) {
@@ -42,12 +41,18 @@ func TestFirstRunWritesEverySectionAndKey(t *testing.T) {
 		}
 	}
 	// The scaffold is the most user-visible documentation this binary ships —
-	// it is written into the file the user opens — so a withdrawn provider
-	// must not survive in it, in a key OR in a comment. AMENDMENTS 18 /
-	// ADR 0034 removed the built-in ngrok provider; a scaffold that still
-	// offers it hands the user a key that does nothing.
-	if strings.Contains(strings.ToLower(text), "ngrok = ") {
-		t.Errorf("the scaffold still offers the withdrawn ngrok key:\n%s", text)
+	// it is written into the file the user opens — so a withdrawn key must not
+	// survive in it as something the user could set. The tunnel went with
+	// AMENDMENTS 18 and the amputation after it; a scaffold that still offers
+	// `cloudflare = true` hands the user a key that does nothing.
+	//
+	// The COMMENTS may still name those keys, and deliberately do: somebody
+	// upgrading needs to find out here that the keys in their file are inert.
+	// What must not appear is an assignment they could uncomment.
+	for _, dead := range []string{"ngrok = ", "cloudflare = ", "tunnel_name = ", "adapter = ", "domain_suffix = "} {
+		if strings.Contains(strings.ToLower(text), dead) {
+			t.Errorf("the scaffold still offers the withdrawn key %q:\n%s", dead, text)
+		}
 	}
 
 	// The stale `bind` key is gone, and its stale claim with it.

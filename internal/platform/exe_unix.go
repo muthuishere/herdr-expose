@@ -18,7 +18,7 @@ func IsExecutable(path string) bool {
 
 // BinCandidates are the directories to search when PATH is not to be trusted —
 // a launchd/systemd unit starts with a minimal PATH that contains none of the
-// places herdr or cloudflared are normally installed.
+// places herdr is normally installed.
 func BinCandidates() []string {
 	return []string{
 		"~/.local/bin", "~/.cargo/bin", "~/bin",

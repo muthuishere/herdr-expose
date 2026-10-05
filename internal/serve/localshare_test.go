@@ -181,7 +181,7 @@ func TestLocalShareWebSocketStillPinsOriginAndHost(t *testing.T) {
 func TestTunnelledRequestToAShareStillNeedsAToken(t *testing.T) {
 	s, port := newLoopbackShareServer(t)
 	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:"+port+"/v1/config", nil)
-	req.RemoteAddr = "127.0.0.1:50020" // cloudflared, on loopback
+	req.RemoteAddr = "127.0.0.1:50020" // a proxy, on loopback
 	req.Header.Set("CF-Connecting-IP", "203.0.113.7")
 	if s.local.bypassAuth(req) {
 		t.Fatal("a request carrying CDN headers was granted the local-mode bypass")

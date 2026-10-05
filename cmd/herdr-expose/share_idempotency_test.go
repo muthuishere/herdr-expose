@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,10 +21,10 @@ import (
 // against real state on disk, and several of them kill the state halfway
 // first.
 //
-// Nothing here touches a real account: every case is a rung that creates
-// nothing (local / lan / quick, or a legacy record from a provider this build
-// no longer has), or a record whose Cloudflare half is
-// asserted through classification rather than executed.
+// Nothing here reaches the network. Both rungs that exist create nothing off
+// this machine, and the records from rungs this build no longer has are
+// exercised as what they are: paperwork left on disk by an older version,
+// which still has to be listable and still has to be wipeable.
 
 // withStateDir points the whole state tree — shares, ledgers, locks — at a
 // scratch directory. It is also the safety rail: without it these tests would
@@ -84,15 +85,15 @@ func TestRevokeAllTwiceAcrossEveryRung(t *testing.T) {
 	withStateDir(t)
 	seedShare(t, "bbbb1111", &shareRecord{Mode: string(config.ModeLocal)})
 	seedShare(t, "bbbb2222", &shareRecord{Mode: string(config.ModeLAN)})
-	seedShare(t, "bbbb3333", &shareRecord{Mode: string(config.ModeQuick), URL: "https://x.trycloudflare.com"})
-	// Legacy records from the build that still had the ngrok provider
-	// (AMENDMENTS 18 / ADR 0034). They must still be reaped in the same pass:
-	// a share this binary can no longer CREATE is still a share it has to be
-	// able to WIPE, or removing a provider would strand state forever.
-	seedShare(t, "bbbb4444", &shareRecord{Mode: string(config.ModeQuick), Provider: "ngrok",
-		URL: "https://x.ngrok-free.app"})
-	seedShare(t, "bbbb5555", &shareRecord{Mode: "ngrok", Provider: "ngrok",
-		Domain: "reserved.example.ngrok.app"})
+	// Records on rungs this build no longer has: a quick tunnel and a named
+	// domain, written by the version before the tunnel was removed, plus the
+	// even older ngrok one. They must still be reaped in the same pass — a
+	// share this binary can no longer CREATE is still a share it has to be
+	// able to WIPE, or an upgrade would strand state forever, and the state it
+	// stranded would be a live pairing store.
+	seedShare(t, "bbbb3333", &shareRecord{Mode: "quick", URL: "https://x.trycloudflare.com"})
+	seedShare(t, "bbbb4444", &shareRecord{Mode: "cloudflare", URL: "https://x.example.com"})
+	seedShare(t, "bbbb5555", &shareRecord{Mode: "ngrok", URL: "https://x.ngrok-free.app"})
 
 	for i := 0; i < 2; i++ {
 		if err := cmdShareRevoke([]string{"--all", "--json"}); err != nil {
@@ -130,16 +131,13 @@ func TestRevokeWipesAShareWithAnUnreadableRecord(t *testing.T) {
 // `panic` twice. It is the kill switch, so the second run must not fail just
 // because the first one worked.
 func TestPanicTwiceIsSuccess(t *testing.T) {
-	state := withStateDir(t)
+	withStateDir(t)
 	seedShare(t, "dddd1111", &shareRecord{Mode: string(config.ModeLAN)})
-	seedShare(t, "dddd2222", &shareRecord{Mode: string(config.ModeQuick), URL: "https://y.trycloudflare.com"})
+	seedShare(t, "dddd2222", &shareRecord{Mode: "quick", URL: "https://y.trycloudflare.com"})
 
 	for i := 0; i < 2; i++ {
 		if err := cmdPanic([]string{"--json"}); err != nil {
 			t.Fatalf("panic #%d: %v", i+1, err)
-		}
-		if _, err := os.Stat(haltFilePath(state)); err != nil {
-			t.Fatalf("panic #%d did not leave the halt flag: %v", i+1, err)
 		}
 		recs, _ := listShareRecords()
 		if len(recs) != 0 {
@@ -266,36 +264,6 @@ func TestExtendIsCumulativeButBounded(t *testing.T) {
 
 // ---------------------------------------------------------------- create
 
-// `share --domain X` twice: REFUSE, deterministically, and say how to resolve
-// it. Two shares on one hostname is the worst outcome — the second repoints
-// the DNS record onto its own tunnel, silently breaking the first, and the
-// first revoke then deletes the record out from under the other.
-func TestSecondShareOnTheSameDomainIsRefused(t *testing.T) {
-	withStateDir(t)
-	seedShare(t, "2222aaaa", &shareRecord{
-		Mode: string(config.ModeCloudflare), Domain: "hex-idem-test.example.com",
-		ExpiresAt: time.Now().Add(time.Hour),
-	})
-
-	if owner := hostnameOwner("hex-idem-test.example.com", ""); owner != "2222aaaa" {
-		t.Fatalf("the live share on that hostname was not found: %q", owner)
-	}
-	// Case-insensitively, because hostnames are.
-	if owner := hostnameOwner("HEX-IDEM-TEST.example.com", ""); owner != "2222aaaa" {
-		t.Fatalf("hostname matching is case sensitive: %q", owner)
-	}
-	// A different hostname is not a collision.
-	if owner := hostnameOwner("something-else.example.com", ""); owner != "" {
-		t.Fatalf("an unrelated hostname reported a collision: %q", owner)
-	}
-	// And an EXPIRED share is not a collision either: it is about to be
-	// reaped, and blocking the hostname on its residue would be wrong.
-	_, _ = updateShare("2222aaaa", func(r *shareRecord) { r.ExpiresAt = time.Now().Add(-time.Minute) })
-	if owner := hostnameOwner("hex-idem-test.example.com", ""); owner != "" {
-		t.Fatal("an expired share must not block its hostname forever")
-	}
-}
-
 // A bare `share` twice is CREATE-SECOND, not refuse: each gets its own free
 // port and its own scope, nothing collides, and that is the documented rule.
 func TestTwoBareSharesDoNotCollide(t *testing.T) {
@@ -317,35 +285,22 @@ func TestTwoBareSharesDoNotCollide(t *testing.T) {
 	if len(recs) != 2 {
 		t.Fatalf("two bare shares must coexist, got %d", len(recs))
 	}
-	// Neither has a hostname, so neither can collide with the other.
-	for _, r := range recs {
-		if r.Domain != "" {
-			t.Fatalf("a LAN share carries a hostname it never created: %+v", r)
-		}
-	}
 }
 
 // ---------------------------------------------------------------- providers
 
-// The rung is decided by the rung FLAGS and nothing else. There is one
-// built-in transport now (AMENDMENTS 18 / ADR 0034), so the way this could go
-// wrong has changed shape: not "a provider moved the share up the ladder" but
-// "a share created without a rung flag still ends up somewhere". Every rung is
-// still requested explicitly, and every one still resolves to itself.
+// The rung is decided by the rung FLAGS and nothing else. Every rung is
+// requested explicitly, and every one resolves to itself — no case is skipped
+// now, because neither rung touches anything off this machine.
 func TestRungComesFromTheFlagsAndNothingElse(t *testing.T) {
 	withBinaryProbe(t, installed)
 	cases := []struct {
 		args []string
 		want config.Rung
-		// resolve is false for the domain rung, whose resolution looks a zone
-		// up in a real Cloudflare account. The REQUESTED rung is still
-		// asserted; what it resolves to against a live zone belongs in e2e,
-		// not in a unit test that must not touch the network.
-		resolve bool
 	}{
-		{nil, config.RungLAN, true},
-		{[]string{"--lan"}, config.RungLAN, true},
-		{[]string{"--local"}, config.RungLocal, true},
+		{nil, config.RungLAN},
+		{[]string{"--lan"}, config.RungLAN},
+		{[]string{"--local"}, config.RungLocal},
 	}
 	for _, tc := range cases {
 		f, err := parseShareFlags(tc.args)
@@ -355,10 +310,7 @@ func TestRungComesFromTheFlagsAndNothingElse(t *testing.T) {
 		if f.rung() != tc.want {
 			t.Fatalf("%v requested rung %s, want %s", tc.args, f.rung(), tc.want)
 		}
-		if !tc.resolve {
-			continue
-		}
-		res, _, err := resolveShareMode(context.Background(), f, 21999, "herdr-expose-share-test")
+		res, _, err := resolveShareMode(context.Background(), f, 21999)
 		if err != nil {
 			t.Fatalf("%v: %v", tc.args, err)
 		}
@@ -386,29 +338,34 @@ func TestProviderFlagIsRefusedAndPointsAtTheEscapeHatch(t *testing.T) {
 	}
 }
 
-// A share recorded under a provider this build no longer has creates NOTHING
-// that this tool may delete, so teardown must classify it as such rather than
-// running the Cloudflare path and no-opping — or worse, aiming a Cloudflare
-// teardown at a hostname in somebody else's account.
-func TestAForeignProviderShareHasNoCloudflareTeardown(t *testing.T) {
-	for _, rec := range []*shareRecord{
-		{Mode: "ngrok", Provider: "ngrok", Domain: "r.example.ngrok.app"},
-		{Mode: string(config.ModeQuick), Provider: "ngrok", URL: "https://q.ngrok-free.app"},
-		{Mode: string(config.ModeCloudflare), Provider: "js:homelab", Domain: "r.example.com"},
-	} {
-		if rec.hasCloudflareResources() {
-			t.Fatalf("a share this build did not create must not be given a Cloudflare teardown: %+v", rec)
+// A share record on a rung this build no longer has must be REFUSED by the
+// instance rather than quietly served on the LAN.
+//
+// This is the upgrade path, and it is the one place where "do something
+// sensible" would be wrong. `share restore` runs on every daemon start, so a
+// record left by the tunnel build WILL be handed to cmdShareRun. Coming back
+// on 192.168.x.x under the same share id would be a different share wearing
+// its name: `share list` would print a URL that was public yesterday, the
+// device tokens paired against the old origin would not work, and nobody would
+// be told why. Refusing names the share and says what to do with it.
+func TestAShareOnAWithdrawnRungIsRefusedNotDowngraded(t *testing.T) {
+	withStateDir(t)
+	for i, mode := range []string{"quick", "cloudflare", "ngrok", "js"} {
+		id := fmt.Sprintf("f0f0000%d", i)
+		seedShare(t, id, &shareRecord{Mode: mode, Port: 0, Session: "s1"})
+		err := cmdShareRun([]string{"--id", id})
+		if err == nil {
+			t.Fatalf("mode %q: a withdrawn rung was served anyway", mode)
 		}
-	}
-	// ...and the cloudflare domain rung still does.
-	cf := &shareRecord{Mode: string(config.ModeCloudflare), Domain: "s.example.com"}
-	if !cf.hasCloudflareResources() {
-		t.Fatal("a cloudflare domain share MUST still delete its record and tunnel")
-	}
-	// An old record with no provider field is a cloudflare one.
-	legacy := &shareRecord{Mode: string(config.ModeCloudflare), Domain: "s.example.com"}
-	if legacy.provider() != "cloudflare" || !legacy.hasCloudflareResources() {
-		t.Fatal("a record written before providers existed must mean cloudflare")
+		for _, want := range []string{"no longer has", "share revoke"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("mode %q: the refusal does not mention %q: %v", mode, want, err)
+			}
+		}
+		// And it is still wipeable, which is the other half of the contract.
+		if err := cmdShareRevoke([]string{id, "--json"}); err != nil {
+			t.Fatalf("mode %q: a withdrawn-rung share must still be revocable: %v", mode, err)
+		}
 	}
 }
 

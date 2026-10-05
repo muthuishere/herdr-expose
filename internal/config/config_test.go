@@ -55,17 +55,8 @@ nested = { deep = 1 }
 
 [expose]
 enabled = true
-cloudflare = true
-domain = "herdr.example.com"
+lan = true
 experimental_retry = 7
-adapter = "cloudflare-named"
-
-[[expose.adapters]]
-id = "cloudflare-named"
-script = "adapters/cloudflare-named.js"
-weight = 42
-[expose.adapters.env]
-hostname = "herdr.example.com"
 `
 	if err := os.WriteFile(path, []byte(src), 0o600); err != nil {
 		t.Fatal(err)
@@ -86,12 +77,8 @@ hostname = "herdr.example.com"
 	if cfg.Server.Port != 8123 {
 		t.Fatalf("port = %d, want 8123", cfg.Server.Port)
 	}
-	a, ok := cfg.AdapterByID("cloudflare-named")
-	if !ok || a.Env["hostname"] != "herdr.example.com" {
-		t.Fatalf("adapter env not parsed: %+v", cfg.Expose.Adapters)
-	}
-	if cfg.Expose.Provider() != ProviderJS {
-		t.Fatalf("named adapter must win, got %s", cfg.Expose.Provider())
+	if !cfg.Expose.LAN {
+		t.Fatal("expose.lan not parsed")
 	}
 	if cfg.Expose.Enabled == nil || !*cfg.Expose.Enabled {
 		t.Fatal("legacy enabled flag lost")
@@ -104,7 +91,7 @@ hostname = "herdr.example.com"
 	}
 	out, _ := os.ReadFile(path)
 	text := string(out)
-	for _, want := range []string{"quic = true", "future_table", "keep me", "deep = 1", "experimental_retry = 7", "weight = 42"} {
+	for _, want := range []string{"quic = true", "future_table", "keep me", "deep = 1", "experimental_retry = 7"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("Save clobbered unknown key %q:\n%s", want, text)
 		}
@@ -114,8 +101,8 @@ hostname = "herdr.example.com"
 	if err != nil {
 		t.Fatalf("reload after save: %v", err)
 	}
-	if round.UI.Theme != "dark" || round.Server.Port != 8123 || round.Expose.Adapter != "cloudflare-named" {
-		t.Fatalf("round trip lost known keys: %+v %+v", round.Server, round.UI)
+	if round.UI.Theme != "dark" || round.Server.Port != 8123 || !round.Expose.LAN {
+		t.Fatalf("round trip lost known keys: %+v %+v %+v", round.Server, round.UI, round.Expose)
 	}
 }
 
@@ -244,23 +231,31 @@ func TestStoreReloadKeepsOldConfigOnError(t *testing.T) {
 
 var _ Provider = (*Config)(nil)
 
-func TestExposeProviderSelection(t *testing.T) {
+// There is no provider to select any more, so what is left to test about
+// [expose] is the reach it asks for and the legacy master switch.
+func TestExposeReachAndAutostart(t *testing.T) {
 	no := false
 	cases := []struct {
 		name string
 		e    Expose
-		want ProviderKind
+		mode Mode
 		auto bool
 	}{
-		{"empty", Expose{}, ProviderNone, false},
-		{"two-liner", Expose{Cloudflare: true, Domain: "herdr.deemwar.com", Autostart: true}, ProviderCloudflare, true},
-		{"quick", Expose{Cloudflare: true}, ProviderCloudflare, false},
-		{"js wins", Expose{Cloudflare: true, Adapter: "x"}, ProviderJS, false},
-		{"legacy disabled", Expose{Cloudflare: true, Autostart: true, Enabled: &no}, ProviderCloudflare, false},
+		{"empty", Expose{}, ModeLocal, false},
+		{"lan", Expose{LAN: true}, ModeLAN, false},
+		{"autostart", Expose{LAN: true, Autostart: true}, ModeLAN, true},
+		{"legacy disabled wins", Expose{LAN: true, Autostart: true, Enabled: &no}, ModeLAN, false},
+		// A config still asking for the tunnel reaches NO further than the
+		// [expose] table's own `lan` key says. This is the test that fails
+		// first if a dead key ever regains an effect.
+		{"dead keys reach nowhere", Expose{DeadCloudflare: true, DeadDomain: "herdr.deemwar.com"}, ModeLocal, false},
+		{"dead keys cannot autostart a tunnel", Expose{DeadCloudflare: true, Autostart: true}, ModeLocal, true},
 	}
 	for _, c := range cases {
-		if got := c.e.Provider(); got != c.want {
-			t.Errorf("%s: provider = %s, want %s", c.name, got, c.want)
+		cfg := Defaults()
+		cfg.Expose = c.e
+		if got := cfg.Mode(); got != string(c.mode) {
+			t.Errorf("%s: mode = %s, want %s", c.name, got, c.mode)
 		}
 		if got := c.e.ShouldAutostart(); got != c.auto {
 			t.Errorf("%s: autostart = %v, want %v", c.name, got, c.auto)
@@ -268,36 +263,72 @@ func TestExposeProviderSelection(t *testing.T) {
 	}
 }
 
-func TestTwoLineExposeConfigRoundTrips(t *testing.T) {
+// The two-line tunnel config that used to BE the happy path. It must still
+// load — an upgrade that refuses to start is the one failure nobody can work
+// around — and it must be NAMED as dead rather than silently obeyed or
+// silently ignored. Inert and silent is the combination that sends somebody
+// looking at DNS for an hour.
+func TestTheOldTwoLineTunnelConfigLoadsAndIsReportedDead(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
-	src := "[expose]\ncloudflare = true\ndomain = \"herdr.deemwar.com\"\n"
+	src := "[expose]\ncloudflare = true\ndomain = \"herdr.deemwar.com\"\ntunnel_name = \"herdr-expose\"\n"
 	if err := os.WriteFile(path, []byte(src), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := LoadFrom(path)
 	if err != nil {
-		t.Fatalf("two-line config failed to load: %v", err)
-	}
-	if !cfg.Expose.Cloudflare || cfg.Expose.Domain != "herdr.deemwar.com" {
-		t.Fatalf("expose not parsed: %+v", cfg.Expose)
+		t.Fatalf("a config written for the tunnel build must still load: %v", err)
 	}
 	if cfg.Server.Port != DefaultPort || cfg.Auth.PairingTTLSeconds != DefaultPairingTTLSeconds {
 		t.Fatalf("defaults missing: %+v %+v", cfg.Server, cfg.Auth)
 	}
+	// Reported...
+	dead := cfg.Expose.DeadKeys()
+	if len(dead) != 3 {
+		t.Fatalf("DeadKeys did not name all three tunnel keys: %q", dead)
+	}
+	// ...and inert: loopback, because `lan` was never set.
+	if cfg.Mode() != string(ModeLocal) {
+		t.Fatalf("a dead tunnel config resolved to %s, want local", cfg.Mode())
+	}
+	// Dropped on the next rewrite, like every other withdrawn key.
 	if err := cfg.Save(); err != nil {
 		t.Fatal(err)
+	}
+	body, _ := os.ReadFile(path)
+	// Spelled as assignments, so `domain_suffix` under [share] — a key that is
+	// very much alive — does not make this pass or fail by accident.
+	for _, gone := range []string{"cloudflare =", "domain =", "tunnel_name =", "adapters"} {
+		if strings.Contains(string(body), gone) {
+			t.Fatalf("Save kept the withdrawn key %q:\n%s", gone, body)
+		}
 	}
 	again, err := LoadFrom(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if again.Expose.Domain != "herdr.deemwar.com" || !again.Expose.Cloudflare {
-		t.Fatalf("round trip lost expose keys: %+v", again.Expose)
+	if len(again.Expose.DeadKeys()) != 0 {
+		t.Fatalf("a rewritten config still carries dead keys: %q", again.Expose.DeadKeys())
 	}
-	body, _ := os.ReadFile(path)
-	if strings.Contains(string(body), "adapters") {
-		t.Fatalf("empty adapter list should not be written:\n%s", body)
+}
+
+// `[share] default_mode` naming a withdrawn rung gets the same treatment: it
+// loads, it reads as LAN, and DeadShareMode says so for the startup warning.
+func TestWithdrawnShareModesLoadAsLAN(t *testing.T) {
+	for _, mode := range []string{"quick", "domain", "auto"} {
+		if got := ShareRung(mode); got != RungLAN {
+			t.Errorf("ShareRung(%q) = %s, want lan", mode, got)
+		}
+	}
+	for _, mode := range []string{"quick", "domain"} {
+		if !DeadShareMode(mode) {
+			t.Errorf("DeadShareMode(%q) = false; a withdrawn rung must be reported", mode)
+		}
+	}
+	for _, mode := range []string{"lan", "local", ""} {
+		if DeadShareMode(mode) {
+			t.Errorf("DeadShareMode(%q) = true; that rung still exists", mode)
+		}
 	}
 }
 
@@ -319,12 +350,9 @@ func TestLegacyNgrokKeysLoadAndAreDroppedOnRewrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a config carrying the withdrawn ngrok keys must still load: %v", err)
 	}
-	// Ignored: nothing is selected, so nothing autostarts.
-	if got := cfg.Expose.Provider(); got != ProviderNone {
-		t.Fatalf("the withdrawn ngrok key still selects a provider: %s", got)
-	}
-	if cfg.Expose.ShouldAutostart() {
-		t.Fatal("a config whose only provider was ngrok must not autostart anything")
+	// Ignored: no rung was asked for, so the answer is loopback.
+	if cfg.Mode() != string(ModeLocal) {
+		t.Fatalf("the withdrawn ngrok key still moved the reach: %s", cfg.Mode())
 	}
 	if err := cfg.Save(); err != nil {
 		t.Fatal(err)

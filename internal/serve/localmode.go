@@ -106,7 +106,7 @@ func remoteIsLoopback(r *http.Request) bool {
 //
 // Every condition must hold. The listener check is the one that grants; the
 // rest only take the grant away. In particular a request that arrived through
-// the Cloudflare tunnel reaches the same loopback listener, so it is
+// a tunnel pointed at this port reaches the same loopback listener, so it is
 // distinguished by its Host (the tunnel hostname, not 127.0.0.1:<port>) and by
 // the CDN headers it carries — and it therefore still needs a device token.
 func (l localMode) bypassAuth(r *http.Request) bool {

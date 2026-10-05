@@ -43,7 +43,7 @@ func newTestServer(t *testing.T) *Server {
 	}
 	s, err := New(Options{
 		Version: "test",
-		Config:  &testConfig{port: 21118, bind: "127.0.0.1", mode: "cloudflare", origins: []string{"https://herdr.example"}},
+		Config:  &testConfig{port: 21118, bind: "127.0.0.1", mode: "lan", origins: []string{"https://herdr.example"}},
 		Hub:     core.NewHub(core.NewStore(log), log),
 		Auth:    auth,
 		Log:     log,
@@ -74,7 +74,7 @@ func pairDevice(t *testing.T, a *Auth, name string) string {
 // storm that the stress test ran against the public tunnel, against the REAL
 // limiter with a virtual clock.
 //
-// Behind cloudflared every client arrives as 127.0.0.1, so the OLD policy — one
+// Behind a proxy on loopback every client arrives as 127.0.0.1, so the OLD policy — one
 // token bucket keyed on the remote address, burst 10, refill 0.5/s — is a
 // single bucket for the whole public endpoint. The NEW policy keys on the
 // identity the token proved.
@@ -83,7 +83,7 @@ func TestHandshakeStormBeforeAfter(t *testing.T) {
 		clients      = 20
 		storm        = 90 * time.Second
 		retryEvery   = 200 * time.Millisecond
-		proxiedAddr  = "127.0.0.1" // what cloudflared shows us for EVERY client
+		proxiedAddr  = "127.0.0.1" // what a loopback proxy shows us for EVERY client
 		attemptsEach = int(storm / retryEvery)
 	)
 
@@ -412,7 +412,7 @@ func TestHealthzLoopbackKeepsDetail(t *testing.T) {
 	// gets the minimal body, because the bypass is derived from the listener.
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodGet, "http://herdr.example/healthz", nil)
-	req.RemoteAddr = "127.0.0.1:54322" // cloudflared, on loopback
+	req.RemoteAddr = "127.0.0.1:54322" // a proxy, on loopback
 	req.Header.Set("CF-Connecting-IP", "203.0.113.7")
 	s.routes().ServeHTTP(rec, req)
 	body = map[string]any{}

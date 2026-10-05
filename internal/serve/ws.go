@@ -290,7 +290,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Handshake budget, AFTER authentication and keyed on the identity the
-	// token proved — never on the remote address, which behind cloudflared is
+	// token proved — never on the remote address, which behind a proxy is
 	// 127.0.0.1 for every client on the public URL (see connlimit.go).
 	//
 	// An unauthenticated peer never reaches this gate: it was refused a socket

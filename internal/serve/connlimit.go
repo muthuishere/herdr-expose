@@ -7,7 +7,7 @@ import (
 // connGate decides whether a WebSocket handshake may proceed.
 //
 // WHY IT IS NOT KEYED ON THE REMOTE IP — this is the bug a stress test found.
-// Behind cloudflared (and behind any reverse proxy) every remote client reaches
+// Behind a reverse proxy or a tunnel pointed at this port, every remote client reaches
 // the loopback listener as 127.0.0.1, so an IP-keyed token bucket is ONE bucket
 // for the ENTIRE public endpoint. Measured on the old code: 20 clients
 // reconnecting for 90s produced 55 successful upgrades and 8,735 HTTP 429s, a

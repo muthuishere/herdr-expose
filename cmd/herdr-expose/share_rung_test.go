@@ -22,15 +22,16 @@ import (
 // may ever climb UP.
 
 // isZeroExpose reports whether nothing at all is switched on in an [expose]
-// table — which is what makes a share local BY CONSTRUCTION: no provider to
-// build, no domain to write DNS for, no 0.0.0.0 bind.
+// table — which is what makes a share local BY CONSTRUCTION: no 0.0.0.0 bind,
+// and no dead tunnel key that a future edit could wire back up.
 func isZeroExpose(e config.Expose) bool {
-	return !e.Cloudflare && !e.Quick && !e.LAN && !e.Autostart &&
-		e.Domain == "" && e.Adapter == "" && len(e.Adapters) == 0
+	return !e.LAN && !e.Autostart && len(e.DeadKeys()) == 0
 }
 
-// installed / missing are stand-ins for the real `which cloudflared`, so the
-// fallback behaviour is testable on a machine in either state.
+// installed / missing are stand-ins for a helper-binary probe. Nothing is
+// shelled out to any more, so the point of keeping both is that neither may
+// change the answer — see TestResolveNeverEscalates, which runs the whole
+// table under each.
 func installed(string) bool { return true }
 func missing(string) bool   { return false }
 
@@ -53,7 +54,7 @@ func withBinaryProbe(t *testing.T, probe func(string) bool) {
 // ELSE: at this machine you would just use the daemon on localhost:21118, so a
 // loopback-only default would make the feature pointless.
 func TestBareShareIsLANAndRaisesNoTunnel(t *testing.T) {
-	withBinaryProbe(t, installed) // cloudflared available: still irrelevant
+	withBinaryProbe(t, installed) // a helper binary is "available": still irrelevant
 
 	f, err := parseShareFlags(nil)
 	if err != nil {
@@ -66,7 +67,7 @@ func TestBareShareIsLANAndRaisesNoTunnel(t *testing.T) {
 		t.Fatalf("requested rung = %s, want lan", f.rung())
 	}
 
-	res, exp, err := resolveShareMode(context.Background(), f, 21999, "herdr-expose-share-test")
+	res, exp, err := resolveShareMode(context.Background(), f, 21999)
 	if err != nil {
 		t.Fatalf("resolve a bare share: %v", err)
 	}
@@ -79,20 +80,18 @@ func TestBareShareIsLANAndRaisesNoTunnel(t *testing.T) {
 	if !strings.HasPrefix(res.URL, "http://") {
 		t.Fatalf("url = %s, want a plain-HTTP LAN address", res.URL)
 	}
-	if res.Remote {
-		t.Fatal("a LAN share is not remote: there is no tunnel to run")
+	if res.Rung() > config.RungLAN {
+		t.Fatal("a LAN share resolved above the LAN, and there is no rung above it")
 	}
-	// The [expose] table handed to the instance is what decides whether a
-	// tunnel process is ever started and whether a DNS record is ever written.
-	// For a LAN share it must switch on nothing but the bind.
-	if !exp.LAN || exp.Quick || exp.Cloudflare || exp.Domain != "" || exp.Adapter != "" {
+	// The [expose] table handed to the instance decides the reach. For a LAN
+	// share it must switch on nothing but the bind — and in particular must
+	// carry none of the dead tunnel keys.
+	if !exp.LAN || len(exp.DeadKeys()) != 0 {
 		t.Fatalf("a bare share was handed a tunnel-capable [expose] table (%+v)", exp)
 	}
-	// And the record written from it asks for no Cloudflare teardown, because
-	// nothing was ever created.
 	rec := &shareRecord{Mode: string(res.Mode), Port: 21999}
-	if !rec.isLAN() || rec.hasCloudflareResources() {
-		t.Fatalf("a LAN share must have no DNS/tunnel teardown: %+v", rec)
+	if !rec.isLAN() {
+		t.Fatalf("a LAN share record did not read back as LAN: %+v", rec)
 	}
 	if rec.rung() != config.RungLAN || rec.rung().Reach() != "anyone on this network" {
 		t.Fatalf("a LAN share must state its reach as this network, got %q", rec.rung().Reach())
@@ -111,7 +110,7 @@ func TestExplicitLocalIsLoopbackOnly(t *testing.T) {
 	if f.rung() != config.RungLocal {
 		t.Fatalf("requested rung = %s, want local", f.rung())
 	}
-	res, exp, err := resolveShareMode(context.Background(), f, 21999, "herdr-expose-share-test")
+	res, exp, err := resolveShareMode(context.Background(), f, 21999)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,8 +125,8 @@ func TestExplicitLocalIsLoopbackOnly(t *testing.T) {
 			"something in it would start a tunnel or bind the network", exp)
 	}
 	rec := &shareRecord{Mode: string(res.Mode), Port: 21999}
-	if !rec.isLocal() || rec.hasCloudflareResources() {
-		t.Fatalf("a local share must have no DNS/tunnel teardown: %+v", rec)
+	if !rec.isLocal() {
+		t.Fatalf("a local share record did not read back as local: %+v", rec)
 	}
 	if got := rec.CurrentURL(); got != "http://127.0.0.1:21999" {
 		t.Fatalf("record url = %s, want loopback", got)
@@ -161,18 +160,15 @@ max_concurrent = 10
 	if err := f.applyConfigDefaults(); err != nil {
 		t.Fatal(err)
 	}
-	if f.quick || f.local || strings.TrimSpace(f.domain) != "" {
+	if f.local {
 		t.Fatalf("a configured [expose] domain leaked into a bare share: %+v", f)
 	}
-	res, exp, err := resolveShareMode(context.Background(), f, 21999, "herdr-expose-share-test")
+	res, exp, err := resolveShareMode(context.Background(), f, 21999)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Mode != config.ModeLAN || exp.Cloudflare || exp.Quick || exp.Domain != "" {
+	if res.Mode != config.ModeLAN || len(exp.DeadKeys()) != 0 {
 		t.Fatalf("a bare share was promoted to %s because a domain was configured", res.Mode)
-	}
-	if res.Remote {
-		t.Fatal("a bare share raised a tunnel")
 	}
 }
 
@@ -206,19 +202,35 @@ max_concurrent = 10
 	if f.rung() != config.RungLAN {
 		t.Fatalf(`default_mode = "auto" resolved to %s, want lan`, f.rung())
 	}
-	res, _, err := resolveShareMode(context.Background(), f, 21999, "t")
+	res, _, err := resolveShareMode(context.Background(), f, 21999)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Remote || res.Mode != config.ModeLAN {
+	if res.Mode != config.ModeLAN {
 		t.Fatalf(`default_mode = "auto" raised %s`, res.Mode)
 	}
 }
 
-// A domain_suffix is a NAMING convention. On its own it must not be what
-// promotes a share to the public internet — that was the other half of the
-// withdrawn auto ladder.
-func TestDomainSuffixAloneDoesNotPublish(t *testing.T) {
+// `[share] default_mode = "quick"` or `"domain"` is a stale request for a rung
+// that no longer exists. It must read as LAN (TestLanRequestNeverBecomesATunnel
+// covers that) and it must be REPORTED, so somebody whose config asks for the
+// internet is told they got the wifi instead.
+func TestAWithdrawnDefaultModeIsReported(t *testing.T) {
+	for _, mode := range []string{"quick", "domain"} {
+		if !config.DeadShareMode(mode) {
+			t.Fatalf("default_mode = %q is inert and unreported: the one combination "+
+				"that sends somebody looking at DNS for an hour", mode)
+		}
+		if got := config.ShareRung(mode); got != config.RungLAN {
+			t.Fatalf("default_mode = %q resolved to %s, want lan", mode, got)
+		}
+	}
+}
+
+// `domain_suffix` named the hostname for the withdrawn domain rung, and it is
+// now an unknown key. A config still carrying one must load, be ignored, and
+// leave the share on the LAN — not become a reason the daemon will not start.
+func TestAStaleDomainSuffixIsIgnored(t *testing.T) {
 	withBinaryProbe(t, installed)
 	writeTestConfig(t, `
 [share]
@@ -233,9 +245,6 @@ max_concurrent = 10
 	}
 	if err := f.applyConfigDefaults(); err != nil {
 		t.Fatal(err)
-	}
-	if strings.TrimSpace(f.domain) != "" {
-		t.Fatalf("domain_suffix published a bare share on %q", f.domain)
 	}
 	if f.rung() != config.RungLAN {
 		t.Fatalf("rung = %s, want lan", f.rung())
@@ -268,18 +277,18 @@ max_concurrent = 10
 	if err := f.applyConfigDefaults(); err != nil {
 		t.Fatal(err)
 	}
-	if f.quick {
+	if f.local {
 		t.Fatal("[share] default_mode overrode an explicit --lan")
 	}
 
-	res, exp, err := resolveShareMode(context.Background(), f, 21999, "herdr-expose-share-test")
+	res, exp, err := resolveShareMode(context.Background(), f, 21999)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if res.Mode != config.ModeLAN {
 		t.Fatalf("--lan resolved to %s: a LAN request was escalated to a tunnel", res.Mode)
 	}
-	if res.Remote || exp.Quick || exp.Cloudflare || exp.Domain != "" {
+	if len(exp.DeadKeys()) != 0 {
 		t.Fatalf("--lan was handed a tunnel-capable [expose] table: %+v", exp)
 	}
 	if config.RungOf(res.Mode) > config.RungLAN {
@@ -308,7 +317,7 @@ max_concurrent = 10
 	for _, probe := range []struct {
 		name string
 		fn   func(string) bool
-	}{{"cloudflared installed", installed}, {"cloudflared missing", missing}} {
+	}{{"helper installed", installed}, {"helper missing", missing}} {
 		cases := [][]string{nil, {"--local"}, {"--lan"}}
 		for _, args := range cases {
 			name := fmt.Sprintf("%s/%v", probe.name, args)
@@ -318,7 +327,7 @@ max_concurrent = 10
 				if err != nil {
 					t.Fatal(err)
 				}
-				res, _, err := resolveShareMode(context.Background(), f, 21999, "herdr-expose-share-test")
+				res, _, err := resolveShareMode(context.Background(), f, 21999)
 				if err != nil {
 					t.Fatalf("resolve: %v", err)
 				}
@@ -336,14 +345,14 @@ max_concurrent = 10
 
 // ------------------------------------------------------------- plumbing
 
-// Four rungs, exactly one of them per share.
+// Two rungs, exactly one of them per share.
 func TestRungFlagsAreMutuallyExclusive(t *testing.T) {
 	withBinaryProbe(t, installed)
 	f, err := parseShareFlags([]string{"--local", "--lan"})
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if _, _, err := resolveShareMode(context.Background(), f, 21999, "t"); err == nil {
+	if _, _, err := resolveShareMode(context.Background(), f, 21999); err == nil {
 		t.Fatal("accepted two rungs at once")
 	} else if !strings.Contains(err.Error(), "mutually exclusive") {
 		t.Fatalf("unhelpful error: %v", err)
@@ -387,10 +396,10 @@ max_concurrent = 10
 	if err := f.applyConfigDefaults(); err != nil {
 		t.Fatal(err)
 	}
-	if f.quick {
+	if !f.local {
 		t.Fatal("[share] default_mode = \"quick\" overrode an explicit --local")
 	}
-	res, _, err := resolveShareMode(context.Background(), f, 21999, "t")
+	res, _, err := resolveShareMode(context.Background(), f, 21999)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -411,7 +420,7 @@ func TestShippedDefaultModeIsLocal(t *testing.T) {
 	}
 	// The DAEMON, by contrast, keeps its loopback default: it serves whoever
 	// is sitting at this machine. The asymmetry is the point, so it is pinned.
-	if got := config.Defaults().Expose; got.LAN || got.Cloudflare || got.Quick {
+	if got := config.Defaults().Expose; got.LAN || len(got.DeadKeys()) != 0 {
 		t.Fatalf("the daemon's [expose] default left loopback: %+v", got)
 	}
 }

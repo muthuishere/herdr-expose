@@ -34,8 +34,8 @@ func TestOnlyTwoRungsExist(t *testing.T) {
 		if got.Mode != tc.mode || got.Bind != tc.bind {
 			t.Fatalf("%s: mode=%s bind=%s, want %s/%s", tc.name, got.Mode, got.Bind, tc.mode, tc.bind)
 		}
-		if got.Remote {
-			t.Fatalf("%s: reported Remote, and nothing here is remote any more", tc.name)
+		if got.Rung() > config.RungLAN {
+			t.Fatalf("%s: resolved above the LAN, and there is no rung above it", tc.name)
 		}
 	}
 }

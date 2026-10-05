@@ -59,9 +59,9 @@ func NewStore(cfg *Config) *Store {
 	return &Store{cur: cfg, path: cfg.path, mode: ModeLocal, bind: BindLoopback}
 }
 
-// SetBinding records the resolved exposure mode and bind address. internal/expose
-// computes them (it is the package that knows whether cloudflared exists) and
-// calls this once at startup and again after every SIGHUP.
+// SetBinding records the resolved exposure mode and bind address.
+// internal/expose computes them and calls this once at startup and again
+// after every SIGHUP.
 func (s *Store) SetBinding(mode Mode, bind string) error {
 	if err := ValidateBind(bind); err != nil {
 		return err
@@ -116,7 +116,7 @@ func (s *Store) Bind() string {
 	return s.bind
 }
 
-// Mode implements Provider: cloudflare | quick | js | lan | local.
+// Mode implements Provider: lan | local.
 func (s *Store) Mode() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

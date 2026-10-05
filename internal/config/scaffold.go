@@ -32,8 +32,8 @@ const scaffoldHeader = `# herdr-expose configuration — every section and every
 #
 # There are NO SECRETS in this file and there never will be. The server token
 # and every device token live only as SHA-256 hashes in the 0600 state file,
-# and the Cloudflare API token is read from $CLOUDFLARE_ALLPURPOSE_TOKEN at the
-# moment it is used. This file is safe to paste into an issue.
+# and there are no provider credentials left to hold: herdr-expose does not
+# raise tunnels. This file is safe to paste into an issue.
 `
 
 // section is one top-level table of the scaffold.
@@ -48,8 +48,8 @@ var scaffoldSections = []section{
 [server]
 port = 21118                        # the HTTP/WebSocket port (AMENDMENTS 6)
 # There is deliberately NO 'bind' key — the exposure mode below decides the bind address.
-# Loopback for local and for the tunnel modes, 0.0.0.0 for lan. A legacy 'bind'
-# key is ignored on load and is never written back.
+# Loopback for local, 0.0.0.0 for lan. A legacy 'bind' key is ignored on load
+# and is never written back.
 # allowed_origins = []              # extra browser Origins to accept; the mode's own origin is always allowed
 `},
 
@@ -71,32 +71,26 @@ default_view = "grid"               # grid | focus
 `},
 
 	{"expose", `
-# Exposure. The happy path is two lines and zero JavaScript:
+# Exposure — how far the listener reaches. There are two answers, so there is
+# one key.
 #
-#   cloudflare = true
-#   domain = "herdr.example.com"
+#   lan = false   127.0.0.1:21118          this machine only  <- DEFAULT
+#   lan = true    http://<lan-ip>:21118    this machine + this network
 #
-# herdr-expose then creates or reuses a named Cloudflare tunnel, mints its
-# credentials through the API (so 'cloudflared login' and its browser prompt
-# are never needed), upserts the proxied CNAME, runs cloudflared and restarts
-# it if it dies. The API token is read from $CLOUDFLARE_ALLPURPOSE_TOKEN at the
-# moment it is used: never stored here, never written to state, never logged
-# and never returned by 'status'.
+# herdr-expose does NOT raise tunnels. It used to: a cloudflare key and a
+# domain made it create a named tunnel, mint credentials through the API,
+# upsert a CNAME and supervise cloudflared. All of that is gone, and reaching
+# this server from outside your network is now a tunnel you point at the port
+# yourself — e.g. 'cftunnel add 21118 herdr'. A tool that only forwards a port
+# cannot accidentally forward a pane.
+#
+# If this file still carries cloudflare / domain / tunnel_name / adapter from
+# that era, they do NOTHING. They are not an error — the daemon still starts —
+# and it SAYS so once at startup, then drops them the next time it rewrites
+# this file.
 [expose]
-cloudflare = false                  # public https on a static domain you own
-domain = ""                         # REQUIRED when cloudflare = true, e.g. "herdr.example.com"
-tunnel_name = "herdr-expose"        # the named Cloudflare tunnel to create or reuse
-lan = false                         # bind 0.0.0.0 so the wifi can reach this machine; also the automatic fallback when cloudflared is missing
-autostart = false                   # bring the tunnel up when the server starts
-# adapter = "my-tunnel"             # escape hatch: a JS adapter instead of the built-in provider.
-#                                   Cloudflare is the ONE built-in transport; ngrok, tailscale, a
-#                                   corporate proxy or a homelab box are adapters. See adapters/template.js.
-#
-# [[expose.adapters]]
-# id = "my-tunnel"
-# script = "adapters/template.js"
-# [expose.adapters.env]
-# hostname = "herdr.example.com"
+lan = false                         # bind 0.0.0.0 so the wifi can reach this machine
+autostart = false                   # start serving when the service starts
 #
 # lan = true is safe because auth is never optional and the pairing code is
 # shown ONLY on this machine's screen — no HTTP endpoint mints or displays one,
@@ -107,42 +101,34 @@ autostart = false                   # bring the tunnel up when the server starts
 
 	{"share", `
 # Defaults for 'herdr-expose share' — one scoped, time-boxed, self-destructing
-# tunnel onto ONE session. Every share expires; there is no permanent share, a
+# server onto ONE session. Every share expires; there is no permanent share, a
 # long one is just --days 30 (AMENDMENTS 10).
 #
-# FOUR RUNGS (AMENDMENTS 16). The ladder is climbed, never guessed:
+# TWO RUNGS (AMENDMENTS 16). The ladder is climbed, never guessed:
 #   (none)     http://<lan-ip>:<port>        this machine + this network  <- DEFAULT
 #                                            (plain HTTP on a LAN IP is not a
 #                                            secure context: no PWA install)
-#   --quick    https://<random>.trycloudflare.com    anyone on the internet
-#              no account, no zone, no DNS, no API token, nothing to clean up.
-#              The hostname is NEW every time, so paired device tokens (which
-#              are origin-bound) do not carry over to the next quick share.
-#   --domain   https://x.you.com             the internet, on a name you own
 #   --local    http://127.0.0.1:<port>       this machine only; an opt-IN for
 #                                            testing, not the default — a share
 #                                            nobody else can open is not a share
 #
-# A failed EXPLICIT request degrades LOUDLY (--quick with no cloudflared falls
-# back to lan, and says why). Nothing ever escalates ABOVE what was asked for:
-# a bare 'share' never becomes a tunnel because [expose] happens to have a
-# domain configured. This binary runs arbitrary commands in your agent
-# sessions, so the step from "this room" to "the entire internet" is a flag you
-# typed, never a key in this file you forgot about.
+# There is nothing above --lan, and nothing ever escalates ABOVE what was asked
+# for. To let somebody outside your network open a share, point a tunnel at
+# that share's port yourself and leave the share on --lan. '--quick' and
+# '--domain' are REFUSED rather than quietly downgraded, because a share that
+# publishes nothing and says nothing gets discovered by the person you sent the
+# link to.
 #
 # [expose] above keeps its own default of LOCAL, deliberately: the daemon
 # serves whoever is sitting at this machine, a share exists to be reached from
 # elsewhere. Same principle, different job.
-#
-# The quick tunnel is confined to shares on purpose: [expose] keeps its static
-# domain so the daily driver stays installable and paired (C1).
 [share]
-domain_suffix = ""                  # with default_mode = "domain": 'share --name review' -> review.<suffix>
 default_hours = 1                   # TTL when neither --hours nor --days is given
-default_mode = "lan"                # local | lan | quick | domain — the rung a bare 'share' climbs to.
+default_mode = "lan"                # local | lan — the rung a bare 'share' climbs to.
                                     # "lan" is the shipped default; change it only if you want a
-                                    # different PERSONAL default. ("auto" from before AMENDMENTS 16
-                                    # still loads and now means "lan".)
+                                    # different PERSONAL default. "auto", "quick" and "domain" are
+                                    # withdrawn spellings: they still load, they now mean "lan",
+                                    # and startup says so.
 max_concurrent = 10                 # refuse to create more than this many live shares
 `},
 
@@ -156,8 +142,8 @@ max_concurrent = 10                 # refuse to create more than this many live 
 #
 # Terminal output is NEVER written here, at any level including debug: pane
 # bytes are the contents of your screen and can contain anything. Neither are
-# credentials — the Cloudflare API token, device tokens and pairing codes are
-# logged as ids and hashes, never as values. Both are enforced in code.
+# credentials — device tokens and pairing codes are logged as ids and hashes,
+# never as values. Both are enforced in code.
 [log]
 level = "info"                      # debug | info | warn | error
 format = "text"                     # text | json

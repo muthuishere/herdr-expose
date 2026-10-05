@@ -150,11 +150,11 @@ func TestSecretValuesAreScrubbedFromFreeText(t *testing.T) {
 	t.Setenv("CLOUDFLARE_ALLPURPOSE_TOKEN", "TOKEN-VALUE-THAT-MUST-NOT-APPEAR")
 	var buf bytes.Buffer
 	log := slog.New(newSafeHandler(slog.NewTextHandler(&buf, nil)))
-	log.Warn("cloudflare api GET /zones failed with Authorization: Bearer TOKEN-VALUE-THAT-MUST-NOT-APPEAR",
+	log.Warn("upstream GET /zones failed with Authorization: Bearer TOKEN-VALUE-THAT-MUST-NOT-APPEAR",
 		"err", fmt.Errorf("bad auth for TOKEN-VALUE-THAT-MUST-NOT-APPEAR"))
 	out := buf.String()
 	if strings.Contains(out, "TOKEN-VALUE-THAT-MUST-NOT-APPEAR") {
-		t.Fatalf("the Cloudflare token leaked through free text:\n%s", out)
+		t.Fatalf("an environment secret leaked through free text:\n%s", out)
 	}
 	if !strings.Contains(out, "redacted") {
 		t.Fatalf("scrub left no trace of what it removed:\n%s", out)

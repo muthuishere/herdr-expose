@@ -29,8 +29,8 @@ import (
 //     contain anything — a password typed at a prompt, a customer record,
 //     unreleased source. A debug line that dumps a frame turns the log into a
 //     copy of everything the user did.
-//  2. CREDENTIALS. The Cloudflare API token, device tokens and pairing codes
-//     are logged as ids and hashes, never as values.
+//  2. CREDENTIALS. Device tokens and pairing codes are logged as ids and
+//     hashes, never as values.
 //
 // Both are enforced by the handler below — in code, not by convention — because
 // the log survives for weeks and gets pasted into issues.
@@ -203,9 +203,9 @@ const safeValue = "[withheld: terminal output and credentials are never logged]"
 //   - ANY []byte value is replaced whatever it is called — that is what a
 //     frame looks like;
 //   - every string is bounded, because a value that long is a payload;
-//   - known secret VALUES (the Cloudflare tokens) are
-//     scrubbed out of free text, the same trick internal/expose already plays,
-//     so a third-party error string cannot smuggle one through.
+//   - known secret VALUES, read from the environment by NAME, are scrubbed
+//     out of free text, so an error string from anywhere cannot smuggle one
+//     through.
 type safeHandler struct{ inner slog.Handler }
 
 func newSafeHandler(inner slog.Handler) slog.Handler { return &safeHandler{inner: inner} }
@@ -274,6 +274,12 @@ func truncate(s string) string {
 
 // secretEnvNames are variables whose VALUES must never appear in a log line,
 // even inside somebody else's error string.
+//
+// Nothing in this binary reads any of them any more — they belonged to the
+// tunnel. They stay because this process INHERITS the owner's environment, so
+// the values are still present in it, and a scrubber that costs one string
+// comparison per log line is the wrong thing to remove on the grounds that
+// the leak is currently unreachable.
 var secretEnvNames = []string{
 	"CLOUDFLARE_ALLPURPOSE_TOKEN", "CLOUDFLARE_API_TOKEN", "CLOUDFLARE_TUNNEL_TOKEN",
 }

@@ -20,17 +20,15 @@ import (
 //
 // Everything this binary depends on is external and can be individually
 // missing: a herdr binary that is not on a launchd unit's PATH, a socket that
-// moved, a port a stray process kept, a Cloudflare token without Zone:DNS:Edit,
-// a DNS record that never propagated, a share whose deadline passed. Each of
+// moved, a port a stray process kept, a share whose deadline passed. Each of
 // those fails in its own way at its own moment, and the user sees one symptom:
 // nothing loads. One command that checks all of them, in order, is worth more
 // than any amount of error-message polish.
 //
 // Rules it follows:
-//   - never print a credential. The Cloudflare token is checked by USING it
-//     and reporting the outcome, never by echoing it.
-//   - a missing optional thing is a skip, not a failure: not configuring
-//     Cloudflare is a valid way to run.
+//   - never print a credential. A credential is checked by USING it and
+//     reporting the outcome, never by echoing it.
+//   - a missing optional thing is a skip, not a failure.
 //   - every failure carries a hint that names the fix.
 
 type checkStatus string

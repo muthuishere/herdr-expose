@@ -14,7 +14,7 @@ import (
 
 // Windows has no process groups in the Unix sense. CREATE_NEW_PROCESS_GROUP
 // exists, but it only scopes console Ctrl events — it does NOT make a kill
-// recursive, and killing a pid leaves its children running. cloudflared spawns
+// recursive, and killing a pid leaves its children running. A child process spawns
 // children; an orphaned one holds a tunnel open against a hostname we think we
 // tore down, which is the exact hazard the Unix stray-reclaim ledger exists
 // for.

@@ -12,8 +12,8 @@ import (
 // of the given substrings.
 //
 // It matches on a command line, never on a process name, because the only safe
-// way to reclaim a stray cloudflared is to match the config path we ourselves
-// generated. Matching "cloudflared" alone would kill the owner's unrelated
+// way to reclaim a stray child is to match the config path we ourselves
+// generated. Matching the binary name alone would kill the owner's unrelated
 // tunnels.
 func ProcessesMatching(needles ...string) []int {
 	if len(needles) == 0 {

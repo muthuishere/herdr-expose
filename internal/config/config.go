@@ -22,6 +22,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/pelletier/go-toml/v2"
@@ -80,11 +81,8 @@ const DefaultLogFileName = "herdr-expose.log"
 type Mode string
 
 const (
-	ModeCloudflare Mode = "cloudflare" // public static domain; binds loopback
-	ModeQuick      Mode = "quick"      // ephemeral *.trycloudflare.com; SHARES ONLY (AMENDMENTS 15)
-	ModeJS         Mode = "js"         // JS adapter escape hatch; binds loopback
-	ModeLAN        Mode = "lan"        // binds 0.0.0.0; anyone on the wifi can reach the port
-	ModeLocal      Mode = "local"      // binds loopback; the default
+	ModeLAN   Mode = "lan"   // binds 0.0.0.0; anyone on the wifi can reach the port
+	ModeLocal Mode = "local" // binds loopback; the default
 )
 
 // The only two bind addresses this binary will ever use.
@@ -101,18 +99,17 @@ const (
 // it is a comparison the code can actually make, and a test can assert, rather
 // than an invariant a reviewer has to re-derive from a chain of if-statements.
 //
-// The blast radius of each rung differs by orders of magnitude: this machine,
-// this room, the entire internet. This binary runs arbitrary commands inside
-// the owner's agent sessions, so the distance between rung 0 and rung 2 must
-// never be a config key somebody forgot they set. That is what makes the
-// pairing, scope and TTL guarantees elsewhere in this spec mean anything.
+// The ladder is now two rungs high, because this binary no longer raises
+// tunnels: the top of it is the local network. The ORDER is kept rather than
+// collapsed into a bool for the same reason it was introduced — the comparison
+// at the resolver ("resolved <= requested") is the invariant, and it has to
+// keep holding if a rung is ever added back. Reaching the internet is now
+// somebody else's job: point a tunnel at the port.
 type Rung int
 
 const (
-	RungLocal  Rung = iota // 127.0.0.1 — this machine only
-	RungLAN                // http://<lan-ip>:<port> — anyone on this network
-	RungQuick              // https://<random>.trycloudflare.com — the internet
-	RungDomain             // https://<your host> — the internet, on a name you own
+	RungLocal Rung = iota // 127.0.0.1 — this machine only
+	RungLAN               // http://<lan-ip>:<port> — anyone on this network
 )
 
 func (r Rung) String() string {
@@ -121,10 +118,6 @@ func (r Rung) String() string {
 		return "local"
 	case RungLAN:
 		return "lan"
-	case RungQuick:
-		return "quick"
-	case RungDomain:
-		return "domain"
 	}
 	return "unknown"
 }
@@ -138,49 +131,52 @@ func (r Rung) Reach() string {
 		return "this machine only"
 	case RungLAN:
 		return "anyone on this network"
-	case RungQuick:
-		return "anyone on the internet"
-	case RungDomain:
-		return "anyone on the internet"
 	}
 	return "unknown"
 }
 
-// RungOf maps a resolved Mode onto the ladder. A tunnel mode that is not on
-// the share ladder (a JS adapter, or a mode written by an older version) is
-// still the internet, so it sorts at the top: an unknown mode must never look
-// SAFER than it is.
+// RungOf maps a resolved Mode onto the ladder. A mode this build has never
+// heard of — "cloudflare" or "quick" in a share record written by an older
+// version — sorts at the TOP, because an unknown mode must never look SAFER
+// than it is. That is the only reason the default arm exists: nothing this
+// binary resolves can land there any more.
 func RungOf(m Mode) Rung {
 	switch m {
 	case ModeLocal:
 		return RungLocal
-	case ModeLAN:
-		return RungLAN
-	case ModeQuick:
-		return RungQuick
 	default:
-		return RungDomain
+		return RungLAN
 	}
 }
 
 // ShareRung reads the [share] default_mode key as a rung.
 //
-// An unrecognised or empty value — including the withdrawn "auto" — means LAN,
-// the shipped default. The failure mode of a misread config key is therefore
-// a share that reaches this machine and this network and stops: never a tunnel,
-// never the public internet. Nothing above RungLAN is reachable from this
-// function without the key spelling it out.
+// An unrecognised or empty value — including the withdrawn "auto", and the
+// withdrawn "quick" and "domain" — means LAN, the shipped default and now the
+// top of the ladder. The failure mode of a misread config key is therefore a
+// share that reaches this machine and this network and stops.
+//
+// A file that still says "quick" or "domain" is not refused, because refusing
+// would stop a daemon that was running yesterday. It is reported instead:
+// DeadShareMode is what the startup warning asks, so the key is inert and
+// SAID to be inert rather than quietly reinterpreted.
 func ShareRung(defaultMode string) Rung {
 	switch strings.ToLower(strings.TrimSpace(defaultMode)) {
 	case "local":
 		return RungLocal
-	case "quick":
-		return RungQuick
-	case "domain":
-		return RungDomain
 	default:
 		return RungLAN
 	}
+}
+
+// DeadShareMode reports a [share] default_mode naming a rung this binary no
+// longer has, so startup can say so.
+func DeadShareMode(defaultMode string) bool {
+	switch strings.ToLower(strings.TrimSpace(defaultMode)) {
+	case "quick", "domain":
+		return true
+	}
+	return false
 }
 
 // Server is the [server] table.
@@ -224,16 +220,11 @@ type UI struct {
 
 // Share is the [share] table: defaults for `herdr-expose share`.
 type Share struct {
-	// DomainSuffix turns `share --name review` into review.<suffix>.
-	DomainSuffix string `toml:"domain_suffix" json:"domain_suffix"`
 	// DefaultHours is the TTL used when neither --hours nor --days is given.
 	DefaultHours float64 `toml:"default_hours" json:"default_hours"`
-	// DefaultMode is local | lan | quick | domain — the rung a `share` with no
-	// transport flag climbs to. It ships as "lan" (AMENDMENTS 16 L1) and
-	// exists only so somebody with a different personal default can set one;
-	// it is never a way for a rung to be reached by accident, because the
-	// person who edits this file is asking for it in exactly the same sense
-	// that typing `--quick` asks for it.
+	// DefaultMode is local | lan — the rung a `share` with no rung flag climbs
+	// to. It ships as "lan" (AMENDMENTS 16 L1) and exists only so somebody
+	// with a different personal default can set one.
 	//
 	// "auto" is the WITHDRAWN AMENDMENTS 15 ladder (domain -> quick -> lan).
 	// It still loads, so an existing config file keeps working, but it now
@@ -275,13 +266,6 @@ func (l Log) SlogLevel() slog.Level {
 	default:
 		return slog.LevelInfo
 	}
-}
-
-// Adapter is one [[expose.adapters]] entry.
-type Adapter struct {
-	ID     string            `toml:"id" json:"id"`
-	Script string            `toml:"script" json:"script"`
-	Env    map[string]string `toml:"env" json:"env"`
 }
 
 // Chat is the [chat] table: reaching agents from a chat app.
@@ -378,98 +362,76 @@ func (c Chat) ActiveChatAdapters() []ChatAdapter {
 	return out
 }
 
-// Expose is the [expose] table.
-//
-// The happy path (SPEC AMENDMENT A2) is two lines:
+// Expose is the [expose] table: how far the listener reaches, and nothing
+// else. There are two answers — this machine, or this machine and the local
+// network — so there is one key:
 //
 //	[expose]
-//	cloudflare = true
-//	domain = "herdr.deemwar.com"   # REQUIRED
+//	lan = true
 //
-// `adapter` is the escape hatch: naming a JS adapter wins over the built-ins.
+// This table used to select a transport (`cloudflare`, `domain`,
+// `tunnel_name`, `adapter`). It no longer does: herdr-expose serves loopback
+// and the LAN, and reaching it from outside the network is a tunnel you point
+// at the port yourself. Those keys are still PARSED — see DeadKeys — because
+// go-toml ignores what it does not recognise, and a config that says
+// `cloudflare = true` must be told it is inert rather than left believing it.
 type Expose struct {
-	Cloudflare bool `toml:"cloudflare" json:"cloudflare"`
-
 	// LAN allows binding 0.0.0.0 so phones and laptops on the same wifi can
-	// reach the server directly. It is also the automatic fallback when a
-	// tunnel was requested but its binary is not installed (E1).
+	// reach the server directly.
 	//
 	// Safe only because auth is mandatory in every mode and the pairing code is
 	// shown ONLY on this machine: no HTTP endpoint mints or displays one, so a
 	// neighbour on the network can reach the port and get nowhere.
 	LAN bool `toml:"lan" json:"lan"`
 
-	// Quick selects an ephemeral TryCloudflare tunnel (*.trycloudflare.com):
-	// no account, no zone, no DNS record, no API token, nothing to clean up.
-	//
-	// It is DELIBERATELY not a TOML key (`toml:"-"`). AMENDMENTS 15 brings the
-	// quick tunnel back for SHARES ONLY; the permanent deployment still
-	// requires a static domain (C1), and a key in the config file would be an
-	// invitation to make the daily driver ephemeral again. `herdr-expose share
-	// --quick` constructs this table in memory instead.
-	Quick bool `toml:"-" json:"quick,omitempty"`
-
-	// Domain is REQUIRED whenever a provider is enabled (C1). There is no
-	// ephemeral/quick tunnel path: a hostname that changes on restart breaks
-	// PWA installs, bookmarks and origin-bound device tokens.
-	Domain string `toml:"domain" json:"domain"`
-	// TunnelName names the Cloudflare named tunnel; `tunnel` is accepted as a
-	// legacy alias.
-	TunnelName string `toml:"tunnel_name" json:"tunnel_name"`
-	Tunnel     string `toml:"tunnel" json:"-"`
-	Autostart  bool   `toml:"autostart" json:"autostart"`
+	Autostart bool `toml:"autostart" json:"autostart"`
 
 	// Enabled is the legacy master switch from the pre-amendment spec. It is
 	// kept so old configs keep working: when it is present and false it
 	// suppresses autostart. A nil value means "not specified".
 	Enabled *bool `toml:"enabled" json:"enabled,omitempty"`
 
-	// Adapter selects a JS adapter by id instead of a built-in provider.
-	Adapter  string    `toml:"adapter" json:"adapter"`
-	Adapters []Adapter `toml:"adapters" json:"adapters"`
+	// The keys below do NOTHING. They are decoded for one purpose: so startup
+	// can name them and say they are inert. Deleting the fields would be worse
+	// than keeping them, because an unknown TOML key is silently dropped — a
+	// file still carrying `cloudflare = true` and a domain would load without
+	// complaint and serve loopback, and the person would find out when the
+	// link they sent somebody did not open. They carry no `json` tag: they are
+	// not part of the config API any more. Save drops them on rewrite, the
+	// same treatment the withdrawn `ngrok` key already gets.
+	DeadCloudflare bool   `toml:"cloudflare" json:"-"`
+	DeadDomain     string `toml:"domain" json:"-"`
+	DeadTunnelName string `toml:"tunnel_name" json:"-"`
+	DeadTunnel     string `toml:"tunnel" json:"-"`
+	DeadAdapter    string `toml:"adapter" json:"-"`
+	DeadAdapters   []any  `toml:"adapters" json:"-"`
 }
 
-// Provider identifies which exposure implementation the config selects.
-type ProviderKind string
-
-const (
-	ProviderNone       ProviderKind = "none"
-	ProviderCloudflare ProviderKind = "cloudflare"
-	ProviderJS         ProviderKind = "js"
-)
-
-// Provider resolves the selection rules: an explicit JS adapter wins, then
-// cloudflare. There is exactly one built-in transport (AMENDMENTS 18 / ADR
-// 0034); anything else — ngrok, tailscale, a corporate proxy — is a JS
-// adapter, which is why this stays a kind rather than collapsing into a bool.
-func (e Expose) Provider() ProviderKind {
-	switch {
-	case strings.TrimSpace(e.Adapter) != "":
-		return ProviderJS
-	case e.Cloudflare:
-		return ProviderCloudflare
-	default:
-		return ProviderNone
+// DeadKeys lists the [expose] keys present in this config that no longer do
+// anything, spelled the way the file spells them. Empty is the good case.
+func (e Expose) DeadKeys() []string {
+	var out []string
+	if e.DeadCloudflare {
+		out = append(out, "cloudflare = true")
 	}
+	if strings.TrimSpace(e.DeadDomain) != "" {
+		out = append(out, "domain = "+strconv.Quote(strings.TrimSpace(e.DeadDomain)))
+	}
+	if strings.TrimSpace(e.DeadTunnelName) != "" || strings.TrimSpace(e.DeadTunnel) != "" {
+		out = append(out, "tunnel_name")
+	}
+	if strings.TrimSpace(e.DeadAdapter) != "" || len(e.DeadAdapters) > 0 {
+		out = append(out, "adapter")
+	}
+	return out
 }
 
-// TunnelID is the named tunnel to create or reuse.
-func (e Expose) TunnelID() string {
-	if n := strings.TrimSpace(e.TunnelName); n != "" {
-		return n
-	}
-	if n := strings.TrimSpace(e.Tunnel); n != "" {
-		return n
-	}
-	return "herdr-expose"
-}
-
-// ShouldAutostart reports whether the server brings the tunnel up on boot.
+// ShouldAutostart reports whether the daemon starts serving on boot.
 func (e Expose) ShouldAutostart() bool {
 	if e.Enabled != nil && !*e.Enabled {
 		return false
 	}
-	return e.Autostart && e.Provider() != ProviderNone
+	return e.Autostart
 }
 
 // Config is the whole file. `raw` holds the decoded document as-is, including
@@ -498,30 +460,12 @@ func (c *Config) Port() int { return c.Server.Port }
 // with the resolved mode.
 func (c *Config) Bind() string { return c.Server.Bind }
 
-// Mode implements the Provider interface. A Config on its own does not know
-// whether cloudflared exists, so it reports the configured intent; the Store
-// reports the resolved mode.
+// Mode implements the Provider interface: the configured reach.
 func (c *Config) Mode() string {
-	switch c.Expose.Provider() {
-	case ProviderCloudflare:
-		return string(ModeCloudflare)
-	case ProviderJS:
-		return string(ModeJS)
-	}
 	if c.Expose.LAN {
 		return string(ModeLAN)
 	}
 	return string(ModeLocal)
-}
-
-// AdapterByID returns the configured adapter with the given id.
-func (c *Config) AdapterByID(id string) (Adapter, bool) {
-	for _, a := range c.Expose.Adapters {
-		if a.ID == id {
-			return a, true
-		}
-	}
-	return Adapter{}, false
 }
 
 // Defaults returns a Config with every documented key at its default value.
@@ -633,18 +577,13 @@ func parse(data []byte) (*Config, error) {
 		return nil, err
 	}
 	cfg.raw = raw
-	// An explicit empty [[expose.adapters]] list must not be silently
-	// repopulated from the defaults, but a file that never mentions adapters
-	// keeps the default entry.
-	if _, ok := rawTable(raw, "expose")["adapters"]; ok && cfg.Expose.Adapters == nil {
-		cfg.Expose.Adapters = []Adapter{}
-	}
 	return cfg, nil
 }
 
 // Validate enforces the invariants the rest of the binary relies on. The
 // loopback check is the important one: the HTTP surface is a remote code
-// execution surface, and the tunnel adapter is the only sanctioned remote path.
+// execution surface, and the only addresses it is ever allowed to answer on
+// are loopback and the local network.
 func (c *Config) Validate() error {
 	if c.Server.Port < 1 || c.Server.Port > 65535 {
 		return fmt.Errorf("server.port %d is out of range (1-65535)", c.Server.Port)
@@ -677,40 +616,16 @@ func (c *Config) Validate() error {
 	default:
 		return fmt.Errorf("ui.default_view %q is not one of grid|focus", c.UI.DefaultView)
 	}
-	seen := map[string]bool{}
-	for i, a := range c.Expose.Adapters {
-		if strings.TrimSpace(a.ID) == "" {
-			return fmt.Errorf("expose.adapters[%d] has no id", i)
-		}
-		if seen[a.ID] {
-			return fmt.Errorf("expose.adapters: duplicate id %q", a.ID)
-		}
-		seen[a.ID] = true
-		if strings.TrimSpace(a.Script) == "" {
-			return fmt.Errorf("expose.adapters[%q] has no script", a.ID)
-		}
-	}
-	if a := strings.TrimSpace(c.Expose.Adapter); a != "" && !seen[a] {
-		return fmt.Errorf("expose.adapter %q has no matching [[expose.adapters]] entry", a)
-	}
-	d := strings.TrimSpace(c.Expose.Domain)
-	if d != "" {
-		if strings.Contains(d, "/") || strings.Contains(d, ":") || !strings.Contains(d, ".") {
-			return fmt.Errorf("expose.domain %q must be a bare hostname such as \"herdr.example.com\"", d)
-		}
-	}
 	if err := c.validateShare(); err != nil {
 		return err
 	}
 	if err := c.validateLog(); err != nil {
 		return err
 	}
-	// C1: a static domain is mandatory. There is no random-hostname fallback.
-	if d == "" && c.Expose.Provider() == ProviderCloudflare {
-		return fmt.Errorf("expose.cloudflare = true requires expose.domain, e.g. domain = \"herdr.example.com\" " +
-			"(there is no quick/ephemeral tunnel: a hostname that changes on restart breaks PWA installs, " +
-			"bookmarks and device tokens)")
-	}
+	// The dead [expose] keys are deliberately NOT validated and never an
+	// error: a config written for the tunnel build has to keep loading, or an
+	// upgrade turns into a daemon that will not start. Startup reports them
+	// instead — see Expose.DeadKeys.
 	return nil
 }
 
@@ -720,11 +635,14 @@ func (c *Config) validateShare() error {
 	// a config file written before AMENDMENTS 16 does not break, but it now
 	// resolves to `lan` (see ShareRung) — a reading of the old key that cannot
 	// publish a session the user never asked to publish.
+	// "quick" and "domain" join "auto" as withdrawn spellings: still
+	// LOADABLE, so a file written for the tunnel build does not stop the
+	// daemon, but they now resolve to `lan`, and startup says so.
 	case "local", "auto", "lan", "quick", "domain":
 	default:
-		return fmt.Errorf("share.default_mode %q is not one of local|lan|quick|domain "+
-			"(the default is \"lan\": a share reaches this machine and this network, and goes "+
-			"no further unless you ask it to with --quick or --domain)",
+		return fmt.Errorf("share.default_mode %q is not one of local|lan "+
+			"(the default is \"lan\": a share reaches this machine and this network, and there "+
+			"is no rung above that — point a tunnel at the port if you need one)",
 			c.Share.DefaultMode)
 	}
 	if c.Share.DefaultHours <= 0 {
@@ -736,10 +654,6 @@ func (c *Config) validateShare() error {
 	}
 	if c.Share.MaxConcurrent <= 0 {
 		return fmt.Errorf("share.max_concurrent must be positive, got %d", c.Share.MaxConcurrent)
-	}
-	d := strings.TrimSpace(c.Share.DomainSuffix)
-	if d != "" && (strings.Contains(d, "/") || strings.Contains(d, ":") || !strings.Contains(d, ".")) {
-		return fmt.Errorf("share.domain_suffix %q must be a bare domain such as \"share.example.com\"", d)
 	}
 	return nil
 }
@@ -851,33 +765,31 @@ func (c *Config) merged() map[string]any {
 	doc["ui"] = ui
 
 	expose := rawTable(doc, "expose")
-	expose["cloudflare"] = c.Expose.Cloudflare
 	// Keys this binary no longer has: read without complaint (an old config
 	// must keep loading) and dropped on rewrite, exactly as `server.bind` and
 	// `share.default_mode = "auto"` are. `ngrok` was a built-in provider until
-	// AMENDMENTS 18 / ADR 0034 removed it; a file that still carries it is not
-	// an error, it is just a key that no longer does anything.
-	delete(expose, "ngrok")
+	// AMENDMENTS 18 / ADR 0034 removed it; the rest went with the tunnel
+	// itself. A file that still carries them is not an error — they are just
+	// keys that no longer do anything, and a rewrite is the one moment they
+	// can leave the file without surprising anybody, because the startup
+	// warning has already named them.
+	for _, dead := range []string{"ngrok", "cloudflare", "domain", "tunnel", "tunnel_name", "adapter", "adapters"} {
+		delete(expose, dead)
+	}
 	expose["lan"] = c.Expose.LAN
 	expose["autostart"] = c.Expose.Autostart
-	setOrDelete(expose, "domain", c.Expose.Domain)
-	setOrDelete(expose, "tunnel", c.Expose.Tunnel)
-	setOrDelete(expose, "adapter", c.Expose.Adapter)
 	if c.Expose.Enabled != nil {
 		expose["enabled"] = *c.Expose.Enabled
-	}
-	if len(c.Expose.Adapters) > 0 {
-		expose["adapters"] = mergeAdapters(expose["adapters"], c.Expose.Adapters)
-	} else {
-		delete(expose, "adapters")
 	}
 	doc["expose"] = expose
 
 	share := rawTable(doc, "share")
 	// Same as [expose]: a withdrawn key is read without complaint and dropped
-	// on rewrite, never a reason to refuse to start.
-	delete(share, "ngrok")
-	share["domain_suffix"] = c.Share.DomainSuffix
+	// on rewrite, never a reason to refuse to start. `domain_suffix` named a
+	// hostname for the domain rung, which no longer exists.
+	for _, dead := range []string{"ngrok", "domain_suffix"} {
+		delete(share, dead)
+	}
 	share["default_hours"] = c.Share.DefaultHours
 	share["default_mode"] = c.Share.DefaultMode
 	share["max_concurrent"] = int64(c.Share.MaxConcurrent)
@@ -892,51 +804,6 @@ func (c *Config) merged() map[string]any {
 	doc["log"] = lg
 
 	return doc
-}
-
-// mergeAdapters keeps unknown per-adapter keys by matching on id.
-func mergeAdapters(rawList any, adapters []Adapter) []any {
-	prev := map[string]map[string]any{}
-	if items, ok := rawList.([]any); ok {
-		for _, it := range items {
-			if m, ok := it.(map[string]any); ok {
-				if id, _ := m["id"].(string); id != "" {
-					prev[id] = m
-				}
-			}
-		}
-	}
-	out := make([]any, 0, len(adapters))
-	for _, a := range adapters {
-		m := cloneMap(prev[a.ID])
-		m["id"] = a.ID
-		m["script"] = a.Script
-		env := rawTable(m, "env")
-		for k, v := range a.Env {
-			env[k] = v
-		}
-		// Drop env keys the struct no longer carries.
-		for k := range env {
-			if _, ok := a.Env[k]; !ok {
-				delete(env, k)
-			}
-		}
-		if len(env) > 0 {
-			m["env"] = env
-		} else {
-			delete(m, "env")
-		}
-		out = append(out, m)
-	}
-	return out
-}
-
-func setOrDelete(m map[string]any, key, val string) {
-	if strings.TrimSpace(val) == "" {
-		delete(m, key)
-		return
-	}
-	m[key] = val
 }
 
 func rawTable(m map[string]any, key string) map[string]any {
