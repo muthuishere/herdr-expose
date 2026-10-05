@@ -15,18 +15,20 @@
  * plus a regenerated docs/assets/README.md index.
  *
  * ---------------------------------------------------------------------------
- * WHY `share --quick` AND NOTHING ELSE
+ * WHY `share --local` AND NOTHING ELSE
  * ---------------------------------------------------------------------------
- * These images are published. A `--domain` share puts the owner's permanent
- * hostname (herdr.deemwar.com) into every frame that shows a URL, into the
- * pairing screen's copy, and into the page's own `location`. A `--quick` share
- * is a throwaway `https://<random>.trycloudflare.com` that belongs to nobody,
- * creates no DNS record, needs no Cloudflare account, and is dead within the
- * hour. It is the only rung that is safe to photograph.
+ * These images are published, so the question is what a frame leaks.
  *
- * It must also stay a PUBLIC rung rather than `--lan`, because a LAN share
- * bakes the machine's private IP into the frame instead. `--quick` leaks
- * neither.
+ * This used to be `--quick`: a throwaway `https://<random>.trycloudflare.com`
+ * that belonged to nobody and was dead within the hour. The tunnel rungs are
+ * gone, and what replaced them is BETTER for this job rather than worse.
+ * `--lan` would bake the machine's private IP into every frame showing a URL,
+ * the pairing screen's copy, and the page's own `location`. `--local` shows
+ * `http://127.0.0.1:<port>`, which identifies nothing: not a hostname, not a
+ * network, not a machine.
+ *
+ * It is also no longer reachable from outside this machine while the shoot is
+ * running, which the old rationale could not claim.
  *
  * The share is scoped with `--session`, so no other session on this machine —
  * and this machine runs a dozen, including a live trading desk — can appear in
@@ -51,7 +53,7 @@
  *   HEXSHOT_SKIP_STILLS=1 video only
  *   HEXSHOT_INDEX_ONLY=1  rebuild docs/assets/README.md from the files already
  *                       there and do nothing else
- *   HEXSHOT_REUSE=1     attach to a session + quick share that a previous
+ *   HEXSHOT_REUSE=1     attach to a session + local share that a previous
  *                       HEXSHOT_KEEP=1 run left up, instead of building new
  *                       ones. Re-shooting one thing should not cost another
  *                       two agent warm-ups and another tunnel.
@@ -154,8 +156,8 @@ async function setup() {
 
   if (REUSE) {
     const live = hexposeJSON('share', 'list', '--json').shares ?? []
-    const mine = live.find((sh) => sh.mode === 'quick' && /trycloudflare\.com/.test(sh.url ?? ''))
-    if (!mine) throw new Error('HEXSHOT_REUSE=1 but no live --quick share to attach to')
+    const mine = live.find((sh) => sh.mode === 'local' && /^http:\/\/127\.0\.0\.1:/.test(sh.url ?? ''))
+    if (!mine) throw new Error('HEXSHOT_REUSE=1 but no live --local share to attach to')
     shareId = mine.id
     shareUrl = mine.url
     log(`reusing share ${shareId} at ${shareUrl} on session ${SESSION}`)
@@ -262,13 +264,13 @@ async function setup() {
   log(`agent states: ${AGENT_PANE}=${agentState(AGENT_PANE)} ${BLOCKED_PANE}=${agentState(BLOCKED_PANE)}`)
 
   // ------------------------------------------------------------- the share
-  // --quick, never --domain and never --lan. See the block at the top.
-  log('raising a --quick tunnel (anonymous trycloudflare hostname, 1 hour)')
-  const res = hexposeJSON('share', '--quick', '--session', SESSION, '--hours', '1', '--json')
+  // --local, never --lan. See the block at the top.
+  log('raising a --local share (loopback only, nothing identifying in frame)')
+  const res = hexposeJSON('share', '--local', '--session', SESSION, '--hours', '1', '--json')
   shareId = res.share.id
   shareUrl = res.share.url
-  if (res.share.mode !== 'quick' || !/trycloudflare\.com/.test(shareUrl)) {
-    throw new Error(`refusing to photograph a '${res.share.mode}' share at ${shareUrl} — only --quick is publishable`)
+  if (res.share.mode !== 'local' || !/^http:\/\/127\.0\.0\.1:/.test(shareUrl)) {
+    throw new Error(`refusing to photograph a '${res.share.mode}' share at ${shareUrl} — only --local is publishable`)
   }
   if (res.share.domain) throw new Error(`the share claimed a domain (${res.share.domain}); refusing`)
   log(`share ${shareId} at ${shareUrl}`)
@@ -288,7 +290,7 @@ async function setup() {
       break
     } catch { await sleep(2000) }
   }
-  if (!live) throw new Error(`the quick tunnel at ${shareUrl} never answered /healthz`)
+  if (!live) throw new Error(`the share at ${shareUrl} never answered /healthz`)
   log(`the tunnel answered after ${Math.round((Date.now() - tunnelT0) / 1000)}s`)
   return res.pairing_code
 }
@@ -318,9 +320,10 @@ const initScript = () => {
 
 /**
  * Pair a fresh browser exactly as a phone does: follow a `?pair=<code>` deep
- * link. Retried, because a quick tunnel is a real tunnel over the real
- * internet and a laptop changing networks mid-run produces ERR_NETWORK_CHANGED
- * — which is a flake, not a product failure, and should not lose a capture.
+ * link. The retry is kept from when this ran over a real tunnel, where a
+ * laptop changing networks mid-run produced ERR_NETWORK_CHANGED — a flake, not
+ * a product failure, and not worth losing a capture to. On loopback it should
+ * never fire, which is the point.
  */
 async function newPairedContext(browser, opts) {
   let lastErr
@@ -843,10 +846,10 @@ function writeIndex() {
     'real `herdr-expose` share, in front of a real Herdr session running two real Claude',
     'agents and a real shell — no mockups, no composites, no retouching, no invented UI.',
     '',
-    'The capture always uses `herdr-expose share --quick`, never `--domain` and never',
-    '`--lan`, so no owned hostname and no private LAN address is ever in frame — the URL',
-    'is an anonymous `*.trycloudflare.com` that is revoked the moment the run ends. The',
-    'share is scoped to a throwaway `hexshot-*` session, so no other session on the',
+    'The capture always uses `herdr-expose share --local`, never `--lan`, so no private',
+    'LAN address is ever in frame — the URL is `http://127.0.0.1:<port>`, which identifies',
+    'no hostname, no network and no machine, and the share is revoked when the run ends.',
+    'The share is scoped to a throwaway `hexshot-*` session, so no other session on the',
     'capture machine can appear in the sidebar.',
     '',
     'Dark theme throughout, and that is now a CHOICE rather than a fact: the app has a',
@@ -901,10 +904,10 @@ function writeIndex() {
     '```',
     '',
     'It stands up its own throwaway session with its own agents, exposes only that',
-    'session over a `--quick` tunnel, pairs a browser through a `?pair=` deep link,',
+    'session over a `--local` share, pairs a browser through a `?pair=` deep link,',
     'shoots every viewport, records and edits the video, and then revokes the share and',
     'deletes the session. See the comment block at the top of `e2e/screenshots.mjs` for',
-    'why it must be `--quick` and what the safety rails are.',
+    'why it must be `--local` and what the safety rails are.',
     '')
   writeFileSync(join(OUT, 'README.md'), L.join('\n'))
   log(`wrote ${join(OUT, 'README.md')}`)

@@ -405,24 +405,6 @@ func listShareRecords() ([]*shareRecord, error) {
 	return out, nil
 }
 
-// shareCFOptions rebuilds the Cloudflare view of a share from its record.
-// Every teardown path uses it, so the hostname, tunnel name, state dir AND the
-// `herdr-expose-share` tag are all fixed by construction.
-func shareCFOptions(rec *shareRecord) expose.CloudflareOptions {
-	dir, _ := shareDirFor(rec.ID)
-	name := rec.TunnelName
-	if name == "" {
-		name = shareTunnelName(rec.ID)
-	}
-	return expose.CloudflareOptions{
-		Port:       rec.Port,
-		Domain:     rec.Domain,
-		TunnelName: name,
-		StateDir:   dir,
-		Comment:    expose.ShareDNSComment,
-	}
-}
-
 // --- command dispatch -------------------------------------------------------
 
 func cmdShare(args []string) error {
@@ -544,8 +526,23 @@ func parseShareFlags(args []string) (shareFlags, error) {
 		}
 		var err error
 		switch args[i] {
-		case "--domain", "-d":
-			f.domain, err = next()
+		case "--domain", "-d", "--quick":
+			// Gone, and loudly rather than quietly. Silently treating
+			// `--domain x.example.com` as a LAN share would publish nothing
+			// and say nothing, and the person would find out when the link
+			// they sent did not open.
+			//
+			// The flag is named BEFORE the value is consumed: --domain takes
+			// one and --quick does not, and reading args[i] after next() had
+			// advanced it reported whatever flag came next instead.
+			flag := args[i]
+			if flag != "--quick" {
+				_, _ = next()
+			}
+			err = fmt.Errorf("%s was removed: herdr-expose no longer raises tunnels. "+
+				"It serves loopback and the LAN, and nothing else. "+
+				"To reach this from outside the network, point a tunnel at the port "+
+				"yourself (cftunnel add <port> <name>) and leave this share on --lan", flag)
 		case "--session", "-s":
 			f.session, err = next()
 		case "--pane", "--only-target", "-p":
@@ -574,23 +571,19 @@ func parseShareFlags(args []string) (shareFlags, error) {
 			f.local = true
 		case "--lan":
 			f.lan = true
-		case "--quick":
-			f.quick = true
 		case "--all":
 			f.all = true
 		case "--yes", "-y":
 			f.yes = true
 		case "--provider":
-			// Removed with the second built-in provider (AMENDMENTS 18 /
-			// ADR 0034). A one-value flag that pretends to be a choice is
-			// worse than no flag, and silently accepting `--provider ngrok`
-			// would hand back a Cloudflare tunnel under an ngrok name. Say
-			// what happened and where the transport went instead.
+			// Removed with the second built-in provider, and now with the
+			// first as well: there is no transport left to select. A flag
+			// that pretends to be a choice is worse than no flag.
 			_, _ = next()
-			err = errors.New("--provider was removed: Cloudflare is the only built-in transport, " +
-				"so the rung flags (--lan / --quick / --domain / --local) are the whole choice. " +
-				"For ngrok, tailscale or anything else, write a JS adapter and select it with " +
-				"`adapter = \"<id>\"` under [expose] — see adapters/template.js")
+			err = errors.New("--provider was removed: herdr-expose has no transports to choose " +
+				"between any more. It serves loopback (--local) and the LAN (--lan), and that is " +
+				"the whole choice. For ngrok, tailscale, Cloudflare or anything else, point that " +
+				"tool at the port yourself (cftunnel add <port> <name>)")
 		case "--json":
 			f.asJSON = true
 		default:
@@ -785,85 +778,35 @@ func resolveShareMode(ctx context.Context, f shareFlags, port int, tunnelName st
 }
 
 func resolveShareModeUnchecked(ctx context.Context, f shareFlags, port int, tunnelName string) (expose.Resolution, config.Expose, error) {
+	_, _ = ctx, tunnelName // kept in the signature; nothing here calls out any more
 	var none config.Expose
-	// Four rungs, exactly one of them.
-	named := 0
-	for _, on := range []bool{f.local, f.lan, f.quick, strings.TrimSpace(f.domain) != ""} {
-		if on {
-			named++
-		}
-	}
-	if named > 1 {
+
+	// TWO RUNGS. There were four: loopback, the LAN, a throwaway
+	// *.trycloudflare.com hostname, and a hostname on your own zone. The top
+	// two are gone with the tunnel, and tunnelling is now a separate tool
+	// pointed at this port — which is a better place for it, because a tool
+	// that only forwards a port cannot accidentally forward a pane.
+	if f.local && f.lan {
 		return expose.Resolution{}, none, errors.New(
-			"--local, --lan, --quick and --domain are mutually exclusive: pick loopback, " +
-				"a LAN address, a throwaway *.trycloudflare.com hostname, or a hostname on your own zone")
+			"--local and --lan are mutually exclusive: pick loopback or a LAN address")
 	}
 
-	// lan: fall back to a LAN address for an explicit tunnel request that
-	// cannot be honoured. Never reached from a bare `share` — that is the whole
-	// asymmetry of L2.
-	lanFallback := func(why string) (expose.Resolution, config.Expose, error) {
-		lan := config.Expose{LAN: true}
-		r := expose.Resolve(lan, port, shareBinaryFound)
-		r.FellBack = why
-		return r, lan, nil
-	}
-
-	switch {
 	// RUNG 1 — LOCAL, by explicit `--local` only. The zero Expose is local by
-	// construction, so this branch hands over a table with nothing switched
-	// on: no tunnel process, no DNS, no 0.0.0.0 bind. Kept as an opt-IN for
-	// testing; it is not the default, because a share nobody else can open is
-	// not a share. On loopback the F1 local-mode bypass applies — see
-	// internal/serve/localmode.go, where Origin allowlisting and Host pinning
-	// replace the device token rather than removing it.
-	case f.local:
+	// construction. Kept as an opt-IN for testing; it is not the default,
+	// because a share nobody else can open is not a share. On loopback the F1
+	// local-mode bypass applies — see internal/serve/localmode.go, where Origin
+	// allowlisting and Host pinning replace the device token rather than
+	// removing it.
+	if f.local {
 		e := config.Expose{}
 		return expose.Resolve(e, port, shareBinaryFound), e, nil
-
-	// RUNG 2 — LAN. The DEFAULT, and the case for a bare `share`. Cannot fail,
-	// and must never be "upgraded": a person who asked for the wifi — or who
-	// asked for nothing at all — did not ask for the internet. Binding
-	// 0.0.0.0 covers loopback too, so the owner's own browser still works.
-	case f.lan || (!f.quick && strings.TrimSpace(f.domain) == ""):
-		e := config.Expose{LAN: true}
-		return expose.Resolve(e, port, shareBinaryFound), e, nil
-
-	// RUNG 3 — QUICK. No token is read, no zone is looked up, no DNS call is
-	// made; the ONLY precondition is cloudflared. Missing it degrades to lan
-	// with the reason printed, because the ask was "make this reachable".
-	case f.quick:
-		// The ephemeral rung: it creates nothing in any account, so the only
-		// precondition is the binary that carries it; a missing one degrades
-		// to lan with the reason printed.
-		e := config.Expose{Quick: true}
-		res := expose.Resolve(e, port, shareBinaryFound)
-		if res.Mode != config.ModeQuick {
-			return lanFallback("you asked for a quick tunnel, but " + res.FellBack)
-		}
-		return res, e, nil
 	}
 
-	// RUNG 4 — DOMAIN. cloudflared first (a missing binary is an environment
-	// problem and degrades to lan), then the zone. A hostname that belongs to
-	// something else is a mistake in the ARGUMENT, so it is a hard error with
-	// the fix in it: silently putting that share on the wifi instead would not
-	// be what the person meant by `--domain`.
-	d := strings.TrimSpace(f.domain)
-
-	e := config.Expose{Cloudflare: true, Domain: d, TunnelName: tunnelName}
-	res := expose.Resolve(e, port, shareBinaryFound)
-	if res.Mode != config.ModeCloudflare {
-		return lanFallback(fmt.Sprintf("you asked to share on %s, but %s", d, res.FellBack))
-	}
-	if _, rec, err := expose.CheckZoneAccess(ctx, d); err != nil {
-		return expose.Resolution{}, none, err
-	} else if rec.Exists && rec.Comment != expose.ShareDNSComment {
-		return expose.Resolution{}, none, fmt.Errorf("%s already has a DNS record tagged %q — a share only ever creates and deletes "+
-			"records tagged %q, so it will not take this hostname over. Pick another hostname",
-			d, rec.Comment, expose.ShareDNSComment)
-	}
-	return res, e, nil
+	// RUNG 2 — LAN. The DEFAULT, and the case for a bare `share`. Cannot fail.
+	// Binding 0.0.0.0 covers loopback too, so the owner's own browser still
+	// works.
+	e := config.Expose{LAN: true}
+	return expose.Resolve(e, port, shareBinaryFound), e, nil
 }
 
 // hostnameOwner reports the id of a LIVE share already holding this hostname.
@@ -1750,124 +1693,34 @@ func revokeShareRecord(rec *shareRecord) teardownResult {
 	// 1. the process
 	res.ProcessGone = killShareProcess(rec.PID)
 
-	// A LOCAL, LAN or QUICK share has no DNS record and no named tunnel, so
-	// the Cloudflare path is SKIPPED rather than run and no-opped:
-	// no API call, no token read, nothing that can fail. Teardown is exactly
-	// "process gone, port free, state wiped" — and `revoke --all` / `panic`
-	// therefore handle a mix of local + lan + quick + domain shares in one
-	// pass, without one rung's failure aborting the others.
+	// Teardown is now exactly "process gone, port free, state wiped".
 	//
-	// A quick tunnel additionally leaves a cloudflared behind if the instance
-	// was SIGKILLed, so it is matched on the --url argument derived from this
-	// share's own port and killed. Matching on a derived argument rather than
-	// on the binary name is what keeps this away from the permanent
-	// deployment's cloudflared, which runs with --config.
-	if !rec.hasCloudflareResources() {
-		res.DNSGone, res.TunnelGone, res.CloudflareNA = true, true, true
-		bindAddr := fmt.Sprintf("0.0.0.0:%d", rec.Port)
-		switch {
-		case rec.isLocal():
-			bindAddr = fmt.Sprintf("127.0.0.1:%d", rec.Port)
-		case rec.isQuick() && rec.provider() == "cloudflare":
-			pattern := expose.QuickURLPattern(rec.Port)
-			killStrayCloudflared(pattern)
-			waitForNoCloudflared(pattern, 10*time.Second)
-			bindAddr = fmt.Sprintf("127.0.0.1:%d", rec.Port)
-		case !rec.isLAN():
-			// A tunnel share carried by something other than the built-in
-			// Cloudflare provider — a JS adapter, or a record from a build
-			// that still had the ngrok provider. Its child process dies with
-			// the share process, and nothing it used was created here, so
-			// there is nothing remote to delete: the name stays exactly where
-			// its owner put it.
-			bindAddr = fmt.Sprintf("127.0.0.1:%d", rec.Port)
-		}
-		res.PortFree = rec.Port == 0 || portFreeWithin(bindAddr, 5*time.Second)
-		if err := os.RemoveAll(dir); err != nil {
-			res.Error = err.Error()
-		}
-		_, statErr := os.Stat(dir)
-		res.StateWiped = os.IsNotExist(statErr)
-		return res
+	// It used to branch: a local/lan/quick share took this path, while a
+	// --domain share went on to kill cloudflared, delete a DNS record tagged
+	// `herdr-expose-share`, delete the named tunnel, and then VERIFY all of
+	// that against the API before daring to remove its own paperwork. None of
+	// those resources can exist any more, so none of that code does either.
+	//
+	// What is left still verifies rather than assumes, because the two things
+	// that can still go wrong have not changed: a process that ignored its
+	// signal, and a port it is still holding.
+	bindAddr := fmt.Sprintf("0.0.0.0:%d", rec.Port)
+	if rec.isLocal() {
+		bindAddr = fmt.Sprintf("127.0.0.1:%d", rec.Port)
 	}
+	res.DNSGone, res.TunnelGone, res.CloudflareNA = true, true, true
+	res.PortFree = rec.Port == 0 || portFreeWithin(bindAddr, 5*time.Second)
 
-	// 2. cloudflared, DNS and the tunnel — tagged `herdr-expose-share` only, so
-	//    this can never reach the permanent deployment's record.
-	ctx0, cancel0 := context.WithTimeout(context.Background(), 30*time.Second)
-	opts0 := shareCFOptions(rec)
-	dnsGone0, tunGone0, _, err0 := expose.VerifyGone(ctx0, opts0)
-	cancel0()
-	if err0 == nil && dnsGone0 && tunGone0 {
-		// Already clean (a retry of a partial teardown): do not spend a
-		// 100-second delete window proving it again.
-		res.DNSGone, res.TunnelGone = true, true
-		res.PortFree = rec.Port == 0 || portFreeWithin(fmt.Sprintf("127.0.0.1:%d", rec.Port), 5*time.Second)
-		_ = os.RemoveAll(dir)
-		_, statErr := os.Stat(dir)
-		res.StateWiped = os.IsNotExist(statErr)
-		return res
-	}
-
-	cfConfig := filepath.Join(dir, "cloudflare", "config.yml")
-	killStrayCloudflared(cfConfig)
-	// Cloudflare refuses to delete a tunnel that still has active
-	// connections, so WAIT for cloudflared to actually be gone rather than
-	// racing it.
-	waitForNoCloudflared(cfConfig, 20*time.Second)
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-	defer cancel()
-	opts := shareCFOptions(rec)
-	var msgs []string
-	if err := expose.DestroyCloudflare(ctx, opts, func(f string, a ...any) {
-		msgs = append(msgs, fmt.Sprintf(f, a...))
-	}); err != nil {
-		res.Error = err.Error()
-	}
-
-	// 3. VERIFY against the API, do not assume.
-	if dnsGone, tunGone, state, err := expose.VerifyGone(ctx, opts); err != nil {
-		if res.Error == "" {
-			res.Error = "verification failed: " + err.Error()
-		}
-	} else {
-		res.DNSGone, res.TunnelGone = dnsGone, tunGone
-		if state.Exists && !dnsGone {
-			res.Error = strings.TrimSpace(res.Error + fmt.Sprintf(
-				" DNS record for %s still present (comment %q)", rec.Domain, state.Comment))
-		}
-	}
-
-	// 4. the port must actually be released
-	res.PortFree = rec.Port == 0 || portFreeWithin(fmt.Sprintf("127.0.0.1:%d", rec.Port), 5*time.Second)
-
-	// 5. the state dir. Credentials go IMMEDIATELY and unconditionally — the
-	//    hashed device tokens, the server token and the tunnel secret are gone
-	//    whether or not the rest succeeded.
+	// Credentials go IMMEDIATELY and unconditionally: the hashed device tokens
+	// and the server token are gone whether or not anything else succeeded.
 	for _, f := range []string{"auth.json", "auth.json.tmp", "share.lock"} {
 		_ = os.Remove(filepath.Join(dir, f))
 	}
-	_ = os.RemoveAll(filepath.Join(dir, "cloudflare"))
-
-	// The RECORD only goes once Cloudflare is confirmed clean. A leftover
-	// share.json is recoverable — the next `share list` or daemon sweep picks
-	// it up and retries — while a deleted record with a surviving tunnel is
-	// an orphan nothing will ever clean up. So a partial teardown keeps its
-	// paperwork and says so.
-	if res.DNSGone && res.TunnelGone {
-		if err := os.RemoveAll(dir); err != nil {
-			res.Error = strings.TrimSpace(res.Error + " " + err.Error())
-		}
-		_, statErr := os.Stat(dir)
-		res.StateWiped = os.IsNotExist(statErr)
-		return res
+	if err := os.RemoveAll(dir); err != nil {
+		res.Error = err.Error()
 	}
-	res.StateWiped = false
-	if res.Error == "" {
-		res.Error = "teardown incomplete; the share record is kept so the next sweep retries"
-	}
-	_, _ = updateShare(rec.ID, func(r *shareRecord) {
-		r.State, r.Error, r.PID, r.URL = "orphaned", res.Error, 0, ""
-	})
+	_, statErr := os.Stat(dir)
+	res.StateWiped = os.IsNotExist(statErr)
 	return res
 }
 
@@ -2122,30 +1975,16 @@ func cmdShareRun(args []string) error {
 			"revoke it (`herdr-expose share revoke %s`) and create a new one, or carry that transport "+
 			"with a JS adapter under [expose]", rec.ID, p, rec.ID)
 	}
+	// The record still decides, so a restored share comes back on the rung it
+	// was created on and never drifts up or down across a restart.
 	exp := config.Expose{LAN: true}
-	switch {
-	case rec.isLocal():
-		// The zero table: loopback, no tunnel, nothing to start.
-		exp = config.Expose{}
-	case rec.isQuick():
-		// Quick is reconstructed from the record too, so a restored share
-		// stays quick and never silently acquires a domain — and, just as
-		// importantly, a domain share can never silently degrade to an
-		// ephemeral hostname on restart.
-		exp = config.Expose{Quick: true}
-	case !rec.isLAN():
-		exp = config.Expose{Cloudflare: true, Domain: rec.Domain, TunnelName: rec.TunnelName}
+	if rec.isLocal() {
+		exp = config.Expose{} // the zero table: loopback, nothing to start
 	}
 	mgr := expose.New(expose.Options{
-		Port:       rec.Port,
-		Expose:     exp,
-		StateDir:   dir,
-		DNSComment: expose.ShareDNSComment,
-		// A share owns `herdr-expose-share-<id>` outright, so it is allowed to
-		// delete and recreate that tunnel when a crash lost its credentials.
-		// The permanent deployment is not, and does not set this.
-		Exclusive: true,
-		Logf:      func(f string, a ...any) { log.Info(fmt.Sprintf(f, a...)) },
+		Port:   rec.Port,
+		Expose: exp,
+		Logf:   func(f string, a ...any) { log.Info(fmt.Sprintf(f, a...)) },
 	})
 	cfg := shareServeConfig{mgr: mgr}
 	res := mgr.Resolution()

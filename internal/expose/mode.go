@@ -146,59 +146,35 @@ func (r Resolution) Reach() string { return r.Rung().Reach() }
 // resolves to loopback, which is what makes the daemon's local default — and
 // `share --local` — true by construction rather than by a default somewhere up
 // the call stack.
+// Resolve decides where the server listens and what URL to show.
+//
+// TWO RUNGS, and there will not be a third here. herdr-expose used to carry a
+// tunnel: a named Cloudflare hostname for the daily driver and an ephemeral
+// *.trycloudflare.com for a share — provider API calls, subprocess
+// supervision, DNS reconciliation and teardown verification, all inside the
+// binary that also serves the panes. It is gone, deliberately and completely,
+// and tunnelling is now a separate tool (cftunnel) pointed at this port.
+//
+// What that buys: this binary reaches exactly as far as the wire it is plugged
+// into. No account to hold credentials for, no third party terminating TLS for
+// somebody else's agent sessions, no hostname that outlives the process that
+// made it, and no code path that can put a pane on the public internet by
+// accident. The failure mode of every bug in here becomes "unreachable",
+// never "reachable by strangers".
+//
+// What it costs, stated plainly: nothing off this network reaches the server
+// by itself. Reaching it from elsewhere is the owner's own business now — a
+// tunnel they run, a VPN, an SSH forward — and that is a better place for the
+// decision than inside this binary.
+//
+// binaryFound stays in the signature and is ignored: nothing here shells out
+// any more, and every caller and test that passes a stub keeps compiling.
 func Resolve(e config.Expose, port int, binaryFound func(string) bool) Resolution {
-	if binaryFound == nil {
-		binaryFound = func(name string) bool {
-			_, err := resolveBinary("", name)
-			return err == nil
-		}
-	}
-	// The floor. Every branch below either leaves this alone or is a rung the
-	// caller explicitly switched on.
+	_ = binaryFound
+
+	// The floor is loopback. The one rung above it is a switch the caller set.
 	r := Resolution{Port: port, Bind: config.BindLoopback, Mode: ModeLocal}
-
-	// Quick (AMENDMENTS 15) is checked FIRST and is deliberately unreachable
-	// from the config file: `Quick` has no TOML key, so only `share --quick`
-	// can set it.
-	//
-	// It is a RUNG, not a cloudflare spelling: "the ephemeral tunnel of
-	// whichever provider was selected" — a throwaway public hostname with
-	// nothing reserved, nothing provisioned in an account and nothing to clean
-	// up. There is nothing to provision, so the only question is whether the
-	// selected provider's binary is installed, which is why the check goes
-	// through quickBinary rather than naming cloudflared here.
-	if e.Quick {
-		bin, label := quickBinary(e)
-		if binaryFound(bin) {
-			r.Mode, r.Remote = ModeQuick, true
-			// The hostname is assigned by the provider's edge when the process
-			// starts and scraped from its output, so there is no URL to
-			// predict here.
-			r.Bind, r.SecureContext, r.LANIP = config.BindLoopback, true, PrimaryLANIP()
-			return r
-		}
-		r.Mode = ModeLAN
-		r.FellBack = bin + " is not installed, so no quick tunnel can be started; " +
-			"falling back to LAN mode (install " + bin + " to get a public https URL from " + label + ")"
-	}
-
-	switch e.Provider() {
-	case config.ProviderCloudflare:
-		if strings.TrimSpace(e.Domain) != "" && binaryFound("cloudflared") {
-			r.Mode, r.Remote, r.URL = ModeCloudflare, true, "https://"+e.Domain
-		} else if !binaryFound("cloudflared") {
-			r.Mode = ModeLAN
-			r.FellBack = "cloudflared is not installed, so the Cloudflare tunnel cannot start; " +
-				"falling back to LAN mode (install cloudflared to get the public domain back)"
-		}
-	case config.ProviderJS:
-		r.Mode, r.Remote = ModeJS, true // the adapter reports its own URL
-	}
-
-	// An explicit `lan = true` wins over a bare local default, but never
-	// downgrades a working tunnel (a tunnel already gives remote access, and
-	// loopback keeps the wifi off the RCE surface).
-	if r.Mode == ModeLocal && e.LAN {
+	if e.LAN {
 		r.Mode = ModeLAN
 	}
 
@@ -209,17 +185,15 @@ func Resolve(e config.Expose, port int, binaryFound func(string) bool) Resolutio
 		if r.LANIP != "" {
 			r.URL = fmt.Sprintf("http://%s:%d", r.LANIP, r.Port)
 		} else {
+			// Bound to every interface with no address to name: say loopback
+			// rather than invent a hostname nobody can reach.
 			r.URL = fmt.Sprintf("http://127.0.0.1:%d", r.Port)
 		}
 		r.SecureContext = false // plain HTTP on a LAN IP: no service worker, no PWA install
-	case ModeLocal:
+	default:
 		r.Bind = config.BindLoopback
 		r.URL = fmt.Sprintf("http://127.0.0.1:%d", r.Port)
 		r.SecureContext = true // localhost is a secure context by definition
-	default:
-		r.Bind = config.BindLoopback
-		r.SecureContext = true // https through the tunnel
-		r.LANIP = PrimaryLANIP()
 	}
 	return r
 }

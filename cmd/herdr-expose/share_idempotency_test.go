@@ -346,8 +346,6 @@ func TestRungComesFromTheFlagsAndNothingElse(t *testing.T) {
 		{nil, config.RungLAN, true},
 		{[]string{"--lan"}, config.RungLAN, true},
 		{[]string{"--local"}, config.RungLocal, true},
-		{[]string{"--quick"}, config.RungQuick, true},
-		{[]string{"--domain", "x.example.com"}, config.RungDomain, false},
 	}
 	for _, tc := range cases {
 		f, err := parseShareFlags(tc.args)
@@ -371,20 +369,18 @@ func TestRungComesFromTheFlagsAndNothingElse(t *testing.T) {
 }
 
 // `--provider` is GONE, and it fails loudly rather than being accepted and
-// ignored. Silently swallowing `--provider ngrok` would hand back a Cloudflare
-// tunnel under an ngrok name, which is the one outcome worse than an error —
-// so the refusal has to name the replacement, the JS adapter.
+// ignored. There is no transport left to select, so the refusal has to say
+// where transports went instead of naming one.
 func TestProviderFlagIsRefusedAndPointsAtTheEscapeHatch(t *testing.T) {
 	for _, args := range [][]string{
 		{"--provider", "ngrok"},
 		{"--provider", "cloudflare"},
-		{"--quick", "--provider", "tailscale"},
 	} {
 		_, err := parseShareFlags(args)
 		if err == nil {
 			t.Fatalf("%v: --provider was removed and must not be silently accepted", args)
 		}
-		if !strings.Contains(err.Error(), "adapter") {
+		if !strings.Contains(err.Error(), "cftunnel") {
 			t.Fatalf("%v: the refusal must point at the escape hatch, got: %v", args, err)
 		}
 	}

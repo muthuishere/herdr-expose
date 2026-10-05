@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -63,8 +64,6 @@ func main() {
 		err = cmdService(os.Args[2:])
 	case "skill":
 		err = cmdSkill(os.Args[2:])
-	case "expose":
-		err = cmdExpose(os.Args[2:])
 	case "share":
 		err = cmdShare(os.Args[2:])
 	case "panic":
@@ -141,8 +140,6 @@ func usage() {
                         A SYMLINK, so a rebuild or a git pull updates the skill.
                         Idempotent; refuses to clobber a real directory;
                         uninstall removes only links it made.
-  expose start|stop|status|plan|destroy
-                        tunnel control
   share [--local | --lan | --quick | --domain X]
         [--session NAME] [--pane TARGET] [--hours N|--days N]
                         expose ONE herdr session, time-boxed, self-destructing.
@@ -211,12 +208,40 @@ func (a cfgAdapter) UI() map[string]any {
 	return map[string]any{"theme": c.UI.Theme, "default_view": c.UI.DefaultView}
 }
 
-// exposeAdapter surfaces the tunnel URL in /v1/config.
+// exposeAdapter surfaces the server's URL in /v1/config.
+//
+// The second return used to mean "is the tunnel healthy?", which was a real
+// question while a subprocess could be up, down or wedged. A listener is up or
+// the server is not running at all, so it is now always true.
 type exposeAdapter struct{ mgr *expose.Manager }
 
-func (e exposeAdapter) Status() (string, bool) {
-	st := e.mgr.Status()
-	return e.mgr.URL(), st.Healthy
+func (e exposeAdapter) Status() (string, bool) { return e.mgr.URL(), true }
+
+// warnTunnelConfigIsDead says so when a config file still asks for a tunnel.
+//
+// The keys are now inert: `cloudflare = true` and a domain resolve to loopback
+// like any other config. Inert and SILENT would be the bad combination — the
+// owner upgrades, the daemon comes up on 127.0.0.1, the public hostname they
+// have been using stops answering, and nothing anywhere says why. So it is
+// said once, at the only moment anybody is reading: startup.
+func warnTunnelConfigIsDead(cfg *config.Config, log *slog.Logger) {
+	var asked []string
+	if cfg.Expose.Cloudflare {
+		asked = append(asked, "cloudflare = true")
+	}
+	if d := strings.TrimSpace(cfg.Expose.Domain); d != "" {
+		asked = append(asked, "domain = "+strconv.Quote(d))
+	}
+	if a := strings.TrimSpace(cfg.Expose.Adapter); a != "" {
+		asked = append(asked, "adapter = "+strconv.Quote(a))
+	}
+	if len(asked) == 0 {
+		return
+	}
+	log.Warn("this config asks for a tunnel, and herdr-expose no longer raises one",
+		"keys", strings.Join(asked, ", "),
+		"serving", "loopback and the LAN only",
+		"to_reach_it_from_outside", "point a tunnel at the port yourself, e.g. cftunnel add <port> <name>")
 }
 
 func cmdServe(args []string) error {
@@ -238,6 +263,7 @@ func cmdServe(args []string) error {
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
+	warnTunnelConfigIsDead(cfg, log)
 	state, err := StateDir()
 	if err != nil {
 		return err
@@ -397,7 +423,6 @@ func cmdServe(args []string) error {
 
 	// In lan/local there is nothing to start — the listener IS the exposure.
 	if cfg.Expose.ShouldAutostart() || res.Remote {
-		go superviseExposure(ctx, mgr, state, log)
 	}
 
 	// Deliver over the SOCKET, never the CLI: a CLI client attaches to the
@@ -1019,120 +1044,19 @@ func exposeManagerFor(cfg *config.Config, state string) *expose.Manager {
 }
 
 // exposeManagerLogging is the same manager with its narration routed
-// somewhere specific. The daemon sends it to the LOG — tunnel provisioning
-// steps and teardown are exactly what you want to read back afterwards — and
-// `doctor` sends it to a no-op, because doctor's output is the report.
+// somewhere specific: the daemon sends it to the log, `doctor` to a no-op
+// because doctor's output is the report.
 func exposeManagerLogging(cfg *config.Config, state string, logf func(string, ...any)) *expose.Manager {
-	root := os.Getenv("HERDR_PLUGIN_ROOT")
-	if root == "" {
-		root, _ = os.Getwd()
-	}
-	return expose.New(expose.Options{
-		Port: cfg.Port(), Expose: cfg.Expose, Root: root, StateDir: state,
-		Logf: logf,
-	})
+	// state is unused now: there is no credentials file and no generated
+	// tunnel config to write. It stays in the signature because every caller
+	// has one to hand and removing it is churn for no gain.
+	_ = state
+	return expose.New(expose.Options{Port: cfg.Port(), Expose: cfg.Expose, Logf: logf})
 }
 
 func exposeManager(cfg *config.Config) *expose.Manager {
 	state, _ := StateDir()
 	return exposeManagerFor(cfg, state)
-}
-
-func cmdExpose(args []string) error {
-	sub := "status"
-	if len(args) > 0 {
-		sub = args[0]
-	}
-	cfg, err := config.Load()
-	if err != nil {
-		return err
-	}
-	mgr := exposeManager(cfg)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-
-	state, err := StateDir()
-	if err != nil {
-		return err
-	}
-	switch sub {
-	case "start":
-		// Clear the halt flag first: the running daemon is what actually owns
-		// the tunnel process, and it re-arms within seconds of the flag going.
-		if err := os.Remove(haltFilePath(state)); err == nil {
-			fmt.Println("cleared the exposure halt flag; the daemon re-arms the tunnel within ~5s")
-		}
-		st, err := mgr.Start(ctx)
-		if err != nil {
-			return err
-		}
-		printJSON(st)
-		return nil
-	case "stop":
-		// Raise the halt flag BEFORE killing anything, or the daemon's
-		// supervisor simply restarts the tunnel a second later. Writing it
-		// twice is harmless, which is the whole of `stop` being idempotent:
-		// the flag is a desired state, not an event.
-		if err := os.WriteFile(haltFilePath(state), []byte(time.Now().Format(time.RFC3339)+"\n"), 0o600); err != nil {
-			return err
-		}
-		if err := stopMainTunnel(cfg, state); err != nil {
-			return err
-		}
-		return mgr.Stop()
-	case "status":
-		printJSON(mgr.Status())
-		return nil
-	case "plan":
-		steps, err := mgr.Plan(ctx)
-		if err != nil {
-			return err
-		}
-		printJSON(steps)
-		return nil
-	case "destroy":
-		// STOP BEFORE DESTROY, and halt before both.
-		//
-		// Without the halt flag this verb is actively harmful rather than
-		// merely non-idempotent: the running daemon's supervisor re-provisions
-		// within five seconds, so `destroy` deletes the tunnel and the DNS
-		// record and then watches them be recreated — leaving a NEW tunnel id
-		// and a rewritten record, which is worse than having done nothing.
-		// With it, destroy converges: run it twice and the second run finds
-		// nothing to delete and says so.
-		if err := os.WriteFile(haltFilePath(state), []byte(time.Now().Format(time.RFC3339)+"\n"), 0o600); err != nil {
-			return err
-		}
-		fmt.Println("raised the exposure halt flag so the daemon cannot re-provision underneath this")
-		if err := stopMainTunnel(cfg, state); err != nil {
-			return err
-		}
-		fp := mgr.Footprint()
-		fmt.Println("destroying:", fp.Describe())
-		if err := mgr.Destroy(ctx); err != nil {
-			return err
-		}
-		// Verify against the source of truth rather than reporting intent.
-		if fp.NamedTunnel != "" || fp.DNSRecord != "" {
-			dnsGone, tunGone, rec, verr := expose.VerifyGone(ctx, mgr.CloudflareOptions())
-			if verr != nil {
-				return fmt.Errorf("destroy ran but could not be verified: %w", verr)
-			}
-			if !dnsGone || !tunGone {
-				return fmt.Errorf("destroy did NOT complete: dns_gone=%v tunnel_gone=%v (record %+v)",
-					dnsGone, tunGone, rec)
-			}
-			fmt.Printf("verified against the API: DNS record %s gone, tunnel %q gone\n",
-				fp.DNSRecord, fp.NamedTunnel)
-		}
-		// The generated config and credentials are part of the footprint, so
-		// they go too. Symmetry is the point: what a start created, a destroy
-		// removes, and nothing else.
-		_ = os.RemoveAll(filepath.Join(state, "cloudflare"))
-		fmt.Println("re-arm with: herdr-expose expose start")
-		return nil
-	}
-	return fmt.Errorf("unknown expose subcommand %q", sub)
 }
 
 func printJSON(v any) {
@@ -1172,75 +1096,6 @@ func parseScopeFlags(args []string) (*core.Scope, error) {
 		}
 	}
 	return core.ParseScope(only, targets)
-}
-
-// superviseExposure owns the main tunnel's up/down state for the life of the
-// daemon, driven by a HALT FLAG FILE in the state dir.
-//
-// The flag exists because `expose stop` and `panic` run in a DIFFERENT process
-// from the daemon that supervises cloudflared: killing the child from outside
-// just makes the supervisor restart it, and an in-process Stop() on a fresh
-// Manager is a no-op that only looks like it worked. The flag is resolved from
-// the state dir by construction, the running daemon is the thing that reads it,
-// and the daemon reports the result — which is the whole lesson of a halt that
-// writes where nothing reads.
-// stopMainTunnel takes down whatever process carries the PERMANENT deployment,
-// and is provider-aware rather than assuming cloudflared.
-//
-// Only the cloudflare provider leaves a process this CLI can identify and kill
-// from outside (matched on the config path WE generated, never on a binary
-// name, so it can never reach somebody else's tunnel). For a JS adapter the
-// child belongs to the daemon, and the halt flag the caller has already raised
-// is what stops it — within one supervisor tick. Saying which of the two
-// happened beats a cheerful message that fits only one provider.
-//
-// It is idempotent: with nothing running, every branch is already in the
-// desired state and returns nil.
-func stopMainTunnel(cfg *config.Config, state string) error {
-	cfConfig := filepath.Join(state, "cloudflare", "config.yml")
-	if cfg.Expose.Provider() == config.ProviderCloudflare || countCloudflared(cfConfig) > 0 {
-		killStrayCloudflared(cfConfig)
-		if !waitForNoCloudflared(cfConfig, 20*time.Second) {
-			return errors.New("cloudflared is STILL running for the main tunnel")
-		}
-		fmt.Println("main tunnel stopped (DNS record and tunnel left in place — static domain)")
-		return nil
-	}
-	fmt.Printf("halt flag raised; the daemon stops the %s exposure within ~5s "+
-		"(check with `herdr-expose status`)\n", cfg.Expose.Provider())
-	return nil
-}
-
-func superviseExposure(ctx context.Context, mgr *expose.Manager, state string, log *slog.Logger) {
-	halt := haltFilePath(state)
-	halted := true // force the first evaluation to act
-	first := true
-	t := time.NewTicker(5 * time.Second)
-	defer t.Stop()
-	for {
-		_, err := os.Stat(halt)
-		present := err == nil
-		switch {
-		case present && (!halted || first):
-			log.Warn("exposure halt flag present; stopping the tunnel", "flag", halt)
-			_ = mgr.Stop()
-			halted = true
-		case !present && (halted || first):
-			log.Info("tunnel provisioning", "mode", mgr.Resolution().Mode, "url", mgr.Resolution().URL)
-			if st, err := mgr.Start(ctx); err != nil {
-				log.Warn("exposure did not start", "err", err)
-			} else {
-				log.Info("tunnel provisioned", "url", st.URL, "healthy", st.Healthy)
-			}
-			halted = false
-		}
-		first = false
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-		}
-	}
 }
 
 // inventoryInterval is how often the daemon re-reads what every agent is

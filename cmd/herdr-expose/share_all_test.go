@@ -76,8 +76,6 @@ func TestAllComposesWithEveryRung(t *testing.T) {
 		{[]string{"--all"}, config.RungLAN},
 		{[]string{"--all", "--lan"}, config.RungLAN},
 		{[]string{"--all", "--local"}, config.RungLocal},
-		{[]string{"--all", "--quick"}, config.RungQuick},
-		{[]string{"--all", "--domain", "x.example.com"}, config.RungDomain},
 	}
 	for _, c := range cases {
 		f, err := parseShareFlags(c.args)

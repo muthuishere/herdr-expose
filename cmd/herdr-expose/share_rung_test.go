@@ -291,6 +291,10 @@ max_concurrent = 10
 // rung a user can ask for, in both environments (cloudflared present and
 // absent), the resolved reach is never greater than the requested reach.
 func TestResolveNeverEscalates(t *testing.T) {
+	// A config that ASKS for the internet, from a build that has no way to
+	// give it. The old key is left in deliberately: an existing config file is
+	// exactly where a stale request lives, and the answer must still be the
+	// LAN.
 	writeTestConfig(t, `
 [expose]
 cloudflare = true
@@ -305,15 +309,7 @@ max_concurrent = 10
 		name string
 		fn   func(string) bool
 	}{{"cloudflared installed", installed}, {"cloudflared missing", missing}} {
-		cases := [][]string{nil, {"--local"}, {"--lan"}, {"--quick"}}
-		if !probe.fn("cloudflared") {
-			// --domain is only exercised in the no-cloudflared environment:
-			// with cloudflared present it would reach the real Cloudflare API
-			// for the zone check, and a unit test must not do that. Its
-			// escalation direction is covered anyway — RungDomain is the top
-			// of the ladder, so it has nothing above it to escalate INTO.
-			cases = append(cases, []string{"--domain", "s.example.com"})
-		}
+		cases := [][]string{nil, {"--local"}, {"--lan"}}
 		for _, args := range cases {
 			name := fmt.Sprintf("%s/%v", probe.name, args)
 			t.Run(name, func(t *testing.T) {
@@ -338,76 +334,38 @@ max_concurrent = 10
 
 // ------------------------------------------------------- degrade downward
 
-// L2, downward: an EXPLICIT --quick with no cloudflared degrades to lan and
-// says why. The person did ask to be reachable, and a LAN address is the
-// nearest honest answer — but it is still strictly less reach than they asked
-// for, and it is announced rather than silent.
-func TestQuickFallsBackToLANWhenCloudflaredIsMissing(t *testing.T) {
-	withBinaryProbe(t, missing)
-
-	f, err := parseShareFlags([]string{"--quick"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	res, exp, err := resolveShareMode(context.Background(), f, 21999, "herdr-expose-share-test")
-	if err != nil {
-		t.Fatalf("--quick with no cloudflared must degrade, not fail: %v", err)
-	}
-	if res.Mode != config.ModeLAN {
-		t.Fatalf("mode = %s, want lan", res.Mode)
-	}
-	if !exp.LAN || exp.Quick || exp.Cloudflare {
-		t.Fatalf("the fallback [expose] table is not a pure LAN one: %+v", exp)
-	}
-	if res.FellBack == "" || !strings.Contains(res.FellBack, "quick tunnel") {
-		t.Fatalf("the downgrade was silent or unexplained: %q", res.FellBack)
-	}
-	if config.RungOf(res.Mode) >= config.RungQuick {
-		t.Fatal("a degrade must land BELOW the requested rung")
-	}
-}
-
-// The same for --domain: a missing cloudflared is an environment problem, not
-// a reason to fail the person who asked to be reachable.
-func TestDomainFallsBackToLANWhenCloudflaredIsMissing(t *testing.T) {
-	withBinaryProbe(t, missing)
-
-	f, err := parseShareFlags([]string{"--domain", "s.example.com"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	res, exp, err := resolveShareMode(context.Background(), f, 21999, "herdr-expose-share-test")
-	if err != nil {
-		t.Fatalf("--domain with no cloudflared must degrade, not fail: %v", err)
-	}
-	if res.Mode != config.ModeLAN || !exp.LAN {
-		t.Fatalf("mode = %s (%+v), want lan", res.Mode, exp)
-	}
-	if !strings.Contains(res.FellBack, "s.example.com") {
-		t.Fatalf("the downgrade does not name what was asked for: %q", res.FellBack)
-	}
-}
-
 // ------------------------------------------------------------- plumbing
 
 // Four rungs, exactly one of them per share.
 func TestRungFlagsAreMutuallyExclusive(t *testing.T) {
 	withBinaryProbe(t, installed)
+	f, err := parseShareFlags([]string{"--local", "--lan"})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if _, _, err := resolveShareMode(context.Background(), f, 21999, "t"); err == nil {
+		t.Fatal("accepted two rungs at once")
+	} else if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("unhelpful error: %v", err)
+	}
+}
+
+// The tunnel rungs are gone, and a person who types one must be TOLD, not
+// quietly given a LAN share whose link does not open from where they are.
+func TestTheRemovedTunnelFlagsSayWhereTheyWent(t *testing.T) {
 	for _, args := range [][]string{
-		{"--local", "--lan"},
-		{"--local", "--quick"},
-		{"--local", "--domain", "x.example.com"},
-		{"--quick", "--lan"},
-		{"--lan", "--domain", "x.example.com"},
+		{"--quick"},
+		{"--domain", "x.example.com"},
+		{"-d", "x.example.com"},
 	} {
-		f, err := parseShareFlags(args)
-		if err != nil {
-			t.Fatalf("%v: parse: %v", args, err)
+		_, err := parseShareFlags(args)
+		if err == nil {
+			t.Fatalf("%v: accepted a flag that no longer does anything", args)
 		}
-		if _, _, err := resolveShareMode(context.Background(), f, 21999, "t"); err == nil {
-			t.Fatalf("%v: accepted two rungs at once", args)
-		} else if !strings.Contains(err.Error(), "mutually exclusive") {
-			t.Fatalf("%v: unhelpful error: %v", args, err)
+		for _, want := range []string{"was removed", "cftunnel"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("%v: error does not mention %q: %v", args, want, err)
+			}
 		}
 	}
 }
