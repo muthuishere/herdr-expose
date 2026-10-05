@@ -43,9 +43,8 @@ process.on('exit', cleanup)
 process.on('SIGINT', () => { cleanup(); process.exit(130) })
 
 async function main() {
-  const target = process.argv[2] ?? pickIdleAgent()
-  const [session] = target.split('/')
-  log(`using pane ${target}`)
+  const session = process.argv[2] ?? 'deemwar-one-os'
+  log(`sharing session ${session}`)
 
   log('raising a LOCAL share (loopback only, no tunnel, no DNS)')
   const out = hx('share', '--local', '--session', session, '--hours', '1', '--json')
@@ -69,15 +68,28 @@ async function main() {
   await page.locator('.panelist').waitFor({ state: 'visible', timeout: 60000 })
   ok('paired')
 
-  log('opening the pane')
-  // data-target is the stable handle the component puts there on purpose: row
-  // order changes (a blocked pane re-pins itself) and a title is whatever the
-  // shell last wrote to OSC 0/2, so neither is safe to select on.
-  const row = page.locator(`button.row[data-target="${target}"]`)
-  await row.waitFor({ state: 'visible', timeout: 30000 })
-  await row.click()
-  await page.locator('.tr-input').waitFor({ state: 'visible', timeout: 30000 })
-  ok('the prompt box is there')
+  // Open ANY pane that has an agent in it. Addressing a specific one by name
+  // coupled this test to how `msg agents` happens to label things today -- it
+  // started naming agents instead of pane ids, and the test broke on a product
+  // improvement. What it actually needs is a prompt box, so it looks for one.
+  log('opening a pane with an agent in it')
+  await page.locator('button.row').first().waitFor({ state: 'visible', timeout: 30000 })
+  const rows = await page.locator('button.row').all()
+  let opened = null
+  for (const row of rows) {
+    await row.click()
+    try {
+      await page.locator('.tr-input').waitFor({ state: 'visible', timeout: 6000 })
+      opened = await row.getAttribute('data-target')
+      break
+    } catch {
+      // A plain shell pane has no prompt box. Back to the list and try the next.
+      await page.goBack().catch(() => {})
+      await page.locator('button.row').first().waitFor({ state: 'visible', timeout: 15000 })
+    }
+  }
+  if (!opened) throw new Error('no pane in this share has an agent prompt box')
+  ok(`the prompt box is there (${opened})`)
 
   // ---- the test proper: a paste carrying an image file ----
   log('pasting an image through the real clipboard API')
@@ -149,15 +161,6 @@ async function main() {
   await ctx.close()
   await browser.close()
   console.log('\n\x1b[1;32mPASS\x1b[0m — a pasted image is a real file on this machine.\n')
-}
-
-function pickIdleAgent() {
-  const lines = hx('msg', 'agents').split('\n')
-  for (const l of lines) {
-    const m = l.match(/^(\S+)\s+\S+\s+(idle|done)\s/)
-    if (m) return m[1]
-  }
-  throw new Error('no idle agent to use; pass one as argv[2]')
 }
 
 main().catch((e) => {
