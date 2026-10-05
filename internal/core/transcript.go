@@ -38,17 +38,22 @@ const (
 	// was ~8.5KB of JSON per subscriber per second per pane, for text no phone
 	// renders. 200 halves that and is still more history than the view shows.
 	//
-	// Now 50, because the owner asked what the smallest honest read looks like.
-	// A phone shows about 40 lines of transcript, so 50 is the tail plus a
-	// little, and `truncated` already tells the view to say it is a tail rather
-	// than imply it has the lot. If a screen ever reads short, this constant is
-	// the one thing to put back.
+	// It was briefly 50, and 50 was WRONG. Two things go missing at that size.
+	// The read is a tail of the SCREEN, so cutting it short lands mid-wrap and
+	// leaves orphaned fragments -- a lone "to expand)" with no line in front of
+	// it. And the cleaner then strips chrome out of what little arrived, so a
+	// reply the agent had plainly written could clean down to almost nothing
+	// and the pane looked like it had not answered at all.
+	//
+	// The line budget is a PAYLOAD lever and the payload was never the problem:
+	// the transcript already suppresses an unchanged frame per subscriber, so
+	// a still screen costs nothing at any line count. 200 it is.
 	//
 	// (The ~780ms/call the stress run attributed to this read could not be
 	// reproduced on the bed at any line count, by socket or by CLI. What IS
 	// reproducible, and what actually made the view go stale, is the serial
 	// sweep below: whatever one read costs, the period was N times it.)
-	TranscriptLines = 50
+	TranscriptLines = 200
 
 	// TranscriptWorkers bounds how many targets are read AT ONCE in one sweep.
 	//

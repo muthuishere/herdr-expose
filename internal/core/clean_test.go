@@ -23,7 +23,7 @@ func TestCleanStripsChromeAndKeepsContent(t *testing.T) {
 		"Real content line one.",
 		"",
 		"────────────────────────────────",
-		"❯ sto",
+		"❯",
 		"",
 		"  Image in clipboard · ctrl+v to paste",
 		"herdr-expose  ctx 550K 55% /clear soon",
@@ -33,6 +33,9 @@ func TestCleanStripsChromeAndKeepsContent(t *testing.T) {
 	}, "\n")
 
 	got := c.Clean(in)
+	// "❯ sto" used to be here and used to be stripped. It is now "❯" -- the
+	// EMPTY box -- because a caret carrying text is a question somebody asked
+	// and is content. See TestCleanKeepsAsciiQuoteAndTheQuestionThatWasAsked.
 	want := "Real content line one.\n\n> a genuine quoted line\nSecond real line."
 	if got.Text != want {
 		t.Fatalf("cleaned text:\n got %q\nwant %q", got.Text, want)
@@ -43,12 +46,21 @@ func TestCleanStripsChromeAndKeepsContent(t *testing.T) {
 }
 
 // ASCII '>' is a quote marker in real output and must survive; only the TUI's
-// own carets are the input line.
-func TestCleanKeepsAsciiQuote(t *testing.T) {
+// own carets are the input box.
+//
+// And a caret with TEXT after it survives too, because that text is a prompt
+// somebody sent. Stripping it meant a person reading from their phone saw the
+// agent's answer to a question the transcript had deleted -- reported as "I
+// send it and it is not displaying". Only the empty box goes.
+func TestCleanKeepsAsciiQuoteAndTheQuestionThatWasAsked(t *testing.T) {
 	c := newTestCleaner(t)
-	got := c.Clean("> quoted\n❯ typed")
-	if got.Text != "> quoted" {
-		t.Fatalf("got %q, want %q", got.Text, "> quoted")
+	got := c.Clean("> quoted\n❯ whats pending\n❯ \n❯")
+	want := "> quoted\n❯ whats pending"
+	if got.Text != want {
+		t.Fatalf("got %q, want %q", got.Text, want)
+	}
+	if got.Chrome != 2 {
+		t.Fatalf("chrome removed = %d, want 2 (the two empty boxes only)", got.Chrome)
 	}
 }
 

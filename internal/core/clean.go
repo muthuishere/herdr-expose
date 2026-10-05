@@ -41,10 +41,21 @@ var DefaultChrome = []string{
 	// A rule: eight or more of the box-drawing, dash or underscore family and
 	// nothing else. 119 of them wrap into six lines of noise on a phone.
 	`^[\s\x{2500}-\x{257f}_=\-\x{2014}\x{2013}]{8,}$`,
-	// The input line. U+276F and U+203A are the TUI's own prompt carets, and
-	// what follows is what somebody is TYPING, not what the agent said. ASCII
-	// '>' is deliberately absent: it is a quote marker in real output.
-	`^\s*[\x{276f}\x{203a}]`,
+	// The EMPTY input box. U+276F and U+203A are the TUI's own prompt carets.
+	// ASCII '>' is deliberately absent: it is a quote marker in real output.
+	//
+	// Anchored at both ends now, so only a caret with NOTHING after it goes.
+	// It used to strip the whole line, on the grounds that what follows is
+	// being typed rather than said by the agent -- and that threw away the one
+	// line a person watching from their phone most wants to see, because a
+	// prompt they just SENT sits on exactly this line. "I send it and it is not
+	// displaying" was this pattern: the question went in, the agent answered,
+	// and the transcript showed the answer to a question it had deleted.
+	//
+	// The cost is that a half-typed draft is visible while someone types at the
+	// machine. That is the correct trade: it is true, it is what the pane says,
+	// and the alternative is hiding what was asked.
+	`^\s*[\x{276f}\x{203a}]\s*$`,
 	// A context meter. It ticks constantly, which is what makes it expensive:
 	// it changes the screen while saying nothing.
 	`(?i)ctx\s+[\d.]+[KM]?\s+\d+%`,
