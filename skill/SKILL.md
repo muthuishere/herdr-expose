@@ -582,7 +582,10 @@ There is a second, OPTIONAL way in: a **login password**. If the owner has run
 `"password_set": true` when it is available. It is deliberately weaker than
 pairing — a typed password rather than a code shown only on the machine — so it
 is argon2id-hashed, stored only as a hash, and strictly rate-limited;
-`herdr-expose config clear-password` turns it off. Pairing is still the default
+`herdr-expose config clear-password` turns it off. `herdr-expose config
+generate-password [--length N]` mints a strong random one, sets it, and writes
+the plaintext to a 0600 file in the state dir (it prints the path) to read once
+and delete — the value is never printed to stdout. Pairing is still the default
 and the stronger path (ADR 0039).
 
 ## Knowing what is running before you share it

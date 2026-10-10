@@ -175,6 +175,9 @@ security is about *who gets to type*:
   weaker than pairing — a password you type, not a code shown only here — so it
   is hashed slowly, stored only as a hash, and its login route is strictly
   rate-limited. Off until you set one. ([why](docs/adr/0039-password-login-the-weaker-second-credential.md))
+  Want one chosen for you? `herdr-expose config generate-password` mints a strong
+  random one, sets it, and leaves the plaintext in a 0600 file in the state dir
+  (it prints the path) for you to read once and delete.
 - Every share expires. There is no permanent share.
 
 Run `herdr-expose doctor` if anything looks wrong — it checks the lot and tells

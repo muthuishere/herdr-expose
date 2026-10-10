@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -70,6 +71,8 @@ func cmdConfig(args []string) error {
 		return editFile(p)
 	case "set-password":
 		return cmdSetPassword()
+	case "generate-password":
+		return cmdGeneratePassword(args[1:])
 	case "clear-password":
 		return cmdClearPassword()
 	case "help", "--help", "-h":
@@ -89,6 +92,10 @@ func configUsage() {
   config edit            open it in $VISUAL / $EDITOR
   config set-password    set a login password (read from a no-echo prompt, or
                          from stdin when piped — NEVER from an argument)
+  config generate-password [--length N]
+                         generate a strong random password, set it, and write
+                         the PLAINTEXT to a 0600 file in the state dir to read
+                         once and delete (default length 22, ~128 bits)
   config clear-password  remove the login password, disabling /v1/login
 
 First run writes every section and every key, including the subsystems that are
@@ -190,6 +197,120 @@ func readSecret(prompt string) (string, error) {
 		return "", errors.New("no password on stdin")
 	}
 	return strings.TrimSpace(sc.Text()), nil
+}
+
+const (
+	// defaultGeneratedPasswordLen is 22 characters over passwordAlphabet, i.e.
+	// ~128 bits (log2(58) ≈ 5.86 bits/char × 22 ≈ 129). A generated password is
+	// read once off disk, never typed, so there is no reason to make it short.
+	defaultGeneratedPasswordLen = 22
+	// passwordAlphabet is base58: no 0/O, 1/l/I, so a human reading the value out
+	// of the credential file cannot misread it.
+	passwordAlphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+	// credentialFileName is where generate-password leaves the plaintext, in the
+	// state dir beside auth.json — outside the repo (ADR 0009), 0600.
+	credentialFileName = "login-credential.txt"
+)
+
+// generatePassword returns n characters drawn uniformly from passwordAlphabet
+// using crypto/rand. Bytes in the biased tail (there is one because 256 is not a
+// multiple of the alphabet size) are rejected and redrawn, so the distribution
+// is exactly uniform rather than merely close.
+func generatePassword(n int) (string, error) {
+	const max = 256 - (256 % len(passwordAlphabet)) // reject bytes >= max
+	out := make([]byte, 0, n)
+	buf := make([]byte, 1)
+	for len(out) < n {
+		if _, err := rand.Read(buf); err != nil {
+			return "", err
+		}
+		if int(buf[0]) >= max {
+			continue
+		}
+		out = append(out, passwordAlphabet[int(buf[0])%len(passwordAlphabet)])
+	}
+	return string(out), nil
+}
+
+// cmdGeneratePassword mints a strong random password, sets it (so only the
+// argon2id hash reaches auth.json, identical to set-password), and writes the
+// PLAINTEXT to a 0600 credential file for the operator to read once and delete.
+// The tradeoff — plaintext on disk — is why the warning is loud and why the
+// value NEVER touches stdout or the log.
+func cmdGeneratePassword(args []string) error {
+	length := defaultGeneratedPasswordLen
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--length", "-n":
+			if i+1 >= len(args) {
+				return errors.New("--length needs a number")
+			}
+			i++
+			v, err := strconv.Atoi(args[i])
+			if err != nil || v <= 0 {
+				return fmt.Errorf("--length %q is not a positive number", args[i])
+			}
+			length = v
+		default:
+			return fmt.Errorf("unknown flag %q", args[i])
+		}
+	}
+	// The same floor SetPassword enforces, checked here so the error names the
+	// flag rather than surfacing from inside auth.
+	if length < serve.MinPasswordLen {
+		return fmt.Errorf("--length must be at least %d", serve.MinPasswordLen)
+	}
+	state, err := StateDir()
+	if err != nil {
+		return err
+	}
+	pw, err := generatePassword(length)
+	if err != nil {
+		return err
+	}
+	auth, err := serve.NewAuth(state, newLogger(), nil)
+	if err != nil {
+		return err
+	}
+	if err := auth.SetPassword(pw); err != nil {
+		return err
+	}
+	credPath, err := writeCredentialFile(state, pw)
+	if err != nil {
+		return err
+	}
+	// The password NEVER appears on stdout or in the log — only where to read it,
+	// and that it must then be deleted.
+	fmt.Println("login password generated and set (argon2id hash in auth.json).")
+	fmt.Printf("plaintext written to %s (mode 0600)\n", credPath)
+	fmt.Println("WARNING: read it, use it, then delete that file — the plaintext on disk is the tradeoff.")
+	return nil
+}
+
+// writeCredentialFile writes the generated plaintext to the state dir, 0600,
+// atomically (tmp + rename). It is the ONLY place a generated password is kept
+// in the clear, and it exists so a human can read a password they never typed.
+func writeCredentialFile(state, password string) (string, error) {
+	path := filepath.Join(state, credentialFileName)
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "# herdr-expose login password — generated %s\n", time.Now().Format(time.RFC3339))
+	if cfg, err := config.Load(); err == nil {
+		fmt.Fprintf(&b, "# server port: %d\n", cfg.Port())
+	}
+	fmt.Fprintln(&b, "# read this, use it, then DELETE this file.")
+	fmt.Fprintf(&b, "password=%s\n", password)
+
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(b.String()), 0o600); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 // cmdLogs reads the daemon's log, or a share's own log.

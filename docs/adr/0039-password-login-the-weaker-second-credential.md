@@ -64,6 +64,23 @@ Mechanics, all non-negotiable:
 kind of pre-auth discovery as `auth_required`: the web app cannot know to offer
 the password form otherwise.
 
+### Generating one
+
+`herdr-expose config generate-password [--length N]` mints a strong random
+password (crypto/rand over a base58 readable alphabet, default 22 chars ≈ 128
+bits), sets it through the same `SetPassword` path — so only the argon2id hash
+reaches `auth.json`, identical to `set-password` — and writes the **plaintext**
+to `<stateDir>/login-credential.txt`, 0600, atomically.
+
+That plaintext file is the one deliberate exception to "hashes only on disk",
+and it is a conscious tradeoff: a password nobody typed has to be legible
+somewhere once. So the command prints only the file's path, that it is 0600, and
+a loud **read-it-then-delete-it** warning — the password value itself never
+touches stdout or the log. The file lives in the state dir, outside the repo
+(ADR 0009), so it is never at risk of being committed. Deleting it after reading
+returns the instance to hashes-only; leaving it is the operator's risk, named at
+the moment it is created.
+
 ## Consequences
 
 - A second device gets in without a walk to the laptop — the convenience this
