@@ -176,6 +176,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc("/v1/config", s.handleConfig)
 	mux.HandleFunc("/v1/pair", s.handlePair)
+	mux.HandleFunc("/v1/login", s.handleLogin)
 	mux.HandleFunc("/v1/metrics", s.handleMetrics)
 	mux.HandleFunc("/v1/stream", s.handleStream)
 	mux.HandleFunc("/v1/uploads", s.handleUpload)
@@ -223,12 +224,14 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 			h.Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		} else if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			// A state-changing request with no Origin is not a browser request
-			// we can vouch for. /v1/pair is the one exception: it is reached by
+			// we can vouch for. /v1/pair is one exception: it is reached by
 			// a freshly-scanned phone before any origin is established, and it
-			// is already rate-limited and single-use.
+			// is already rate-limited and single-use. /v1/login is treated
+			// identically — an unpaired client reaches it the same way, and it is
+			// rate-limited harder still (auth.loginLimiter).
 			// Messaging is the other: its callers are CLIs and peer daemons,
 			// never browsers, and handleMsg demands the messaging token.
-			if r.URL.Path != "/v1/pair" && !(isMsgPath(r.URL.Path) && BearerFrom(r) != "") {
+			if r.URL.Path != "/v1/pair" && r.URL.Path != "/v1/login" && !(isMsgPath(r.URL.Path) && BearerFrom(r) != "") {
 				http.Error(w, "origin required", http.StatusForbidden)
 				return
 			}
@@ -378,6 +381,14 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	out["authenticated"] = authed
 
+	// Whether a login password is available, the BOOLEAN only and never the hash.
+	// Like auth_required this is pre-auth discovery a client genuinely needs: the
+	// web app cannot know to offer the password form otherwise. It says only that
+	// the door exists — the login route itself returns the same opaque 401
+	// whether or not a password is set, so this reveals nothing about the
+	// password behind it.
+	out["password_set"] = s.auth.HasPassword()
+
 	// WHAT this instance is pointed AT is not bootstrap information, and it
 	// used to be handed to anyone who asked. Through a public tunnel a scanner
 	// with no token got back `"scope":"hexstress-b"` and the default session's
@@ -456,6 +467,46 @@ func (s *Server) handlePair(w http.ResponseWriter, r *http.Request) {
 	// carried the share's real deadline, so a client that trusted expires_in
 	// cached a token that was already dead — on a 1-hour share it believed it
 	// had a month.
+	expAt := deviceExpiry(dev)
+	in := int(time.Until(expAt).Seconds())
+	if in < 0 {
+		in = 0
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"token":      token,
+		"device":     dev,
+		"expires_at": expAt.UTC().Format(time.RFC3339),
+		"expires_in": in,
+	})
+}
+
+// handleLogin exchanges the operator login password for a device token — the
+// weaker, more convenient alternative to a pairing code (ADR 0039). It is in the
+// same pre-auth exception set as /v1/pair, because an unpaired client has to be
+// able to reach it, and it answers with the EXACT shape handlePair returns so a
+// client can treat the two flows as one.
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Password string `json:"password"`
+		Name     string `json:"name"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	token, dev, err := s.auth.LoginWithPassword(body.Password, body.Name, RemoteIP(r), r.UserAgent())
+	if err != nil {
+		// The same opaque 401 as pairing: never distinguish wrong password from
+		// no password set from rate limited.
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	// expires_in and expires_at MUST come from the same instant, exactly as in
+	// handlePair: on a share-scoped instance the token expires with the share.
 	expAt := deviceExpiry(dev)
 	in := int(time.Until(expAt).Seconds())
 	if in < 0 {

@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base32"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -19,6 +20,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/crypto/argon2"
 )
 
 // Auth is the whole authentication surface.
@@ -35,6 +38,13 @@ type Auth struct {
 	state authState
 
 	limiter *rateLimiter
+	// loginLimiter is a SEPARATE, deliberately strict bucket for /v1/login.
+	// Password login is the one route that runs an expensive argon2id verify on
+	// attacker-supplied input, so an unlimited one is a CPU-exhaustion DoS; and a
+	// password is a weak, guessable credential where the pairing code's reasoning
+	// (its limiter is load-bearing) applies in full. It is never the same bucket
+	// as `limiter`, whose authfail path is only a log throttle.
+	loginLimiter *rateLimiter
 
 	origins map[string]struct{}
 
@@ -58,6 +68,13 @@ type authState struct {
 	// shown once, at generation time, and never stored.
 	ServerTokenSHA string          `json:"server_token_sha256"`
 	Devices        []*DeviceRecord `json:"devices"`
+
+	// PasswordHash is the operator login password, as an encoded argon2id string
+	// ($argon2id$v=19$m=...,t=...,p=...$salt$hash), or empty when none is set.
+	// A password is WEAK next to a 256-bit token, so it gets a slow hash (not
+	// sha256hex) — and, like every other secret here, only the hash is stored,
+	// never the plaintext, and never in config.toml (ADR 0039).
+	PasswordHash string `json:"password_hash,omitempty"`
 }
 
 // DeviceRecord is one paired client. The hash is never exported to any API.
@@ -134,10 +151,11 @@ func NewAuth(stateDir string, log Logger, allowedOrigins []string) (*Auth, error
 		return nil, err
 	}
 	a := &Auth{
-		statePath: filepath.Join(stateDir, "auth.json"),
-		log:       log,
-		limiter:   newRateLimiter(),
-		origins:   map[string]struct{}{},
+		statePath:    filepath.Join(stateDir, "auth.json"),
+		log:          log,
+		limiter:      newRateLimiter(),
+		loginLimiter: newRateLimiterWith(loginBurst, loginRefill),
+		origins:      map[string]struct{}{},
 	}
 	for _, o := range allowedOrigins {
 		a.origins[strings.ToLower(strings.TrimSpace(o))] = struct{}{}
@@ -418,6 +436,11 @@ func (a *Auth) reloadLocked() {
 	if fresh.ServerTokenSHA != "" {
 		a.state.ServerTokenSHA = fresh.ServerTokenSHA
 	}
+	// The password is taken WHOLESALE, like Devices: `set-password` and
+	// `clear-password` run in the CLI's process, so the daemon learns of both a
+	// new password and a cleared one only by reading the file, and "" is a
+	// meaningful value (login disabled), not "unknown".
+	a.state.PasswordHash = fresh.PasswordHash
 }
 
 // RedeemPairing exchanges a one-time code for a long-lived device token.
@@ -481,6 +504,195 @@ func (a *Auth) RedeemPairing(code, name, remoteIP, userAgent string) (token stri
 	}
 	a.limiter.reset("pair:" + remoteIP)
 	a.log.Info("pairing redeemed", "device", rec.ID, "name", rec.Name, "ip", remoteIP,
+		"expires_at", rec.ExpiresAt)
+	return tok, publicOf(rec), nil
+}
+
+// argon2id parameters for the login password (ADR 0039).
+//
+// A device token and the server token are 256 bits of entropy, so sha256hex is
+// enough for them: guessing is not a threat model. A password is typed by a
+// human and is therefore WEAK, so it gets a deliberately slow, memory-hard hash
+// — the only thing standing between a leaked state file and the password is the
+// cost of each guess. These are stored INSIDE the encoded hash and read back on
+// verify, so a password set under one set of parameters keeps verifying after
+// they are tuned.
+const (
+	argonTime    = 3
+	argonMemory  = 64 * 1024 // KiB, i.e. 64 MiB
+	argonThreads = 4
+	argonKeyLen  = 32
+	argonSaltLen = 16
+	// MinPasswordLen is a floor, not a strength meter: it keeps the trivially
+	// short out without pretending to measure anything.
+	MinPasswordLen = 8
+)
+
+// hashPassword derives an encoded argon2id string with a fresh random salt.
+func hashPassword(plaintext string) (string, error) {
+	salt := make([]byte, argonSaltLen)
+	if _, err := rand.Read(salt); err != nil {
+		return "", err
+	}
+	key := argon2.IDKey([]byte(plaintext), salt, argonTime, argonMemory, argonThreads, argonKeyLen)
+	return fmt.Sprintf("$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
+		argon2.Version, argonMemory, argonTime, argonThreads,
+		base64.RawStdEncoding.EncodeToString(salt),
+		base64.RawStdEncoding.EncodeToString(key)), nil
+}
+
+// verifyPassword recomputes the derived key with the parameters STORED in the
+// encoded hash — never the current constants — and compares in constant time.
+// A malformed encoding is a non-match, not an error: the caller's single answer
+// is "did it verify", and anything it cannot parse did not.
+func verifyPassword(plaintext, encoded string) bool {
+	parts := strings.Split(encoded, "$")
+	// "" / "argon2id" / "v=19" / "m=..,t=..,p=.." / salt / hash
+	if len(parts) != 6 || parts[1] != "argon2id" {
+		return false
+	}
+	var version int
+	if _, err := fmt.Sscanf(parts[2], "v=%d", &version); err != nil || version != argon2.Version {
+		return false
+	}
+	var mem, iters uint32
+	var par uint8
+	if _, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &mem, &iters, &par); err != nil {
+		return false
+	}
+	salt, err := base64.RawStdEncoding.DecodeString(parts[4])
+	if err != nil {
+		return false
+	}
+	want, err := base64.RawStdEncoding.DecodeString(parts[5])
+	if err != nil || len(want) == 0 {
+		return false
+	}
+	got := argon2.IDKey([]byte(plaintext), salt, iters, mem, par, uint32(len(want)))
+	return subtle.ConstantTimeCompare(got, want) == 1
+}
+
+// SetPassword stores the operator login password, the SECOND, weaker credential
+// (ADR 0039): the exposed web app can exchange it for a device token instead of
+// a physically-displayed pairing code. It is argon2id-hashed with a fresh salt,
+// stored only as a hash in the 0600 state (never plaintext, never in
+// config.toml), and refused if empty or shorter than MinPasswordLen.
+func (a *Auth) SetPassword(plaintext string) error {
+	if len(plaintext) < MinPasswordLen {
+		return fmt.Errorf("serve: password must be at least %d characters", MinPasswordLen)
+	}
+	encoded, err := hashPassword(plaintext)
+	if err != nil {
+		return err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	// commit, not a bare save: `set-password` runs in the CLI's process while
+	// the daemon is rewriting the same file for every request it serves (see
+	// authlock.go and NewPairingCode). A bare save would clobber a device the
+	// daemon paired a moment ago.
+	if err := a.commit(func() {
+		a.state.PasswordHash = encoded
+	}); err != nil {
+		return err
+	}
+	// The password NEVER appears, here or anywhere else — only that one was set.
+	a.log.Info("login password set")
+	return nil
+}
+
+// ClearPassword removes the login password, disabling /v1/login. Same
+// cross-process discipline as SetPassword.
+func (a *Auth) ClearPassword() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err := a.commit(func() {
+		a.state.PasswordHash = ""
+	}); err != nil {
+		return err
+	}
+	a.log.Info("login password cleared")
+	return nil
+}
+
+// HasPassword reports whether a login password is set. It re-reads state so the
+// answer is correct across processes — the daemon serves it into /v1/config, and
+// the password it reports may have been set by the CLI a moment ago.
+func (a *Auth) HasPassword() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.reloadLocked()
+	return a.state.PasswordHash != ""
+}
+
+// LoginWithPassword exchanges the operator login password for a long-lived
+// device token, the weaker alternative to a pairing code (ADR 0039). The
+// plaintext token is returned once; only its hash is stored. It mints exactly
+// what RedeemPairing does, so a client treats the two flows as one.
+func (a *Auth) LoginWithPassword(password, name, remoteIP, userAgent string) (token string, dev Public, err error) {
+	// STRICT rate limit BEFORE the expensive argon2id verify. The GLOBAL bucket
+	// is the load-bearing guard: behind a tunnel every remote client shares one
+	// source address (see reject and OriginAllowed), so a per-address bucket
+	// alone is a single shared bucket a stranger can keep empty for everyone —
+	// and here, with a guessable credential, it would also be the whole of the
+	// brute-force defence. The global bucket caps total guesses per second no
+	// matter how many addresses they arrive from, exactly as RedeemPairing's
+	// limiter is load-bearing; the per-address bucket then stops one client from
+	// eating the entire global allowance on its own.
+	if !a.loginLimiter.allow("login") || !a.loginLimiter.allow("login:"+remoteIP) {
+		a.log.Warn("login rejected", "reason", "rate limited", "ip", remoteIP)
+		return "", Public{}, ErrUnauthorized
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	// Held across the whole read-verify-mint-write: the password may have been
+	// set by the CLI in another process, and minting must not race that process
+	// writing the file.
+	defer a.holdState()()
+	a.reloadLocked()
+
+	// No password set: fail exactly as a wrong one does, and never reveal that
+	// none is configured. A distinguishable answer is an oracle that tells a
+	// locked-down instance from one with the feature simply off.
+	if a.state.PasswordHash == "" {
+		a.log.Warn("login rejected", "reason", "no password set", "ip", remoteIP)
+		return "", Public{}, ErrUnauthorized
+	}
+	// Past the instance deadline NOTHING authenticates, the same rule Authenticate
+	// and RedeemPairing enforce: a share whose time is over issues no new tokens.
+	if !a.deadline.IsZero() && time.Now().After(a.deadline) {
+		a.log.Warn("login rejected", "reason", "instance deadline passed", "ip", remoteIP)
+		return "", Public{}, ErrUnauthorized
+	}
+	if !verifyPassword(password, a.state.PasswordHash) {
+		a.log.Warn("login rejected", "reason", "wrong password", "ip", remoteIP)
+		return "", Public{}, ErrUnauthorized
+	}
+
+	if name == "" {
+		name = "device"
+	}
+	tok := randToken(DeviceTokenBytes)
+	now := time.Now()
+	rec := &DeviceRecord{
+		ID:        randToken(8),
+		Name:      name,
+		TokenSHA:  sha256hex(tok),
+		CreatedAt: now,
+		LastSeen:  now,
+		LastIP:    remoteIP,
+		UserAgent: userAgent,
+		ExpiresAt: a.deadline,
+	}
+	a.state.Devices = append(a.state.Devices, rec)
+	a.evictLocked()
+	if err := a.save(); err != nil {
+		return "", Public{}, err
+	}
+	a.loginLimiter.reset("login:" + remoteIP)
+	// The password is NEVER logged, only that a login succeeded, for whom.
+	a.log.Info("password login", "device", rec.ID, "name", rec.Name, "ip", remoteIP,
 		"expires_at", rec.ExpiresAt)
 	return tok, publicOf(rec), nil
 }
@@ -662,6 +874,13 @@ type bucket struct {
 const (
 	rlBurst  = 10
 	rlRefill = 0.5 // tokens per second
+	// loginBurst / loginRefill are the STRICT parameters for the /v1/login
+	// limiter. A handful of attempts, then roughly one every ten seconds: enough
+	// for a human who mistyped, nowhere near enough to brute-force a password or
+	// to keep an argon2id verify running hot. These are deliberately far below
+	// rlBurst/rlRefill and must never be relaxed towards them.
+	loginBurst  = 5
+	loginRefill = 0.1 // tokens per second
 	// rlGCInterval is how often allow() sweeps idle buckets. The sweep is O(n)
 	// over a map that is normally tiny, and it is amortised across calls rather
 	// than run by a goroutine, so the limiter still owns no background work.

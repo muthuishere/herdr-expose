@@ -14,7 +14,10 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/term"
+
 	"github.com/muthuishere/herdr-expose/internal/config"
+	"github.com/muthuishere/herdr-expose/internal/serve"
 )
 
 // cmdConfig mirrors `herdr --default-config`: the tool can always show you the
@@ -65,6 +68,10 @@ func cmdConfig(args []string) error {
 			fmt.Fprintln(os.Stderr, "herdr-expose: config does not currently load:", err)
 		}
 		return editFile(p)
+	case "set-password":
+		return cmdSetPassword()
+	case "clear-password":
+		return cmdClearPassword()
 	case "help", "--help", "-h":
 		configUsage()
 		return nil
@@ -80,11 +87,19 @@ func configUsage() {
   config path            print the config file path
   config show            print the live config file (creating it if absent)
   config edit            open it in $VISUAL / $EDITOR
+  config set-password    set a login password (read from a no-echo prompt, or
+                         from stdin when piped — NEVER from an argument)
+  config clear-password  remove the login password, disabling /v1/login
 
 First run writes every section and every key, including the subsystems that are
 nobody would guess at ([share], [log]) — a key that exists but is not written
 is a key nobody will ever find. A section added by a later release is APPENDED
 to your file; nothing you have already edited is rewritten or reordered.
+
+The login password is the SECOND, weaker credential: the exposed web app can
+exchange it for a device token instead of a locally-displayed pairing code. It
+lives hashed in the 0600 state file, never in this config, so it is set with a
+command rather than an editor.
 `)
 }
 
@@ -109,6 +124,72 @@ func editFile(path string) error {
 	cmd := exec.Command(parts[0], append(parts[1:], path)...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	return cmd.Run()
+}
+
+// cmdSetPassword stores the login password, the weaker second credential
+// (ADR 0039). The password is read from a no-echo terminal prompt, or from
+// stdin when it is piped, and NEVER from argv: an argument is visible in `ps`
+// and in shell history, which is exactly where a credential must not be.
+func cmdSetPassword() error {
+	state, err := StateDir()
+	if err != nil {
+		return err
+	}
+	pw, err := readSecret("new login password: ")
+	if err != nil {
+		return err
+	}
+	auth, err := serve.NewAuth(state, newLogger(), nil)
+	if err != nil {
+		return err
+	}
+	if err := auth.SetPassword(pw); err != nil {
+		return err
+	}
+	// No echo of the password, here or in the log — only that one is now set.
+	fmt.Println("login password set. The exposed web app can log in with it now; " +
+		"no restart is needed. Remove it with `herdr-expose config clear-password`.")
+	return nil
+}
+
+// cmdClearPassword removes the login password, disabling /v1/login.
+func cmdClearPassword() error {
+	state, err := StateDir()
+	if err != nil {
+		return err
+	}
+	auth, err := serve.NewAuth(state, newLogger(), nil)
+	if err != nil {
+		return err
+	}
+	if err := auth.ClearPassword(); err != nil {
+		return err
+	}
+	fmt.Println("login password cleared. /v1/login is now closed; pairing is unaffected.")
+	return nil
+}
+
+// readSecret reads one secret with echo OFF when stdin is a terminal, or the
+// first line of stdin when it is piped (a scripted set-password). It never takes
+// the value from an argument.
+func readSecret(prompt string) (string, error) {
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		fmt.Fprint(os.Stderr, prompt)
+		b, err := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Fprintln(os.Stderr)
+		if err != nil {
+			return "", err
+		}
+		return strings.TrimSpace(string(b)), nil
+	}
+	sc := bufio.NewScanner(os.Stdin)
+	if !sc.Scan() {
+		if err := sc.Err(); err != nil {
+			return "", err
+		}
+		return "", errors.New("no password on stdin")
+	}
+	return strings.TrimSpace(sc.Text()), nil
 }
 
 // cmdLogs reads the daemon's log, or a share's own log.

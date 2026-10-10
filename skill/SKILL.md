@@ -575,6 +575,16 @@ address and is pairing-gated — mint a code with `share pair <id>`, `POST
 /v1/pair {"code","name"}` once to exchange it for a device token, then send
 `Authorization: Bearer <token>`. The token expires with the share.
 
+There is a second, OPTIONAL way in: a **login password**. If the owner has run
+`herdr-expose config set-password`, a client can `POST /v1/login
+{"password","name"}` to get a device token in the same response shape as
+`/v1/pair`, with no code to read off the machine. `/v1/config` reports
+`"password_set": true` when it is available. It is deliberately weaker than
+pairing — a typed password rather than a code shown only on the machine — so it
+is argon2id-hashed, stored only as a hash, and strictly rate-limited;
+`herdr-expose config clear-password` turns it off. Pairing is still the default
+and the stronger path (ADR 0039).
+
 ## Knowing what is running before you share it
 
 A share exposes a SESSION, so the first question is which session, and the

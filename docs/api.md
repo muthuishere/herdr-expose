@@ -139,6 +139,7 @@ A client author's obligations:
 | `GET` | `/healthz` | none (detail requires it) | Liveness |
 | `GET` | `/v1/config` | **none** | Client bootstrap. It is how you discover whether auth is required, so it can never require it. |
 | `POST` | `/v1/pair` | pairing code | Exchange a pairing code for a device token |
+| `POST` | `/v1/login` | login password | Exchange the operator login password for a device token — the weaker alternative to pairing, off until one is set |
 | `GET` | `/v1/metrics` | required | Latency histograms for the budgeted paths |
 | `GET` | `/v1/stream` | required | WebSocket upgrade |
 | `GET` | `/v1/agents` | **messaging token** | Every agent in every running session on this machine |
@@ -485,6 +486,67 @@ Pairing parameters, all enforced server-side:
 - **Sliding 30-day expiry**: every successful use extends `expires_at`. A device
   used weekly never needs re-pairing; one left in a drawer expires.
 - Maximum 32 paired devices, LRU-evicted.
+
+### Password login
+
+Pairing is strong but requires standing at the machine: the code is shown only
+there. A **login password** is the optional, weaker alternative (ADR 0039). The
+operator sets one with `herdr-expose config set-password`; the web app then
+exchanges it for a device token at `POST /v1/login`, with no code to read off a
+screen. It is **off until a password is set**, and setting one does not touch
+pairing — both work at once.
+
+Read whether it is available from `/v1/config`:
+
+```json
+{ "auth_required": true, "authenticated": false, "password_set": true }
+```
+
+`password_set` is a **boolean and nothing more** — never the hash. It is how the
+web app knows to offer the password form, the same pre-auth discovery as
+`auth_required`.
+
+**`POST /v1/login`**
+
+Request — the server reads exactly these two fields. `name` is the label shown in
+`herdr-expose devices`, as with pairing.
+
+```json
+{
+  "password": "YOUR_PASSWORD_HERE",
+  "name": "Pixel 8"
+}
+```
+
+`200 OK` is **byte-for-byte the shape `POST /v1/pair` returns** — `token` at the
+top level, the `device`, and `expires_at` / `expires_in` describing the same
+instant — so a client treats the two flows as one:
+
+```json
+{
+  "token": "<device token>",
+  "device": { "id": "dev_01HQ8R2K9M", "name": "Pixel 8", "created_at": "…", "last_seen": "…" },
+  "expires_at": "2026-10-16T09:12:00Z",
+  "expires_in": 2592000
+}
+```
+
+Any failure — wrong password, no password set, rate-limited, past a share's
+deadline — returns the **same bare `401`** as pairing. The reason is never
+distinguished: the route will not even tell you whether a password is set, so it
+cannot be used as an oracle.
+
+Hardening, all enforced server-side:
+
+- The password is **argon2id-hashed** (not the token sha256) and stored **only as
+  a hash** in the 0600 state file — never plaintext, never in `config.toml`.
+- A **strict, dedicated rate limiter** sits in front of the argon2 verify: a few
+  attempts, then roughly one every ten seconds. The **global** bucket is the
+  load-bearing guard — behind a tunnel every client shares one source address, so
+  a per-address bucket alone is a shared bucket a stranger can empty. Back off on
+  repeated `401`s rather than hammering.
+- The minted token is an ordinary device token: 32 random bytes, sliding 30-day
+  expiry, LRU-evicted, revocable, and clamped to a share's deadline.
 
 ### Revocation
 

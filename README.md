@@ -169,6 +169,12 @@ security is about *who gets to type*:
   never escalates to the internet on its own.
 - Every share needs pairing, and **the pairing code is only ever shown on this
   machine**. No URL can mint one.
+- Prefer not to walk to the machine for a code? Set a **login password** with
+  `herdr-expose config set-password` and the web app can log in with it instead
+  (`herdr-expose config clear-password` turns it back off). It is deliberately
+  weaker than pairing — a password you type, not a code shown only here — so it
+  is hashed slowly, stored only as a hash, and its login route is strictly
+  rate-limited. Off until you set one. ([why](docs/adr/0039-password-login-the-weaker-second-credential.md))
 - Every share expires. There is no permanent share.
 
 Run `herdr-expose doctor` if anything looks wrong — it checks the lot and tells
@@ -183,7 +189,7 @@ you which part is unhappy.
 | [**Full guide**](docs/guide.md) | install, exposure modes, config, security model, troubleshooting |
 | [**API**](docs/api.md) | the WebSocket + HTTP contract, enough to build a native client |
 | [**Agent skill**](skill/SKILL.md) | say "share this session" to Claude Code and it does the rest |
-| [**Decisions**](docs/adr/) | 37 ADRs — what was chosen, and what it cost |
+| [**Decisions**](docs/adr/) | 39 ADRs — what was chosen, and what it cost |
 | [**Contributing**](CONTRIBUTING.md) | build it, run the gates, house rules |
 
 Requires Herdr 0.9.0+. macOS, Linux and Windows. MIT — see [LICENSE](LICENSE).
