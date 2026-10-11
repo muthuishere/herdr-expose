@@ -29,6 +29,8 @@ import { shapeTranscript } from './transcriptText'
 import { hasRealAgent } from './agentPresence'
 import { renderInline } from './inlineText'
 import { imagesFrom, uploadImage, type Upload } from '../net/upload'
+import { fetchAgentLog, type AgentEvent } from '../net/agentlog'
+import { AgentTranscript } from './AgentTranscript'
 
 /**
  * The answer keys from SPEC J2, sent as NAMED KEYS through `agent.send_keys`.
@@ -96,8 +98,56 @@ export function TranscriptView({ target }: { target: PaneId }) {
 
   const shaped = useMemo(() => shapeTranscript(frame?.text ?? ''), [frame?.text])
 
+  /* --- the agent's own transcript (ADR 0040) --------------------------------
+   *
+   * Preferred over the shaped screen whenever it exists, because it is the
+   * same conversation with the information still in it: real markdown, and
+   * tool calls as objects that can be collapsed rather than 63% of the view.
+   * The screen stays one tap away and stays the fallback, since it is the only
+   * source for what is happening RIGHT NOW — the live spinner and the
+   * permission prompt are not written to the transcript.
+   */
+  const agentID = pane?.agent?.id
+  const [events, setEvents] = useState<AgentEvent[] | null>(null)
+  const [showScreen, setShowScreen] = useState(false)
+
+  // Keyed on the frame's timestamp rather than a timer: the transcript frame
+  // already arrives on the server's poll, so this refreshes exactly when there
+  // is something new and never in between.
+  const tick = frame?.at
+  useEffect(() => {
+    if (!agentID) {
+      setEvents(null)
+      return
+    }
+    let live = true
+    void fetchAgentLog(agentID).then((log) => {
+      if (!live) return
+      setEvents(log.available ? log.events : null)
+    })
+    return () => {
+      live = false
+    }
+  }, [agentID, tick])
+
+  // A pane with no transcript is not a degraded pane; it is every shell, and
+  // most of them. It simply gets the screen, with no toggle to explain.
+  const conversation = events !== null && events.length > 0 && !showScreen
+
   return (
     <div className="tr">
+      {events !== null && events.length > 0 ? (
+        <button
+          type="button"
+          className="tr-viewswap"
+          onClick={() => setShowScreen((v) => !v)}
+        >
+          {showScreen ? 'Show the conversation' : "Show the pane's screen"}
+        </button>
+      ) : null}
+      {conversation ? (
+        <AgentTranscriptBody events={events} />
+      ) : (
       <TranscriptBody
         target={target}
         items={shaped.items}
@@ -110,8 +160,45 @@ export function TranscriptView({ target }: { target: PaneId }) {
         cleaned={frame?.cleaned}
         rejoined={shaped.rejoined}
       />
+      )}
       {blocked ? <AnswerKeys target={target} /> : null}
       {hasAgent ? <PromptBox target={target} /> : null}
+    </div>
+  )
+}
+
+/**
+ * The conversation, in the same scroller the screen view uses.
+ *
+ * It repeats TranscriptBody's bottom-pinning deliberately rather than sharing
+ * it: the rule is "follow the newest line unless the reader has scrolled away
+ * from it", and the thing it watches differs (events here, shaped items
+ * there). Factoring it out would mean a hook taking a dependency it cannot
+ * name, for two call sites.
+ */
+function AgentTranscriptBody({ events }: { events: AgentEvent[] }) {
+  const ref = useRef<HTMLDivElement>(null)
+  const pinnedRef = useRef(true)
+
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el || !pinnedRef.current) return
+    el.scrollTop = el.scrollHeight
+  }, [events])
+
+  return (
+    <div
+      className="tr-body"
+      ref={ref}
+      role="log"
+      aria-label="This agent's conversation"
+      aria-live="polite"
+      onScroll={(e) => {
+        const el = e.currentTarget
+        pinnedRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24
+      }}
+    >
+      <AgentTranscript events={events} />
     </div>
   )
 }

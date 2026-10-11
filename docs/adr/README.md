@@ -48,6 +48,8 @@ Herdr 0.9.0 verification.
 | [0036](0036-one-install-binary-plugin-and-skill.md) | One install: the binary, the plugin AND the agent skill | Accepted; adds the `skill` verb and makes 0001's build step finish the install |
 | [0037](0037-windows-is-a-build-tagged-platform-seam.md) | Windows is a build-tagged platform seam, not a `runtime.GOOS` branch | Accepted; adds `internal/platform` and a third platform, and changes no Unix behaviour |
 | [0038](0038-no-tunnel-the-lan-is-the-top-rung.md) | herdr-expose does not raise tunnels; the LAN is the top rung | Accepted; **supersedes** 0005/0027/0028/0034, truncates 0029's ladder to two rungs |
+| [0039](0039-password-login-the-weaker-second-credential.md) | Password login: the weaker second credential | Accepted; relaxes 0017/0023 for RECOVERY only, and never for scope |
+| [0040](0040-read-the-agents-transcript-not-the-screen.md) | Read the agent's own transcript, not the screen it painted | Accepted; supersedes 0030's premise for agent panes, strengthens 0031 |
 
 ## Supersessions
 
@@ -76,6 +78,9 @@ Herdr 0.9.0 verification.
 | 0036 | extends 0001's build step (it now links into $HOME, announced) and 0025's id set (`hex:install-skill`); changes no runtime behaviour |
 | 0037 | extends 0001's build matrix (six targets, `.exe`) and 0007's supervision with a Windows Service; moves every Unix syscall behind `internal/platform` without changing what it does |
 | 0038 | **supersedes 0005, 0027, 0028 and 0034 entirely**, removes 0022's `cloudflare` mode and truncates 0029's ladder to two rungs; leaves 0004, 0023, 0026 and 0035 carrying the whole product |
+
+| 0039 | relaxes 0017/0023 with a SECOND credential, for recovery from a changed origin; grants no scope a pairing code would not |
+| 0040 | supersedes 0030's PREMISE for agent panes (a transcript view is still right; it is no longer built from the pane), strengthens 0031 (this path reads a file and can resize nothing), and respects 0014 by staying off the fanout path |
 
 ## Themes
 

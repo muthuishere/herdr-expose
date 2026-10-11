@@ -180,6 +180,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/v1/metrics", s.handleMetrics)
 	mux.HandleFunc("/v1/stream", s.handleStream)
 	mux.HandleFunc("/v1/uploads", s.handleUpload)
+	mux.HandleFunc("/v1/agentlog", s.handleAgentLog)
 	mux.HandleFunc("/v1/agents", s.handleMsg)
 	mux.HandleFunc("/v1/inventory", s.handleMsg)
 	mux.HandleFunc("/v1/messages", s.handleMsg)
