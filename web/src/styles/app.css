@@ -319,8 +319,25 @@ button {
   color: var(--blocked);
 }
 
-/* Not a control: the shape of the machine, not a filter. */
+/* Engaged, not merely hovered: these counts are filters now, and a filter you
+   cannot see is on is a list that looks broken. */
+.stat.is-active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.stat.is-active b,
+.stat.is-active span {
+  color: var(--accent);
+}
+
+/* Not a control: the shape of the machine, not a filter.
+   HIDDEN ON THE PHONE, where it is the only chip that earns no vertical
+   space: it wrapped onto a line of its own and said "33 panes in 2
+   sessions" directly above a search box whose placeholder reads "Search 33
+   panes" and session headers that each carry their own count. 80px of a
+   844px screen, spent on the third copy of one number. */
 .stat-quiet {
+  display: none;
   border-style: dashed;
   cursor: default;
 }
@@ -385,7 +402,7 @@ button {
      list far more than it needs a second line of text. */
   /* Two lines and nothing else: title row + one sub line. The old third chip
      row overflowed this box, which clipped the sub line vertically. */
-  height: 62px;
+  height: 64px;
   overflow: hidden;
   justify-content: center;
 }
@@ -417,6 +434,41 @@ button {
   min-width: 0;
 }
 
+/*
+ * Line one is "where · what", in that order.
+ *
+ * The folder goes FIRST because it is the only part that is reliably distinct:
+ * on this machine two rows carry the title "Marketing agent context recycle
+ * from 83fbaeea" character for character, and `marketing-team` vs `site` is
+ * the whole difference between them. It is capped rather than fixed so a long
+ * directory cannot push the title out of the row entirely.
+ */
+.row-name {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+/* `0 0 auto`, NOT `0 1 auto`: with both children shrinkable the browser
+   shrank them in proportion and rendered `marketi…`, `crypto-d…`, `ref…` —
+   clipping the one word that identifies the row while leaving 30 characters
+   of title intact. The identity does not yield; the sentence does. The 50%
+   cap is what stops a pathological directory name eating the whole line. */
+.row-folder {
+  flex: 0 0 auto;
+  max-width: 50%;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--accent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .row-title {
   font-weight: 600;
   font-size: 15px;
@@ -424,6 +476,7 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
+  flex: 1 1 auto;
 }
 
 .row-sub {
@@ -436,8 +489,11 @@ button {
   font-size: 12px;
   line-height: 1.35;
   color: var(--fg-dim);
-  /* Reserve the line whether or not there is text in it. */
-  height: 17px;
+  /* Reserve the line whether or not there is text in it. 12px x 1.35 is
+     16.2px of text, and 17px of box cut the descenders off every `g` and `y`
+     on the phone — visible in a screenshot, invisible to every assertion we
+     had. */
+  height: 19px;
   /* One line, clipped — never a source of horizontal scroll. */
   white-space: nowrap;
   overflow: hidden;
@@ -463,6 +519,14 @@ button {
 }
 
 /* A working pane says "working", not what it printed 40ms ago. */
+/* An idle clock is a fact about the pane, not a preview of it: same size as
+   the activity line it replaces, and as quiet. */
+.row-sub-quiet {
+  font-family: var(--sans);
+  color: var(--fg-faint);
+  font-variant-numeric: tabular-nums;
+}
+
 .row-sub-activity {
   display: flex;
   align-items: center;
@@ -485,7 +549,118 @@ button {
   color: var(--blocked);
 }
 
-/* ------------------------------------------------------------ sessions */
+/* ------------------------------------------------------------- search */
+
+/*
+ * STICKY, and that is the point. The list it searches is 33 rows long on the
+ * machine this was asked for, so the box has to stay reachable after you have
+ * scrolled past row 8 — otherwise the gesture is "scroll all the way back up,
+ * then type", which is slower than scrolling to the row you wanted.
+ *
+ * It sits at `top: 0` of the SCROLL container, not of the page: the appbar is
+ * outside that container and does not move, so there is nothing to offset by.
+ */
+.pl-search {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 8px 0 10px;
+  background: var(--bg);
+}
+
+.pl-search-icon {
+  position: absolute;
+  left: 12px;
+  font-size: 15px;
+  color: var(--fg-faint);
+  pointer-events: none;
+}
+
+.pl-search-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--fg);
+  /* 16px EXACTLY, and not a design preference: iOS Safari zooms the page when
+     a focused input is under 16px, and it does not zoom back out on blur. */
+  font-size: 16px;
+  font-family: var(--sans);
+  line-height: 1.2;
+  /* 44px: the smallest target Apple's own HIG will call reliable for a thumb. */
+  height: 44px;
+  padding: 0 14px 0 34px;
+}
+
+.pl-search-input::-webkit-search-decoration,
+.pl-search-input::-webkit-search-cancel-button {
+  /* The platform button is 11px and sits where the thumb cannot reach it; the
+     app draws its own at 34px instead. */
+  appearance: none;
+}
+
+.pl-search-input::placeholder {
+  color: var(--fg-faint);
+}
+
+.pl-search-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.pl-search-clear,
+.pl-search-state {
+  appearance: none;
+  flex: 0 0 auto;
+  border: 1px solid var(--line);
+  background: var(--bg-2);
+  color: var(--fg-dim);
+  border-radius: 999px;
+  height: 34px;
+  min-width: 34px;
+  padding: 0 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.pl-search-state {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  text-transform: lowercase;
+}
+
+.pl-none {
+  padding: 28px 4px;
+  text-align: center;
+  color: var(--fg-faint);
+}
+
+.pl-none p {
+  margin: 0 0 12px;
+  font-size: 14px;
+}
+
+.pl-none-clear {
+  appearance: none;
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--fg-dim);
+  font-size: 14px;
+  padding: 10px 18px;
+  cursor: pointer;
+}
+
+/* ------------------------------------------------------------- sessions */
 
 .ws-session {
   margin-top: 14px;
@@ -493,15 +668,20 @@ button {
 
 /* The ONLY section header: a session name, a state rollup and a pane count.
    Workspace and tab ids are routing, and routing does not belong on screen. */
+/* STICKY under the search box: with 27 rows in one session, the header that
+   says which session you are in scrolls away long before the rows do. */
 .session-head {
   width: 100%;
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 8px 8px 8px 2px;
-  background: transparent;
+  background: var(--bg);
   color: var(--fg-dim);
   text-align: left;
+  position: sticky;
+  top: 62px;
+  z-index: 2;
 }
 
 .session-caret {
@@ -1606,10 +1786,27 @@ button {
     display: none;
   }
 
+  /* Room to spare here, and the grid has no session headers to count for it. */
+  .stat-quiet {
+    display: flex;
+  }
+
   /* Denser on the desktop sidebar, still a FIXED height so the list is still. */
   .row {
     height: 58px;
     padding: 8px 12px;
+  }
+
+  .tile-folder {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--accent);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 40%;
+    flex: 0 1 auto;
   }
 }
 

@@ -18,6 +18,7 @@ import { AnsiBlock } from './SummaryTile'
 import { AgentBadge } from './AgentBadge'
 import { EmptyPanes } from './EmptyPanes'
 import { useElapsed, usePaneTriage, useQuietPaneText } from '../hooks/usePaneTriage'
+import { folderName, shortTitle } from './paneSearch'
 
 export function DesktopGrid({ onOpen }: { onOpen: (id: PaneId) => void }) {
   const tree = useStore((s) => s.tree)
@@ -48,6 +49,8 @@ function Tile({ pane, onOpen }: { pane: TreePane; onOpen: (id: PaneId) => void }
   const elapsed = useElapsed(triage.kind === 'activity' ? triage.since : null)
   // Body text only for a settled pane; a working pane gets none by design.
   const quiet = useQuietPaneText(pane.id, triage.kind === 'line' || triage.kind === 'none')
+  const name = shortTitle(pane)
+  const folder = folderName(pane.cwd)
 
   return (
     <button
@@ -55,7 +58,14 @@ function Tile({ pane, onOpen }: { pane: TreePane; onOpen: (id: PaneId) => void }
       onClick={() => onOpen(pane.id)}
     >
       <span className="tile-head">
-        <span className="tile-title">{pane.title}</span>
+        <span className="tile-title" title={pane.title}>
+          {name}
+        </span>
+        {folder && folder !== name ? (
+          <span className="tile-folder" title={pane.cwd || undefined}>
+            {folder}
+          </span>
+        ) : null}
         {pane.agent ? <AgentBadge state={pane.agent.state} /> : null}
       </span>
 

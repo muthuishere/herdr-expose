@@ -15,10 +15,32 @@
  */
 
 import { useMemo } from 'react'
+import type { AgentState } from '../protocol/types'
 import { collectPanes } from '../protocol/tree'
 import { useStore } from '../store/store'
 
-export function Stats({ onPick }: { onPick?: (state: string) => void }) {
+/**
+ * `shell` is not an agent state — it is this component's own word for "a pane
+ * with no agent bound", which Herdr reports as `unknown`. The filter speaks
+ * Herdr's language, so the translation happens here, at the only place that
+ * ever invented the other word.
+ */
+const FILTER_STATE: Record<string, AgentState> = {
+  blocked: 'blocked',
+  working: 'working',
+  idle: 'idle',
+  done: 'done',
+  shell: 'unknown',
+}
+
+export function Stats({
+  onPick,
+  active,
+}: {
+  onPick?: (state: AgentState) => void
+  /** The state currently filtered on, so the chip can show it is engaged. */
+  active?: AgentState | null
+}) {
   const tree = useStore((s) => s.tree)
 
   const counts = useMemo(() => {
@@ -53,9 +75,12 @@ export function Stats({ onPick }: { onPick?: (state: string) => void }) {
     <div className="stats" role="status" aria-label="What is happening right now">
       <button
         type="button"
-        className={`stat stat-blocked${blocked > 0 ? ' is-on' : ''}`}
+        className={`stat stat-blocked${blocked > 0 ? ' is-on' : ''}${
+          active === 'blocked' ? ' is-active' : ''
+        }`}
         onClick={() => onPick?.('blocked')}
         disabled={blocked === 0}
+        aria-pressed={active === 'blocked'}
       >
         <b>{blocked}</b>
         <span>needs you</span>
@@ -65,8 +90,11 @@ export function Stats({ onPick }: { onPick?: (state: string) => void }) {
           <button
             type="button"
             key={key}
-            className={`stat stat-${key}`}
-            onClick={() => onPick?.(key)}
+            className={`stat stat-${key}${
+              active === FILTER_STATE[key] ? ' is-active' : ''
+            }`}
+            onClick={() => onPick?.(FILTER_STATE[key])}
+            aria-pressed={active === FILTER_STATE[key]}
           >
             <b>{counts.by[key]}</b>
             <span>{label}</span>

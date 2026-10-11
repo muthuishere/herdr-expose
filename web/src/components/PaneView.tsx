@@ -29,15 +29,8 @@ import { useStore } from '../store/store'
 import { TranscriptView } from './TranscriptView'
 import { AgentBadge } from './AgentBadge'
 import { formatBytes } from './PaneList'
+import { folderName, shortTitle } from './paneSearch'
 
-/**
- * Keep the TAIL of a long path (the part that identifies the directory) and drop
- * the head. Done in JS, not with `direction: rtl` — RTL reorders the whole run
- * and renders "~/a/b/herdr-expose" as "…b/herdr-expose/~".
- */
-function truncateStart(s: string, max: number): string {
-  return s.length <= max ? s : '…' + s.slice(s.length - max + 1)
-}
 
 export function PaneView({
   target,
@@ -68,10 +61,16 @@ export function PaneView({
         </button>
       ) : null}
       <div className="paneview-titles">
-        <span className="paneview-title">{pane?.title ?? target}</span>
+        <span className="paneview-title" title={pane?.title}>
+          {pane ? shortTitle(pane) : target}
+        </span>
         {pane ? (
-          <span className="paneview-sub">
-            {truncateStart(pane.cwd ?? pane.command ?? '', 34)}
+          /* The LAST segment, not a left-truncated path. Every path on this
+             machine shares its first ~30 characters, so "…rkspace/agents/site"
+             spent the whole line on the part that identifies nothing. The full
+             path stays here as the tooltip, where it costs no pixels. */
+          <span className="paneview-sub" title={pane.cwd || undefined}>
+            {folderName(pane.cwd) || pane.command || ''}
           </span>
         ) : null}
       </div>

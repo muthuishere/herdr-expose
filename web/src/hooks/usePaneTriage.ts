@@ -22,6 +22,7 @@ import { getState } from '../store/store'
 import { useStore } from '../store/store'
 import type { AgentState, PaneId, TreePane } from '../protocol/types'
 import { ansiQuestionLine, ansiSummaryLine } from '../ansi/ansiToHtml'
+import { folderName } from '../components/paneSearch'
 
 /** Slow enough to read, and far below any sane output rate. */
 export const QUIET_SAMPLE_MS = 4000
@@ -143,6 +144,8 @@ export function usePaneTriage(pane: TreePane): Triage {
     return { kind: 'activity', state, text: '', since: toMillis(pane.agent?.changed_at) }
   }
   const line = quiet ? ansiSummaryLine(quiet) : ''
-  const text = line || pane.agent?.summary || pane.cwd || ''
+  // `folderName`, not the raw cwd: this lands in a one-line row that clips,
+  // and a clipped absolute path shows only the prefix every pane shares.
+  const text = line || pane.agent?.summary || folderName(pane.cwd) || ''
   return { kind: text ? 'line' : 'none', state, text, since: null }
 }

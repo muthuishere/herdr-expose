@@ -650,7 +650,21 @@ func (s *Store) applySnapshot(m *mutable, session string, snap *upstream.Snapsho
 		prev := m.lastState[key]
 		if prev != p.AgentStatus {
 			m.lastState[key] = p.AgentStatus
-			m.changedAt[key] = time.Now()
+			// ONLY on a transition we actually WATCHED. Herdr reports a status,
+			// never a timestamp -- it says "idle", not "idle since 9:14" -- so
+			// the only thing that can date a state is having seen it start.
+			// Stamping on FIRST SIGHT dated every agent to our own startup, and
+			// the phone then rendered "idle 12s" on 31 panes that had in truth
+			// been idle for hours. A clock that resets when the server restarts
+			// is worse than no clock: it is a wrong answer to the one question
+			// ("can I close this?") the clock exists to answer.
+			//
+			// Absent is honest, and inventory.Tracker has said so in its own
+			// doc comment all along; the line below already guarded doneSeq
+			// with exactly this condition.
+			if prev != "" {
+				m.changedAt[key] = time.Now()
+			}
 			// A transition INTO an idle-ish state is what creates a DONE badge.
 			if isSettled(p.AgentStatus) && prev != "" {
 				m.doneSeq[key]++

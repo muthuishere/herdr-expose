@@ -8,7 +8,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import type { PaneId } from './protocol/types'
+import type { AgentState, PaneId } from './protocol/types'
 import { useStore, setFocused } from './store/store'
 import { useIsMobile } from './hooks/useViewport'
 import { PaneList } from './components/PaneList'
@@ -36,6 +36,15 @@ export function App() {
   const authReason = useStore((s) => s.authReason)
   const unreachable = useStore((s) => s.unreachable)
   const [open, setOpen] = useState<PaneId | null>(null)
+  /**
+   * Which agent state the list is narrowed to, driven by tapping a count in
+   * Stats. Those counts have been BUTTONS since they were written — `onPick`
+   * was simply never passed, so for every build until now the one obvious
+   * gesture on the busiest row of the phone screen did nothing at all. It
+   * lives here rather than in either child because Stats raises it and
+   * PaneList consumes it.
+   */
+  const [stateFilter, setStateFilter] = useState<AgentState | null>(null)
   // Consumed once, synchronously, before the first paint: the QR deep link
   // `/?pair=<code>` must not survive into history or a screenshot.
   const [pairCode, setPairCode] = useState<string | null>(() => takePairCodeFromUrl())
@@ -123,8 +132,16 @@ export function App() {
                 <Disconnected link={link} error={lastError} unreachable={unreachable} />
               ) : null}
               {env.note ? <EnvNote note={env.note} /> : null}
-              <Stats />
-              <PaneList onOpen={openPane} selected={focused} />
+              <Stats
+                active={stateFilter}
+                onPick={(st) => setStateFilter((cur) => (cur === st ? null : st))}
+              />
+              <PaneList
+                onOpen={openPane}
+                selected={focused}
+                stateFilter={stateFilter}
+                onClearStateFilter={() => setStateFilter(null)}
+              />
             </main>
           </>
         )}
@@ -154,7 +171,12 @@ export function App() {
           <SettingsButton attention={attention} onClick={() => setShowSettings(true)} />
         </header>
         <div className="scroll">
-          <PaneList onOpen={openPane} selected={open} />
+          <PaneList
+            onOpen={openPane}
+            selected={open}
+            stateFilter={stateFilter}
+            onClearStateFilter={() => setStateFilter(null)}
+          />
         </div>
       </aside>
       <main className="main">
@@ -166,7 +188,10 @@ export function App() {
           <PaneView target={open} onBack={closePane} showClose />
         ) : (
           <>
-            <Stats />
+            <Stats
+              active={stateFilter}
+              onPick={(st) => setStateFilter((cur) => (cur === st ? null : st))}
+            />
             <DesktopGrid onOpen={openPane} />
           </>
         )}
