@@ -330,6 +330,7 @@ function PromptBox({ target }: { target: PaneId }) {
   const [busy, setBusy] = useState(0)
   const [dragging, setDragging] = useState(false)
   const fileRef = useRef<HTMLInputElement | null>(null)
+  const camRef = useRef<HTMLInputElement | null>(null)
 
   // An attachment is shown, not its path. A temp path is ninety characters of
   // noise in a text box; the person wants to see THAT THEY ATTACHED A THING.
@@ -437,6 +438,47 @@ function PromptBox({ target }: { target: PaneId }) {
           e.target.value = ''
         }}
       />
+      {/*
+       * The camera, and deliberately NOT getUserMedia.
+       *
+       * A live in-app viewfinder needs a SECURE CONTEXT, and the rung a phone
+       * actually uses does not have one: plain HTTP on a LAN IP is not secure
+       * (localhost is exempt, 192.168.x.x is not — see net/env.ts). There,
+       * `navigator.mediaDevices` is undefined, so a viewfinder would not fail
+       * with a message, it would fail by not existing.
+       *
+       * `capture` on a file input has no such requirement, because the page
+       * never touches the camera: the OS camera app does, and hands back a
+       * file. It therefore works on every rung this product has, which is the
+       * whole reason it is the one used here.
+       *
+       * "environment" asks for the REAR camera: the thing being photographed
+       * is a screen, a whiteboard or a page, never the person holding it. Not
+       * every browser honours the hint — those show their normal chooser and
+       * nothing is lost. `multiple` is deliberately absent: a camera returns
+       * one frame, and asking for many here makes some pickers ignore the
+       * capture hint entirely and open the gallery instead.
+       */}
+      <input
+        ref={camRef}
+        type="file"
+        accept="image/*"
+        capture="environment"
+        hidden
+        onChange={(e) => {
+          attach(Array.from(e.target.files ?? []))
+          e.target.value = ''
+        }}
+      />
+      <button
+        type="button"
+        className="tr-clip"
+        aria-label="Take a photo"
+        title="Take a photo"
+        onClick={() => camRef.current?.click()}
+      >
+        ⬤
+      </button>
       <button
         type="button"
         className="tr-clip"

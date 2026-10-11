@@ -1105,9 +1105,12 @@ button {
 .tr-prompt {
   flex: 0 0 auto;
   display: grid;
-  /* attach | textarea | send. The attachment strip and the status row each
-     span the lot, so the middle row places itself. */
-  grid-template-columns: auto 1fr auto;
+  /* camera | attach | textarea | send. The attachment strip and the status row
+     each span the lot, so the middle row places itself. The camera comes FIRST
+     because on a phone it is the likelier of the two — the reason to open this
+     on a phone at all is usually that the thing you want to show the agent is
+     in front of you, not in your camera roll. */
+  grid-template-columns: auto auto 1fr auto;
   gap: 8px 8px;
   align-items: end;
   padding: 8px calc(var(--safe-right) + 12px)
@@ -1680,6 +1683,48 @@ button {
 .pair-input::placeholder {
   color: var(--fg-faint);
   letter-spacing: 0.34em;
+}
+
+/* The password is not a six-character code, so it must not wear the code's
+   clothes. The big tracked-out centred mono above is built for "ABC123" read
+   aloud across a room; applied to a long passphrase it centres a row of dots,
+   spaces them out so the field overflows, and makes the two fields look like
+   the same input with two different labels. Left-aligned, normal tracking, and
+   16px so iOS still does not zoom on focus. */
+.pair-input.is-password {
+  height: 50px;
+  font-family: var(--sans);
+  font-size: 16px;
+  letter-spacing: normal;
+  text-align: left;
+  text-indent: 0;
+  padding: 0 12px;
+}
+
+.pair-input.is-password::placeholder {
+  letter-spacing: normal;
+}
+
+/* A labelled rule between the two credentials. They are alternatives, not
+   steps, and stacking two forms with no divider reads as a single form that
+   wants both. */
+.pair-or {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 16px 0 14px;
+  color: var(--fg-faint);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.pair-or::before,
+.pair-or::after {
+  content: '';
+  flex: 1 1 auto;
+  height: 1px;
+  background: var(--line);
 }
 
 .pair-submit {
