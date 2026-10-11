@@ -186,8 +186,22 @@ export function parseMarkdown(src: string): Block[] {
  *
  * Code is matched FIRST and its contents are never re-scanned, because
  * `**` inside a backtick span is two asterisks and nothing else.
+ *
+ * Bold and italic ARE re-scanned, one level down, because agents write
+ * ``**`some-identifier` exists**`` constantly — a code span inside bold. Not
+ * recursing renders the backticks as literal characters, which is how this was
+ * caught: reading the rendered output on a phone and seeing
+ * `` `gemini-robotics-er-2-streaming-preview` `` with its quotes showing.
+ * The recursion terminates because the bold and italic patterns exclude their
+ * own delimiters, so the inner text can never be bold or italic again.
  */
-const INLINE = /(`[^`\n]+`|\*\*[^*\n]+\*\*|\*[^*\n]+\*|_[^_\n]+_|\[[^\]\n]+\]\([^)\s]+\))/g
+// Bold admits a LONE `*` in its content (`*(?!\*)`), so that *italic*
+// nested inside **bold** still matches as bold and the recursion can then
+// find the italic. Without that the bold alternative fails, the italic one
+// matches across the wrong boundaries, and the reader gets stray asterisks
+// with the emphasis in the wrong places.
+const INLINE_SRC =
+  "(`[^`\\n]+`|\\*\\*(?:[^*\\n]|\\*(?!\\*))+\\*\\*|\\*[^*\\n]+\\*|_[^_\\n]+_|\\[[^\\]\\n]+\\]\\([^)\\s]+\\))"
 
 /** Only these schemes. A `javascript:` href is a script injection with a hat on. */
 function safeHref(url: string): string | null {
@@ -199,19 +213,28 @@ export function renderInlineMarkdown(text: string, keyBase = 'i'): ReactNode {
   // Fast path: most lines carry no markup at all, and this runs per block.
   if (!/[`*_[]/.test(text)) return text
 
+  // A FRESH regex per call, not a shared module-level one.
+  //
+  // This function recurses into bold and italic, and a `/g` regex carries
+  // `lastIndex` as mutable state on the object itself. Sharing one instance
+  // means the inner call rewinds and advances the OUTER loop's cursor, which
+  // is an infinite loop, not a wrong render: it crashed the page outright the
+  // first time it ran against real prose containing code inside bold. The
+  // fast path above returns before this for most lines, so the per-call
+  // allocation is not on the hot path.
+  const re = new RegExp(INLINE_SRC, 'g')
   const out: ReactNode[] = []
   let last = 0
   let m: RegExpExecArray | null
   let key = 0
-  INLINE.lastIndex = 0
-  while ((m = INLINE.exec(text)) !== null) {
+  while ((m = re.exec(text)) !== null) {
     if (m.index > last) out.push(text.slice(last, m.index))
     const tok = m[0]
     const k = `${keyBase}${key++}`
     if (tok.startsWith('`')) {
       out.push(<code key={k}>{tok.slice(1, -1)}</code>)
     } else if (tok.startsWith('**')) {
-      out.push(<strong key={k}>{tok.slice(2, -2)}</strong>)
+      out.push(<strong key={k}>{renderInlineMarkdown(tok.slice(2, -2), `${k}b`)}</strong>)
     } else if (tok.startsWith('[')) {
       const cut = tok.indexOf('](')
       const label = tok.slice(1, cut)
@@ -228,7 +251,7 @@ export function renderInlineMarkdown(text: string, keyBase = 'i'): ReactNode {
         ),
       )
     } else {
-      out.push(<em key={k}>{tok.slice(1, -1)}</em>)
+      out.push(<em key={k}>{renderInlineMarkdown(tok.slice(1, -1), `${k}e`)}</em>)
     }
     last = m.index + tok.length
   }

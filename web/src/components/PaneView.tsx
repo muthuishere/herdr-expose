@@ -106,18 +106,12 @@ export function PaneView({
           {formatBytes(droppedBytes)} of output was dropped under load, then repainted.
         </div>
       ) : null}
-      {/* Said out loud because the owner watches their own terminal while
-          someone reads it from here, and a pane that moves on its own is
-          alarming when nothing explains it. Reading is non-destructive — a
-          transcript declares no geometry and `pane.read` takes none — but the
-          pane is still live, and a live pane scrolls. The way to stop watching
-          is to stop watching, so the notice names both exits. */}
-      {!isClosed ? (
-        <div className="notice">
-          This pane is live, so Herdr may scroll it while you watch. Go back to
-          the list, or close it, to stop reading.
-        </div>
-      ) : null}
+      {/* The live-pane notice moved INTO TranscriptView, because it is only
+          true of one of the two views now. It warns that Herdr may scroll the
+          pane under you — which has nothing to do with the conversation view,
+          whose text comes from the agent's own transcript file and does not
+          move when the pane does. Only the component that knows which view is
+          showing can say it honestly. */}
       {isClosed ? (
         <div className="notice notice-dead">
           This pane has closed{closedReason ? `: ${closedReason}` : '.'}

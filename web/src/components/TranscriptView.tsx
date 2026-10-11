@@ -107,6 +107,7 @@ export function TranscriptView({ target }: { target: PaneId }) {
    * source for what is happening RIGHT NOW — the live spinner and the
    * permission prompt are not written to the transcript.
    */
+  const closed = useStore((s) => Boolean(s.runtime[target]?.closed))
   const agentID = pane?.agent?.id
   const [events, setEvents] = useState<AgentEvent[] | null>(null)
   const [showScreen, setShowScreen] = useState(false)
@@ -144,6 +145,16 @@ export function TranscriptView({ target }: { target: PaneId }) {
         >
           {showScreen ? 'Show the conversation' : "Show the pane's screen"}
         </button>
+      ) : null}
+      {/* Only true of the SCREEN view. The conversation is read from the
+          agent's own transcript, so Herdr scrolling the pane does not move it
+          — and a warning that does not apply teaches people to ignore the
+          ones that do. */}
+      {!conversation && !closed ? (
+        <div className="notice">
+          This pane is live, so Herdr may scroll it while you watch. Go back to
+          the list, or close it, to stop reading.
+        </div>
       ) : null}
       {conversation ? (
         <AgentTranscriptBody events={events} />
@@ -579,7 +590,7 @@ function PromptBox({ target }: { target: PaneId }) {
         className="tr-input"
         value={text}
         rows={1}
-        placeholder="Send a prompt to this agent…"
+        placeholder="Send a prompt…"
         aria-label="Send a prompt to this agent"
         onChange={(e) => setText(e.target.value)}
         onPaste={(e) => {
