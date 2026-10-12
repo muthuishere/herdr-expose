@@ -15,6 +15,7 @@ import { agentUrgency, type PaneId, type TreePane } from '../protocol/types'
 import { collectPanes } from '../protocol/tree'
 import { useStore } from '../store/store'
 import { AnsiBlock } from './SummaryTile'
+import { stripComposer } from '../ansi/ansiToHtml'
 import { AgentBadge } from './AgentBadge'
 import { EmptyPanes } from './EmptyPanes'
 import { useElapsed, usePaneTriage, useQuietPaneText } from '../hooks/usePaneTriage'
@@ -77,7 +78,12 @@ function Tile({ pane, onOpen }: { pane: TreePane; onOpen: (id: PaneId) => void }
           working{elapsed ? ` · ${elapsed}` : ''}
         </span>
       ) : (
-        <AnsiBlock text={quiet} maxLines={10} maxCols={110} />
+        /* The agent's own composer and status strip are cut off the bottom:
+           a tile that spends its last three lines on a rule, an empty caret
+           and "bypass permissions on (shift+tab to cycle)" has three fewer
+           lines of the thing it was opened to show. Same rule as the list
+           row's digest, same function. */
+        <AnsiBlock text={stripComposer(quiet)} maxLines={10} maxCols={110} />
       )}
     </button>
   )

@@ -11,3 +11,10 @@
 *.gif binary
 *.mp4 binary
 *.webm binary
+
+# A captured terminal screen, kept BYTE FOR BYTE. Every line of it ends with a
+# CR, and that CR is the whole subject of the test that reads it: treating a
+# trailing CR as a spinner overwrite made every line of every pane read as
+# blank. `text=auto eol=lf` above would quietly normalise the bug out of the
+# fixture and leave a test that passes while proving nothing.
+web/test/*.ansi -text

@@ -267,9 +267,19 @@ export function stripNonSgr(input: string): string {
   s = s.replace(/[\x00-\x08\x0b\x0c\x0e-\x1a\x1c-\x1f\x7f]/g, '')
   s = s.replace(/\r\n/g, '\n')
   // CR overwrite: keep the final segment of each line.
+  //
+  // A TRAILING CR is excluded, and that is the whole correctness of this.
+  // "text\r" means "print text, then put the cursor back at column 0" — what
+  // the terminal shows is `text`, because nothing came after to overwrite it.
+  // Treating it as an overwrite returns the empty string instead, and a
+  // captured screen ends EVERY line that way, so the entire buffer read as
+  // blank. Only a CR with something after it actually overwrites.
   s = s
     .split('\n')
-    .map((l) => (l.includes('\r') ? l.slice(l.lastIndexOf('\r') + 1) : l))
+    .map((l) => {
+      const t = l.replace(/\r+$/, '')
+      return t.includes('\r') ? t.slice(t.lastIndexOf('\r') + 1) : t
+    })
     .join('\n')
   return s
 }
@@ -302,9 +312,114 @@ export function ansiQuestionLine(input: string, maxChars = 160): string {
   return ''
 }
 
-/** Plain-text, single-line digest of a terminal buffer — for list rows. */
+/**
+ * The COMPOSER at the bottom of an agent's screen, and the status strip under
+ * it. Everything matched here is the TUI talking about itself.
+ *
+ * WHY THIS IS NOT core.DefaultChrome, which the server already owns and which
+ * clean.go rightly warns against writing twice. It is a DIFFERENT transform
+ * with a different correct answer, and the input line is the proof:
+ *
+ *   - For a TRANSCRIPT, a caret with text after it must SURVIVE. It is the
+ *     prompt the person just sent, and hiding it was the "I send it and it is
+ *     not displaying" bug clean.go documents at length.
+ *   - For a ONE-LINE ROW DIGEST it must GO. A row has room for one line and
+ *     that line should say what the agent last said, not echo a draft back.
+ *
+ * Same screen, opposite answers. So this is a second rule, not a second copy.
+ */
+const ROW_CHROME: RegExp[] = [
+  // The input line: caret with text after it, OR an empty caret. ASCII '>'
+  // stays out of the class -- it is a quote marker in real output.
+  /^\s*[❯›](\s|$)/u,
+  // "new task? /clear to save 116.7k tokens" — a hint, not output.
+  /\/clear to save\b/i,
+  // The context meter and the mode banner, which the server also strips.
+  /ctx\s+[\d.]+[KM]?\s+\d+%/i,
+  /\b(auto mode|bypass permissions|accept edits)\b.*\(/i,
+  /shift\+tab to cycle/i,
+  // A status toast, which is GLYPH-LED: "✔ Update installed · Restart to
+  // update", "⚠ veilpipe: 233 patterns · 2 replaced". Matched on the leading
+  // glyph rather than on its words, because every agent and every plugin
+  // invents its own sentence and they all draw the same tick.
+  //
+  // Safe HERE and nowhere else: this list is consulted only while walking the
+  // last few lines of a screen looking for one worth showing. A tick in the
+  // middle of real output is never tested against it.
+  /^[✔✓✗⚠ℹ⚑]\s/u,
+  // The running/finished timing banners.
+  /·\s*[↓v]?\s*[\d.]+k?\s*tokens/i,
+  /\bfor\s+(\d+h\s*)?(\d+m\s*)?\d+s\b.*·.*\bdone\b/i,
+]
+
+/** A horizontal rule: eight or more box-drawing/dash characters and nothing else. */
+const RULE = /^[\s─-╿_=\-—–]{8,}$/u
+
+/**
+ * How far above the bottom a closing rule may sit and still be read as the
+ * composer's frame rather than as content. The composer is always the last
+ * thing on screen; a `---` in real output is not.
+ */
+const COMPOSER_WINDOW = 6
+
+/** One line with its SGR codes removed, for testing against the patterns above. */
+function plainOf(line: string): string {
+  return stripNonSgr(line)
+    .replace(/\x1b\[[0-9;]*m/g, '')
+    .trim()
+}
+
+/**
+ * Drop the agent's composer, and the status strip under it, off the bottom of
+ * a captured screen. Everything above is left byte-for-byte alone, SGR codes
+ * included, so a caller can still render it in colour.
+ *
+ * The composer is found STRUCTURALLY rather than by vocabulary: a TUI boxes its
+ * input between horizontal rules, so the last rule near the bottom is the one
+ * that closes the box and nothing from there down is output. That holds for any
+ * agent that draws a box, not only the ones whose banner text we happen to
+ * know; ROW_CHROME is just the mop-up for what sits above the rule.
+ *
+ * Both the list row and the desktop tile call this, so "where does this screen
+ * stop being output" has one answer and not two.
+ */
+export function stripComposer(input: string): string {
+  const raw = input.split('\n')
+  // Only when the closing rule is genuinely at the bottom: a markdown `---` in
+  // the middle of real output is content, and must not take the rest of the
+  // screen with it.
+  let end = raw.length
+  for (let i = raw.length - 1; i >= 0 && raw.length - i <= COMPOSER_WINDOW; i--) {
+    if (RULE.test(plainOf(raw[i]))) {
+      end = i
+      break
+    }
+  }
+  // Then the furniture above it — the opening rule of the same box included,
+  // because cutting at the closing one leaves the opening one as the new last
+  // line, and a tile that ends in 119 dashes is no better than one that ends
+  // in the keyboard hint.
+  while (end > 0) {
+    const t = plainOf(raw[end - 1])
+    if (t === '' || RULE.test(t) || ROW_CHROME.some((re) => re.test(t))) {
+      end--
+      continue
+    }
+    break
+  }
+  return raw.slice(0, end).join('\n')
+}
+
+/**
+ * Plain-text, single-line digest of a terminal buffer — for list rows.
+ *
+ * It used to take the literal last non-blank line, which on every Claude pane
+ * on this machine was `⏵⏵ bypass permissions on (shift+tab to cycle)`. Thirty
+ * rows said the same sentence about the keyboard and not one said what its
+ * agent was doing.
+ */
 export function ansiSummaryLine(input: string, maxChars = 120): string {
-  const lines = plainLines(input)
+  const lines = plainLines(stripComposer(input))
   const last = lines[lines.length - 1] ?? ''
   const trimmed = last.trim()
   return trimmed.length > maxChars ? trimmed.slice(0, maxChars - 1) + '…' : trimmed

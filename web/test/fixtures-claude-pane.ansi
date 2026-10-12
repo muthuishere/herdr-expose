@@ -1,0 +1,12 @@
+  [0m[1mBackground:[0m the migration ran clean on the staging copy.
+
+[0m[38;2;153;153;153m⏺ cache: config reloaded (3 hooks: start, run, end)[0m
+  [0m[38;2;153;153;153mtool.call, turn.complete, session.end)[0m
+                                        new task? /clear to save 116.7k tokens
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ [0m[2mrun the deploy[0m
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  [0m[38;2;255;193;7m⚠ someplugin: 233 patterns · 2 replaced[0m
+  [0m[38;2;153;153;153m✔ Update installed · Restart to update[0m
+  [0m[38;2;153;153;153mmy-project  ctx 114K 11%[0m
+  [0m[38;2;255;107;128m⏵⏵ bypass permissions on[0m[38;2;153;153;153m (shift+tab to cycle) · ← 1 agent[0m
